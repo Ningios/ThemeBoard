@@ -2327,15 +2327,56 @@ static void TBApplyClockImagesToSet(id set) {
     }
 }
 
+/// 指定尺寸的透明图
+static UIImage *TBTransparentImage(CGSize size) {
+    if (size.width < 1 || size.height < 1) size = CGSizeMake(1, 1);
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = 1;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {}];
+}
+
+/// 把图像集里的指针成员换成透明图（尺寸不变，布局不变）→ 系统没针可画
+static void TBClearClockHandsInSet(id set) {
+    if (!set) return;
+    NSArray *keys = @[@"hours", @"minutes", @"seconds", @"hourMinuteDot", @"secondDot"];
+    NSInteger n = 0;
+    for (NSString *k in keys) {
+        @try {
+            SEL getter = NSSelectorFromString(k);
+            if (![set respondsToSelector:getter]) continue;
+            UIImage *orig = ((id (*)(id, SEL))objc_msgSend)(set, getter);
+            CGSize sz = [orig isKindOfClass:[UIImage class]] ? orig.size : CGSizeMake(1, 1);
+            UIImage *blank = TBTransparentImage(sz);
+            NSString *sn = [NSString stringWithFormat:@"set%@%@:",
+                            [[k substringToIndex:1] uppercaseString], [k substringFromIndex:1]];
+            SEL setter = NSSelectorFromString(sn);
+            if ([set respondsToSelector:setter]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(set, setter, blank);
+                n++;
+            }
+        } @catch (NSException *e) { }
+    }
+    if (n) TBLogOnce(@"clockclear|set", @"时钟图像集：%ld 项置透明（= 不画指针）", (long)n);
+}
+
 static id tb_makeImageSet(id self, SEL _cmd, void *metrics) {
     id set = o_makeImageSet ? o_makeImageSet(self, _cmd, metrics) : nil;
-    TBApplyClockImagesToSet(set);
+    if (TBClockShouldHideHands()) {
+        TBClearClockHandsInSet(set);          // 判定隐藏 → 全部置透明，没针可画
+    } else {
+        // 否则：主题有时针/分针素材就用主题的（缩放到系统同尺寸），
+        // 主题基本都没有秒针素材，秒针保持系统自己的
+        TBApplyClockImagesToSet(set);
+    }
     return set;
 }
 
 static id tb_imageSet(id self, SEL _cmd, void *metrics) {
     id set = o_imageSet ? o_imageSet(self, _cmd, metrics) : nil;
-    TBApplyClockImagesToSet(set);
+    if (TBClockShouldHideHands()) TBClearClockHandsInSet(set);
+    else TBApplyClockImagesToSet(set);
     return set;
 }
 
@@ -2422,6 +2463,27 @@ static BOOL gDoneClock = NO;
 // ---- 时钟表盘：SBHClockApplicationIconImageView 把整块表盘合成进自己的 contents，
 //      没有子视图，所以「重画」不会让它重新取图。SnowBoard 的做法是 hook
 //      SBLiveIconImageView -contentsImage / -squareContentsImage，直接返回主题表盘。
+// ---- 指针颜色 / 秒针显隐：系统自己的接口（SnowBoard 用的就是这三个）----
+typedef UIColor *(*HandColorFn)(id, SEL);
+typedef BOOL (*HandBoolFn)(id, SEL);
+static HandColorFn o_hmHandColor, o_secHandColor;
+static HandBoolFn o_hidesSeconds;
+
+static UIColor *tb_hmHandColor(id self, SEL _cmd) {
+    if (TBClockShouldHideHands()) return [UIColor clearColor];
+    return o_hmHandColor ? o_hmHandColor(self, _cmd) : nil;
+}
+
+static UIColor *tb_secHandColor(id self, SEL _cmd) {
+    if (TBClockShouldHideHands()) return [UIColor clearColor];
+    return o_secHandColor ? o_secHandColor(self, _cmd) : nil;
+}
+
+static BOOL tb_hidesSeconds(id self, SEL _cmd) {
+    if (TBClockShouldHideHands()) return YES;
+    return o_hidesSeconds ? o_hidesSeconds(self, _cmd) : NO;
+}
+
 typedef id (*ContentsImgFn)(id, SEL);
 static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
 static BOOL sInClockContents = NO;   // 防自调用（hook 装错层会无限递归）
@@ -2617,6 +2679,28 @@ static void TBInstall(void) {
         // 指针一律用系统自己的（黑时针 + 黑分针 + 橙秒针），不注入主题指针。
         // 表盘：hook contentsImage，始终返回当前主题的表盘（换主题后自然就是新表盘）
         TBInstallClockContentsHooks();
+        // 指针显隐（系统接口，SnowBoard 同款）：颜色置透明 + 隐藏秒针
+        if (TBHasMethod(clockView, @"hoursMinutesHandColor")) {
+            o_hmHandColor = (HandColorFn)TBHookClass(clockView, @"hoursMinutesHandColor",
+                                                    (IMP)tb_hmHandColor, "时钟时分手颜色");
+        } else TBLog(@"· 时钟：没有 hoursMinutesHandColor");
+        if (TBHasMethod(clockView, @"secondsHandColor")) {
+            o_secHandColor = (HandColorFn)TBHookClass(clockView, @"secondsHandColor",
+                                                     (IMP)tb_secHandColor, "时钟秒针颜色");
+        } else TBLog(@"· 时钟：没有 secondsHandColor");
+        if (TBHasMethod(clockView, @"hidesSecondsHand")) {
+            o_hidesSeconds = (HandBoolFn)TBHookClass(clockView, @"hidesSecondsHand",
+                                                    (IMP)tb_hidesSeconds, "时钟隐藏秒针");
+        } else TBLog(@"· 时钟：没有 hidesSecondsHand");
+        // 图像集：隐藏时把指针成员置透明
+        if (TBHasMethod(clockView, @"makeImageSetForMetrics:")) {
+            o_makeImageSet = (ClockImageSetFn)TBHookClass(clockView, @"makeImageSetForMetrics:",
+                                                         (IMP)tb_makeImageSet, "时钟图像集");
+        }
+        if (TBHasMethod(clockView, @"imageSetForMetrics:")) {
+            o_imageSet = (ClockImageSetFn)TBHookClass(clockView, @"imageSetForMetrics:",
+                                                      (IMP)tb_imageSet, "时钟图像集2");
+        }
         TBStartClockHandsKeeper();
         // 指针：主题只给静态图标时隐藏系统指针
         {
