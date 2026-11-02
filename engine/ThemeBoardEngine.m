@@ -730,6 +730,8 @@ static UIImage *TBMaskWithSystemShape(UIImage *art);
 typedef id (*ContentsImgFn)(id, SEL);
 static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
 
+static __weak UIView *gClockViewForFaceSync;   // 最近的时钟视图（针集重建时同步写表盘）
+
 static UIImage *TBIconRoundedImage(UIImage *img) {
     if (!img) return img;
     // 一律用【系统自己的遮罩形状】（learned template）；还没学到就先不遮，
@@ -1219,6 +1221,7 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
     // 只在【这一个时钟视图】上做，对整棵视图树调用会崩。
     if ([vcls rangeOfString:@"Clock"].location != NSNotFound) {
         @try {
+            gClockViewForFaceSync = v;
             TBLogOnce([@"clockrefresh|" stringByAppendingString:vcls], @"时钟视图重画 %@", vcls);
             NSMutableString *st = [NSMutableString string];
             SEL iconSel = NSSelectorFromString(@"icon");
@@ -2258,6 +2261,20 @@ static void TBApplyClockImagesToSet(id set) {
             ((void (*)(id, SEL, id))objc_msgSend)(set, setter, img);
             applied++;
         } @catch (NSException *e) { }
+    }
+    // 系统每次重建针集时都会先按自己的方式渲染一遍表盘 → 表现为"偶尔闪成系统时钟"。
+    // 这里同步把当前主题的表盘再写一次，和系统保持同一步调。
+    {
+        UIView *cv = gClockViewForFaceSync;
+        if (cv) {
+            UIImage *face = TBClockMaterialFace(cv);
+            if (face && face.CGImage) {
+                cv.layer.contents = (__bridge id)face.CGImage;
+                @try { [cv setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
+                cv.layer.contentsGravity = kCAGravityResize;
+                [cv setNeedsDisplay];
+            }
+        }
     }
     if (applied > 0 || restored > 0) {
         TBLog(@"时钟图像集：注入 %ld 项，还原系统 %ld 项", (long)applied, (long)restored);
