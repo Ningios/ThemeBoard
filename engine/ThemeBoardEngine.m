@@ -2072,7 +2072,7 @@ static BOOL gDoneClock = NO;
 //      SBLiveIconImageView -contentsImage / -squareContentsImage，直接返回主题表盘。
 typedef id (*ContentsImgFn)(id, SEL);
 static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
-static __thread BOOL sInClockContents = NO;   // 防自调用（hook 装错层会无限递归）
+static BOOL sInClockContents = NO;   // 防自调用（hook 装错层会无限递归）
 
 static BOOL TBIsClockView(id v) {
     NSString *cls = NSStringFromClass([v class]);
