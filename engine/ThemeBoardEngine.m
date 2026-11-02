@@ -506,10 +506,10 @@ static UIImage *TBResourceImage(NSString *name) {
     NSString *path = res[key];
     if ([key hasPrefix:@"clockicon"]) {
         // 诊断：这根针到底来自哪里、原始画布多大（对照 SB 会不会用它）
-        TBLogOnce([@"clocksrc|" stringByAppendingString:key],
-                  @"时钟素材来源 %@ → %@",
-                  key, path ? [NSString stringWithFormat:@"%@",
-                               [path stringByReplacingOccurrencesOfString:dir ?: @"" withString:@""]] : @"(无)");
+        TBLogOnce([@"clocksrc|" stringByAppendingString:(TBActiveTheme() ?: @"")],
+                  @"时钟素材来源[%@] %@ → %@",
+                  TBActiveTheme() ?: @"?", key,
+                  path ? [path stringByReplacingOccurrencesOfString:dir ?: @"" withString:@""] : @"(无)");
     }
     if (!path) {
         NSString *base = [key stringByDeletingPathExtension];
@@ -1278,6 +1278,17 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                 }
             }
             TBLog(@"时钟刷新：%@", st);
+            // 确定性刷新：直接把当前主题的表盘写进这个视图（系统缓存不会自己重算，
+            // 这就是"表盘要注销才更新"的原因）。写到 layer.contents 与 _mappedContentsImage，
+            // 保证下次系统重绘也用我们的新表盘。
+            {
+                UIImage *face = TBClockMaterialFace((UIView *)v);
+                if (face && face.CGImage) {
+                    ((UIView *)v).layer.contents = (__bridge id)face.CGImage;
+                    @try { [v setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
+                    TBLog(@"时钟表盘：已强制写入 %.0fx%.0f", face.size.width, face.size.height);
+                }
+            }
         } @catch (NSException *e) { }
     }
     BOOL special = ([vcls rangeOfString:@"Folder"].location != NSNotFound) ||
@@ -2118,7 +2129,7 @@ static void TBApplyClockImagesToSet(id set) {
         }
 
         CGSize target = orig ? orig.size : CGSizeZero;
-        TBLogOnce([@"clocksize|" stringByAppendingString:map[i].key],
+        TBLogOnce([@"clocksize|" stringByAppendingFormat:@"%@|%@", map[i].key, TBActiveTheme() ?: @""],
                   @"时钟素材尺寸 %@：主题原图 %.0fx%.0f pt scale=%.0f → 目标 %.0fx%.0f pt",
                   map[i].key, img.size.width, img.size.height, img.scale,
                   target.width, target.height);
