@@ -756,10 +756,23 @@ typedef void (*TBInfoSetFn)(id, SEL, TBClockInfo);
 
 static UIImage *TBIconRoundedImage(UIImage *img) {
     if (!img) return img;
-    // 一律用【系统自己的遮罩形状】（learned template）；还没学到就先不遮，
-    // 绝不使用我们自己画的形状（那条路径的调用方随后会补上系统遮罩）。
+    // SnowBoard 在把素材交给系统前会做 roundedRectImageFromImage:withRadius:withCrop:YES
+    // （圆角裁剪）。这里等价实现：优先用【系统自己的遮罩形状】，学不到时按系统图标
+    // 圆角比例（22.37%）兜底。
     if (gSystemMaskTemplate) return TBMaskWithSystemShape(img);
-    return img;
+    CGSize pt = img.size;
+    if (pt.width < 16 || pt.height < 16) return img;
+    CGFloat r = MIN(pt.width, pt.height) * 0.2237;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = img.scale;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *rd = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
+    return [rd imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, pt.width, pt.height)
+                                                    cornerRadius:r];
+        [p addClip];
+        [img drawInRect:CGRectMake(0, 0, pt.width, pt.height)];
+    }];
 }
 
 static UIImage *gSystemClockFace;   // 系统自己的时钟表盘（主题取消后还原用）
@@ -870,8 +883,10 @@ static UIImage *TBImageForBundle(NSString *bid) {
             static int logged = 0;
             if (logged < 20) { logged++; TBLog(@"dynamic %@", bid); }
             img = TBDynamicIcon(img, bid);
+        img = TBIconRoundedImage(img);
         }
-        // 不在这里遮罩：素材由 SBIcon 那层交给系统，遮罩由系统自己做（SnowBoard 做法）
+        // 按系统遮罩形状裁一刀（= SnowBoard 的 roundedRectImage:withCrop:YES 那一步）
+        img = TBIconRoundedImage(img);          // 交给系统前按系统形状裁（SB 同款）
         if (!dynamic) [gImageCache setObject:img forKey:bid];
     }
     return img;
@@ -988,9 +1003,12 @@ typedef id (*FnISGenerateImage)(id, SEL);
 static FnISGenerateImage o_isGenerateImage;
 
 static id tb_imageForIcon(id self, SEL _cmd, id icon) {
-    // 直通：图像的"成品"由系统自己合成（素材由 SBIcon 那层给），我们不再在这里返回成品图
+    // 直通：图像的"成品"由系统自己合成（素材由 SBIcon 那层给），我们不再在这里返回成品图。
+    // 顺手从系统那张已遮罩图里学一次"系统遮罩形状"，供我们裁剪素材时使用。
     TBRemember(self);
-    return o_imageForIcon ? o_imageForIcon(self, _cmd, icon) : nil;
+    id r = o_imageForIcon ? o_imageForIcon(self, _cmd, icon) : nil;
+    if (!gSystemMaskTemplate && [r isKindOfClass:[UIImage class]]) TBLearnSystemMask(r);
+    return r;
 }
 
 static id tb_imageForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
