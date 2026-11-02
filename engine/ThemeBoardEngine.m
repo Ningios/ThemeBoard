@@ -435,7 +435,8 @@ static UIImage *TBCalendarCompositeImage(UIImage *bg) {
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     df.locale = [NSLocale currentLocale];
     // 星期：短格式（周三 / Wed）
-    NSArray *weekdaySymbols = df.shortWeekdaySymbols;
+    // 用完整的「星期X」而不是缩写（周一）
+    NSArray *weekdaySymbols = df.weekdaySymbols;
     NSString *weekText = @"";
     NSInteger wd = comp.weekday - 1;
     if (wd >= 0 && wd < (NSInteger)weekdaySymbols.count) weekText = weekdaySymbols[wd];
@@ -449,7 +450,7 @@ static UIImage *TBCalendarCompositeImage(UIImage *bg) {
         [bg drawInRect:CGRectMake(0, 0, w, w)];
 
         // 星期（红），字号 = 宽 × 0.1667
-        UIFont *weekFont = [UIFont systemFontOfSize:w * 0.166667 weight:UIFontWeightSemibold];
+        UIFont *weekFont = [UIFont systemFontOfSize:w * 0.190000 weight:UIFontWeightSemibold];
         UIColor *red = [UIColor colorWithRed:1.0 green:0.23137 blue:0.18824 alpha:1.0];
         NSMutableParagraphStyle *center = [[NSMutableParagraphStyle alloc] init];
         center.alignment = NSTextAlignmentCenter;
@@ -873,9 +874,25 @@ static BOOL TBApplyThemeToIconView(id self) {
 static NSInteger TBHealViewTree(UIView *v, NSInteger depth) {
     if (!v || depth > 12) return 0;
     NSInteger fixed = 0;
-    // 时钟视图：让系统用新底图重画指针（SnowBoard 也是这么做的）
+    // SnowBoard 的刷新流程：先丢掉视图自己缓存的图，再让系统重新合成。
+    // 缺了「丢缓存」这一步，换回系统主题时时钟底图/指针会赖着不走。
+    if ([v respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
+        @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"clearCachedImages")); }
+        @catch (NSException *e) { }
+    } else if ([v respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
+        @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_clearCachedImages")); }
+        @catch (NSException *e) { }
+    }
     if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
         @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages")); }
+        @catch (NSException *e) { }
+    }
+    if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
+        @try { ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO); }
+        @catch (NSException *e) { }
+    }
+    if ([v respondsToSelector:NSSelectorFromString(@"_updateOverlayImage")]) {
+        @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_updateOverlayImage")); }
         @catch (NSException *e) { }
     }
     if ([v respondsToSelector:NSSelectorFromString(@"icon")] ||
@@ -2019,8 +2036,10 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
         NSArray *icons = TBAllIcons();
         NSArray *cacheList = caches;
 
-        if (allowPurge) {
-            if (icons.count == 0) {
+        // 说明：换主题/还原系统时必须真的清掉图标缓存，否则系统会继续用旧图
+        //（时钟底图赖着不走就是这个原因）。开关只用来限制「全量清」的规模，
+        // 不再一票否决；这里始终按上限分批清。
+        if (icons.count == 0) {
                 for (NSValue *v in cacheList) { TBPurgeIcons(v, nil); }
                 TBLog(@"清缓存（无图标列表）");
             } else {
@@ -2036,7 +2055,6 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
                     usleep(20000);   // 每批之间让出 20ms，避免主线程长时间被占用
                 }
                 TBLog(@"已分批清理 %lu 个图标的缓存（%ld 批）", (unsigned long)icons.count, (long)round);
-            }
         }
 
         // 通知是 O(图标数 × 缓存数)，主题可能覆盖上千个图标；
