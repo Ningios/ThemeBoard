@@ -365,15 +365,32 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 #pragma mark - 删除
 
 - (void)tableView:(UITableView *)tableView willBeginEditingRowAtIndexPath:(NSIndexPath *)indexPath {
-    // 只在这一次滑动的那一行里做样式，绝不碰表格其它部分
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-        UIView *root = cell ? (cell.superview ?: cell) : tableView;
-        if (!root) return;
-        UIView *pull = [self findSwipePullView:root depth:0];
-        if (pull) [self styleSwipePullView:pull];
-    });
+    // 只给这一次滑动的那一行做样式，绝不碰表格其它部分。
+    // 之前只试一次 0.05s：滑动容器有时是稍后才建好 / 建好又被系统重建，
+    // 那一次没抓到就回落成系统默认灰底 → 表现就是「有时候变灰」。
+    // 改成多次重试 + 全窗口扫描（不再依赖 cellForRowAtIndexPath 拿得到 cell）。
+    for (NSNumber *d in @[@0.02, @0.08, @0.18, @0.32, @0.55, @0.85]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [self styleEverySwipePullView];
+        });
+    }
+}
+
+/// 扫描所有窗口，给每一个滑动容器套样式
+- (void)styleEverySwipePullView {
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        [self stylePullViewsIn:w depth:0];
+    }
+}
+
+- (void)stylePullViewsIn:(UIView *)root depth:(NSInteger)depth {
+    if (!root || depth > 6) return;
+    if ([NSStringFromClass(root.class) containsString:@"UISwipeActionPullView"]) {
+        [self styleSwipePullView:root];
+        return;
+    }
+    for (UIView *v in root.subviews) [self stylePullViewsIn:v depth:depth + 1];
 }
 
 - (UIView *)findSwipePullView:(UIView *)root depth:(NSInteger)depth {
@@ -441,6 +458,10 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         }]];
         [self presentViewController:ac animated:YES completion:nil];
     }];
+    // 兜底：直接给 action 上底色。系统默认会画成灰底，一旦滑动容器没及时被套上
+    // 样式就会露灰；这里设成同一套玻璃色，最差情况也不会是灰的。
+    del.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                         [UIColor colorWithWhite:1 alpha:0.14]);
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 
