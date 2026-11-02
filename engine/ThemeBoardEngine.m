@@ -754,45 +754,23 @@ typedef struct { double w, h, scale, ratio; } TBClockInfo;   // SBIconImageInfo 
 typedef TBClockInfo (*TBInfoGetFn)(id, SEL);
 typedef void (*TBInfoSetFn)(id, SEL, TBClockInfo);
 
-static BOOL TBIconArtAlreadyRounded(UIImage *img) {
-    if (!img || !img.CGImage) return NO;
-    const size_t W = 16, H = 16;
-    unsigned char *buf = calloc(W * H * 4, 1);
-    if (!buf) return NO;
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs, kCGImageAlphaPremultipliedLast);
-    CGColorSpaceRelease(cs);
-    if (!ctx) { free(buf); return NO; }
-    UIGraphicsPushContext(ctx);
-    [img drawInRect:CGRectMake(0, 0, W, H)];
-    UIGraphicsPopContext();
-    CGContextRelease(ctx);
-    // 四个角都是透明 → 素材自己已经做过圆角
-    unsigned char *c[4] = { buf, buf + (W - 1) * 4,
-                            buf + (H - 1) * W * 4, buf + ((H - 1) * W + W - 1) * 4 };
-    BOOL rounded = YES;
-    for (int k = 0; k < 4; k++) if (c[k][3] > 24) { rounded = NO; break; }
-    free(buf);
-    return rounded;
-}
 
+// 完全照 SnowBoard：roundedRectImageFromImage:withRadius:withCrop:YES
+//   radius = (CustomCornerRadius / 60.0) * 图片宽度；上限 = 宽度的一半
+//   SB 的 CustomCornerRadius 默认值 = 60 × 22.37% ≈ 13.42
 static UIImage *TBIconRoundedImage(UIImage *img) {
     if (!img) return img;
-    if (TBIconArtAlreadyRounded(img)) return img;   // 已经是圆角素材，不再裁（否则会"裁多了"）
-    // SnowBoard 在把素材交给系统前会做 roundedRectImageFromImage:withRadius:withCrop:YES
-    // （圆角裁剪）。这里等价实现：优先用【系统自己的遮罩形状】，学不到时按系统图标
-    // 圆角比例（22.37%）兜底。
-    if (gSystemMaskTemplate) return TBMaskWithSystemShape(img);
     CGSize pt = img.size;
     if (pt.width < 16 || pt.height < 16) return img;
-    CGFloat r = MIN(pt.width, pt.height) * 0.2237;
+    CGFloat radius = (13.42 / 60.0) * pt.width;
+    if (radius > pt.width * 0.5) radius = pt.width * 0.5;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
     fmt.scale = img.scale;
     fmt.opaque = NO;
     UIGraphicsImageRenderer *rd = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
     return [rd imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
         UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, pt.width, pt.height)
-                                                    cornerRadius:r];
+                                                    cornerRadius:radius];
         [p addClip];
         [img drawInRect:CGRectMake(0, 0, pt.width, pt.height)];
     }];
