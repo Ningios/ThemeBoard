@@ -1274,7 +1274,12 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             {
                 UIImage *face = TBClockMaterialFaceCached((UIView *)v);
                 if (face && face.CGImage) {
-                    // 有素材 → 强制写入主题表盘
+                    // 有素材 → 写主题表盘，并把指针层恢复显示
+                    //（无素材那一步会把指针层隐藏，不恢复的话切回来就"只有表盘没有指针"）
+                    for (CALayer *l in ((UIView *)v).layer.sublayers) {
+                        l.hidden = NO;
+                        l.opacity = 1.0f;
+                    }
                     ((UIView *)v).layer.contents = (__bridge id)face.CGImage;
                     @try { [v setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
                     ((UIView *)v).layer.contentsGravity = kCAGravityResize;
