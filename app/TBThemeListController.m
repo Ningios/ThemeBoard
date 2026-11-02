@@ -1,3 +1,4 @@
+#import <objc/runtime.h>
 #import "TBThemeListController.h"
 #import "TBThemeDetailController.h"
 #import "TBThemeScanner.h"
@@ -38,6 +39,8 @@ static UIView *TBFindSwipePullView(UIView *root, NSInteger depth) {
     }
     return nil;
 }
+
+static void TBPaintRedLabels(UIView *v, NSInteger depth);
 
 static void TBStyleSwipePullView(UIView *pull) {
     CGFloat scale = [UIScreen mainScreen].scale;
