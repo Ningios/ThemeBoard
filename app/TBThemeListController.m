@@ -162,7 +162,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 - (void)buildToolbar {
     CGFloat w = MAX(320.0, self.tableView.bounds.size.width);
-    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 52)];
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 60)];
     head.backgroundColor = [UIColor clearColor];
     head.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
@@ -172,25 +172,31 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     [NSLayoutConstraint activateConstraints:@[
         [bar.leadingAnchor constraintEqualToAnchor:head.leadingAnchor constant:20],
         [bar.trailingAnchor constraintEqualToAnchor:head.trailingAnchor constant:-20],
-        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:6],
-        [bar.heightAnchor constraintEqualToConstant:38],
+        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:8],
+        [bar.heightAnchor constraintEqualToConstant:44],
     ]];
 
-    // 顺序：扫描 / 导入 / 清除；导入最大，扫描略小，清除与导入等大
-    UIButton *scan = TBGlassButton(@"重新扫描", NO);
-    UIButton *imp  = TBGlassButton(@"导入主题", NO);
-    UIButton *clr  = TBGlassButton(@"清除主题", YES);
+    // 与主题详情页的按钮同款：圆角 13、高 44、16 号半粗、白色玻璃底 + 细边
+    NSArray *titles = @[@"重新扫描", @"导入主题", @"清除主题"];
+    NSMutableArray *all = [NSMutableArray array];
+    for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+        b.translatesAutoresizingMaskIntoConstraints = NO;
+        [b setTitle:titles[i] forState:UIControlStateNormal];
+        b.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+        [b setTitleColor:(i == 2 ? [UIColor systemRedColor] : [UIColor labelColor])
+                forState:UIControlStateNormal];
+        b.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                           [UIColor colorWithWhite:1 alpha:0.14]);
+        b.layer.cornerRadius = 13;
+        b.layer.cornerCurve = kCACornerCurveContinuous;
+        TBApplyRim(b, 0.55);
+        b.tag = i;
+        [all addObject:b];
+    }
+    UIButton *scan = all[0], *imp = all[1], *clr = all[2];
 
-    scan.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
-    imp.titleLabel.font  = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
-    clr.titleLabel.font  = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    // 导入是主功能，底色更实一点
-    imp.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.88],
-                                        [UIColor colorWithWhite:1 alpha:0.22]);
-
-    NSArray *all = @[scan, imp, clr];
     for (UIButton *b in all) [bar addSubview:b];
-    scan.tag = 0; imp.tag = 1; clr.tag = 2;
     for (UIButton *b in all) {
         [b addTarget:self action:@selector(toolbarTapped:) forControlEvents:UIControlEventTouchUpInside];
     }
