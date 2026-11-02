@@ -726,34 +726,22 @@ static BOOL TBClockShouldHideHands(void) {
     id hv = TBPref(@"HideClockHands");
     if (hv) return [hv boolValue];
 
-    // 按主题缓存一次结论（这个判断每分钟左右都会问到）
-    static NSString *cachedTheme = nil;
-    static BOOL cachedHide = NO;
-    [gLock lock];
-    BOOL same = [cachedTheme isEqualToString:theme];
-    [gLock unlock];
-    if (same) return cachedHide;
-
+    // 规则（按素材来源判断，不再靠图片内容去猜）：
+    //  · 主题 Bundles 里有表盘素材 ClockIconBackgroundSquare.png → 用素材 + 系统指针
+    //  · 只有 IconBundles/com.apple.mobiletimer.png（普通静态图标，一般自带静态指针）
+    //    → 隐藏系统指针
     BOOL hide = NO;
     if (!TBThemeHasClockMaterial()) {
-        // 主题只有 IconBundles 静态图标 → 图标自己画了针，隐藏系统指针
         [gLock lock];
         TBLoadIndex();
         BOOL hasStatic = gIndex[@"com.apple.mobiletimer"] != nil;
         [gLock unlock];
         hide = hasStatic;
-    } else {
-        // 有表盘素材，但素材本身已经把指针画进去了 → 也隐藏，否则重影
-        UIImage *face = TBResourceImage(@"ClockIconBackgroundSquare");
-        hide = TBImageCenterHasInk(face);
     }
-    [gLock lock];
-    cachedTheme = [theme copy];
-    cachedHide = hide;
-    [gLock unlock];
-    TBLogOnce([@"clockhands|" stringByAppendingString:theme],
-              @"时钟指针判定：%@（中心有针/只有静态图标）",
-              hide ? @"隐藏" : @"用系统指针");
+    TBLogOnce([@"clockhands|" stringByAppendingFormat:@"%@|%d", theme, (int)hide],
+              @"时钟指针判定：%@（素材来自 %@）",
+              hide ? @"隐藏" : @"用系统指针",
+              TBThemeHasClockMaterial() ? @"Bundles" : @"IconBundles");
     return hide;
 }
 
