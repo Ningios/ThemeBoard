@@ -921,35 +921,38 @@ static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
 static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *iconsOut) {
     if (!v || depth > 12) return 0;
     NSInteger fixed = 0;
-    // SnowBoard 的刷新流程（丢缓存 → 重新取图）。注意范围必须严格限制在
-    // 「承载图标图片的视图」上：对任意视图乱调这些私有方法会直接搞崩 SpringBoard
-    //（0.13.45 就是这么注销的）。
-    NSString *cls = NSStringFromClass([v class]);
-    BOOL isIconImage = ([cls rangeOfString:@"IconImageView"].location != NSNotFound) ||
-                       ([cls rangeOfString:@"Clock"].location != NSNotFound);
-    if (isIconImage) {
-        if ([v respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
-            @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"clearCachedImages")); }
-            @catch (NSException *e) { }
-        } else if ([v respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
-            @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_clearCachedImages")); }
-            @catch (NSException *e) { }
+    // SnowBoard 的刷新流程（丢缓存 → 重新取图）必须作用在「图标图片视图」上。
+    // 之前误对着时钟图标视图 / 文件夹图标视图调用，换主题时会把 SpringBoard 搞崩。
+    @try {
+        SEL ivSel = NSSelectorFromString(@"_iconImageView");
+        if ([v respondsToSelector:ivSel]) {
+            id iv = ((id (*)(id, SEL))objc_msgSend)(v, ivSel);
+            if (iv) {
+                if ([iv respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
+                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"clearCachedImages"));
+                } else if ([iv respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
+                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"_clearCachedImages"));
+                }
+                if ([iv respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
+                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"updateClockImages"));
+                }
+                if ([iv respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
+                    ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, NSSelectorFromString(@"updateImageAnimated:"), NO);
+                }
+                if ([iv respondsToSelector:NSSelectorFromString(@"_updateOverlayImage")]) {
+                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"_updateOverlayImage"));
+                }
+            }
         }
-        if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
-            @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages")); }
-            @catch (NSException *e) { }
-        }
-        if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
-            @try { ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO); }
-            @catch (NSException *e) { }
-        }
-        if ([v respondsToSelector:NSSelectorFromString(@"_updateOverlayImage")]) {
-            @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_updateOverlayImage")); }
-            @catch (NSException *e) { }
-        }
-    }
-    if ([v respondsToSelector:NSSelectorFromString(@"icon")] ||
-        [v respondsToSelector:NSSelectorFromString(@"_iconImageView")]) {
+    } @catch (NSException *e) { }
+
+    NSString *vcls = NSStringFromClass([v class]);
+    BOOL special = ([vcls rangeOfString:@"Folder"].location != NSNotFound) ||
+                   ([vcls rangeOfString:@"Clock"].location != NSNotFound) ||
+                   ([vcls rangeOfString:@"Library"].location != NSNotFound);
+    if (!special &&
+        ([v respondsToSelector:NSSelectorFromString(@"icon")] ||
+         [v respondsToSelector:NSSelectorFromString(@"_iconImageView")])) {
         if (TBApplyThemeToIconView(v)) fixed++;
         if (iconsOut && iconsOut.count < 250) {
             @try {
