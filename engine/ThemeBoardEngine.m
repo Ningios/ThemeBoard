@@ -752,6 +752,10 @@ static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
 
 static __weak UIView *gClockViewForFaceSync;   // 最近的时钟视图（针集重建时同步写表盘）
 
+typedef struct { double w, h, scale, ratio; } TBClockInfo;   // SBIconImageInfo 的等价布局
+typedef TBClockInfo (*TBInfoGetFn)(id, SEL);
+typedef void (*TBInfoSetFn)(id, SEL, TBClockInfo);
+
 static UIImage *TBIconRoundedImage(UIImage *img) {
     if (!img) return img;
     // 一律用【系统自己的遮罩形状】（learned template）；还没学到就先不遮，
@@ -1310,8 +1314,25 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                     // 直接调原实现返回系统自己的表盘，不写、不清、不碰图层。
                     //（我自创的"写回系统图 / 清空 / 隐藏或移除指针层"都试过了，只会弄出
                     //  两套针、空白、或残留 —— 全部撤掉。）
+                    // 触发系统重算它自己的组件：把当前 iconImageInfo 原值再设一遍
+                    //（这是系统自己更新图标时走的路径）。不写、不清、不碰图层。
+                    // 不做这一步的话，系统会一直拿它缓存里的旧表盘 → 表现为"恢复默认仍有主题残留"。
+                    SEL gSel = NSSelectorFromString(@"iconImageInfo");
+                    SEL sSel = NSSelectorFromString(@"setIconImageInfo:");
+                    BOOL forced = NO;
+                    if ([v respondsToSelector:gSel] && [v respondsToSelector:sSel]) {
+                        @try {
+                            TBClockInfo info = ((TBInfoGetFn)objc_msgSend)(v, gSel);
+                            ((TBInfoSetFn)objc_msgSend)(v, sSel, info);
+                            forced = YES;
+                        } @catch (NSException *e) { }
+                    }
+                    if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
+                        ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
+                    }
                     TBLogOnce([@"clockface|sys|" stringByAppendingString:(TBActiveTheme() ?: @"")],
-                              @"时钟表盘：主题无素材 → 交回系统（不写不碰）");
+                              @"时钟表盘：主题无素材 → 交回系统并触发重算（iconImageInfo %@）",
+                              forced ? @"已重设" : @"不可用");
                 }
             }
         } @catch (NSException *e) { }
@@ -2043,7 +2064,6 @@ static NSString *tb_pathForResDir(id self, SEL _cmd, NSString *name, NSString *e
 
 #pragma mark - 桌面时钟（SBHClockApplicationIconImageView 自己合成表盘+指针，绕过图片缓存）
 
-typedef struct { double w, h, scale, ratio; } TBClockInfo;      // SBIconImageInfo 的等价布局
 typedef id (*ClockIconImageFn)(id, SEL, TBClockInfo, BOOL);
 static ClockIconImageFn o_clockIconImage;
 
