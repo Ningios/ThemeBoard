@@ -2171,6 +2171,20 @@ static void TBApplyClockImagesToSet(id set) {
         SEL setter0 = NSSelectorFromString([NSString stringWithFormat:@"set%@%@:",
                                            [[map[i].key substringToIndex:1] uppercaseString],
                                            [map[i].key substringFromIndex:1]]);
+        // 秒针（含秒针上的红点）一律用系统自己的 —— 主题基本没有规范的秒针素材，
+        // 硬塞只会出问题（之前把 248x487 的细长秒针按宽度卡成 2x4 一小截 → 看起来"秒针没了"）
+        BOOL secondsMember = [map[i].key isEqualToString:@"seconds"] ||
+                             [map[i].key isEqualToString:@"secondDot"];
+        if (secondsMember) {
+            UIImage *keep = gOriginalMembers[map[i].key];
+            if (keep && [set respondsToSelector:setter0]) {
+                @try {
+                    ((void (*)(id, SEL, id))objc_msgSend)(set, setter0, keep);
+                    restored++;
+                } @catch (NSException *e) { }
+            }
+            continue;
+        }
         UIImage *img = TBResourceImage(map[i].res);
         if (!img) {
             // 主题没这一项 → 还原系统原样（系统的针集是缓存复用的，不还原会残留上一个主题的针）
