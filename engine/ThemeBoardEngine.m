@@ -928,19 +928,11 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
         if ([v respondsToSelector:ivSel]) {
             id iv = ((id (*)(id, SEL))objc_msgSend)(v, ivSel);
             if (iv) {
-                if ([iv respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
-                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"clearCachedImages"));
-                } else if ([iv respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
-                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"_clearCachedImages"));
-                }
+                // 只调用「时钟指针重画」这一个专用方法；其余私有方法
+                //（clearCachedImages / updateImageAnimated: / _updateOverlayImage）
+                // 风险高，换主题时曾把 SpringBoard 搞崩，这里不再调用。
                 if ([iv respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
                     ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"updateClockImages"));
-                }
-                if ([iv respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
-                    ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, NSSelectorFromString(@"updateImageAnimated:"), NO);
-                }
-                if ([iv respondsToSelector:NSSelectorFromString(@"_updateOverlayImage")]) {
-                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"_updateOverlayImage"));
                 }
             }
         }
