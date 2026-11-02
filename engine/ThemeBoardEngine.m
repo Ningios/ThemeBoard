@@ -2193,6 +2193,9 @@ static void TBApplyClockImagesToSet(id set) {
         if (bigger) {
             CGFloat k = MIN(osz.width / MAX(tsz.width, 0.01), osz.height / MAX(tsz.height, 0.01));
             target = CGSizeMake(tsz.width * k, tsz.height * k);
+        } else {
+            target = tsz;      // 主题针比系统那项小 → 目标就是它自己（这一步之前漏了，
+                               // 结果还是按系统尺寸放大 → 细针糊成粗块）
         }
         if (bigger || fabs(img.scale - oscale) > 0.01) {
             UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
