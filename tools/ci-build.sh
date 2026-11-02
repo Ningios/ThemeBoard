@@ -38,7 +38,7 @@ codesign --force --sign - --entitlements tools/entitlements.plist "$APP" 2>/dev/
 cp app/Resources/Info.plist "$APP/Info.plist"
 # 版本号以 control 为准（Info.plist 里的值早就过期了）
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" "$APP/Info.plist" 2>/dev/null || true
-BUILD_NO="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+BUILD_NO="${GITHUB_RUN_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NO" "$APP/Info.plist" 2>/dev/null || true
 cp app/Resources/Icon*.png "$APP/" 2>/dev/null || true
 rm -rf "$APP/DemoThemes"; cp -R demo-themes "$APP/DemoThemes" 2>/dev/null || true
