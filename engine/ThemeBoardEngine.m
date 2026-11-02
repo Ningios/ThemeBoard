@@ -750,6 +750,36 @@ static UIImage *TBSystemClockFace(void) {
     return gSystemClockFace;
 }
 
+// ---- 图标圆角：用【系统自己的遮罩形状】，不再自己画超椭圆 ----
+// 我们是在 SBHIconImageCache 的读路径直接返回图的，这条路径系统认为是"已遮罩"的，
+// 所以必须自己遮 —— 但形状要用系统那张（第一次从系统原实现里取到后缓存成模板）。
+static UIImage *gSystemMaskTemplate;
+
+static UIImage *TBMaskWithSystemShape(UIImage *art) {
+    if (!art || !gSystemMaskTemplate) return art;
+    CGSize sz = gSystemMaskTemplate.size;
+    if (sz.width < 4 || sz.height < 4) return art;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = gSystemMaskTemplate.scale > 0.5 ? gSystemMaskTemplate.scale : 3.0;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:sz format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [art drawInRect:CGRectMake(0, 0, sz.width, sz.height)];
+        // DestinationIn：只保留模板不透明处的像素 = 系统的圆角/超椭圆形状
+        [gSystemMaskTemplate drawInRect:CGRectMake(0, 0, sz.width, sz.height)
+                              blendMode:kCGBlendModeDestinationIn alpha:1.0];
+    }];
+}
+
+/// 把系统原实现返回的已遮罩图记成模板
+static void TBLearnSystemMask(UIImage *sysMasked) {
+    if (!sysMasked || !sysMasked.CGImage) return;
+    if (gSystemMaskTemplate && CGSizeEqualToSize(gSystemMaskTemplate.size, sysMasked.size)) return;
+    gSystemMaskTemplate = sysMasked;
+    TBLogOnce(@"iconmask|learn", @"图标遮罩：已取到系统遮罩形状（%.0fx%.0f pt）",
+              sysMasked.size.width, sysMasked.size.height);
+}
+
 static UIImage *TBImageForBundle(NSString *bid) {
     if (!bid.length || !TBEnabled()) return nil;
     if (TBSafeMode()) return nil;   // 安全模式：只记日志，绝不改图
@@ -824,7 +854,8 @@ static UIImage *TBImageForBundle(NSString *bid) {
             if (logged < 20) { logged++; TBLog(@"dynamic %@", bid); }
             img = TBDynamicIcon(img, bid);
         }
-        img = TBIconRoundedImage(img);      // 方角素材统一裁成系统那种圆角
+        // 有系统遮罩模板时由调用方按系统形状裁；没有才退回自己的超椭圆
+        if (!gSystemMaskTemplate) img = TBIconRoundedImage(img);
         if (!dynamic) [gImageCache setObject:img forKey:bid];
     }
     return img;
@@ -945,6 +976,8 @@ static id tb_imageForIcon(id self, SEL _cmd, id icon) {
     if (TBApplyIconForDesktop()) {
         NSString *bid = TBBIDFromIcon(icon);
         UIImage *img = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self));
+        if (!gSystemMaskTemplate) TBLearnSystemMask(o_imageForIcon ? o_imageForIcon(self, _cmd, icon) : nil);
+        img = TBMaskWithSystemShape(img);
         if (img) { gServe++; TBLogOnce([@"imageForIcon|" stringByAppendingString:bid ?: @"?"], @"serve imageForIcon %@", bid); return img; }
         gMiss++;
         TBLogOnce([@"miss|" stringByAppendingString:bid ?: @"?"], @"miss %@", bid ?: @"(无bid)");
@@ -957,6 +990,8 @@ static id tb_imageForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt)
     if (TBApplyIconForDesktop()) {
         NSString *bid = TBBIDFromIcon(icon);
         UIImage *img = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self));
+        if (!gSystemMaskTemplate) TBLearnSystemMask(o_imageForIconOpt ? o_imageForIconOpt(self, _cmd, icon, opt) : nil);
+        img = TBMaskWithSystemShape(img);
         if (img) { gServe++; TBLogOnce([@"imageForIconOpt|" stringByAppendingString:bid ?: @"?"], @"serve imageForIcon:options: %@", bid); return img; }
     }
     return o_imageForIconOpt ? o_imageForIconOpt(self, _cmd, icon, opt) : nil;
@@ -967,6 +1002,7 @@ static id tb_cachedForIcon(id self, SEL _cmd, id icon) {
     if (TBApplyIconForDesktop()) {
         NSString *bid = TBBIDFromIcon(icon);
         UIImage *img = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self));
+        img = TBMaskWithSystemShape(img);
         if (img) { gServe++; TBLogOnce([@"cachedImageForIcon|" stringByAppendingString:bid ?: @"?"], @"serve cachedImageForIcon %@", bid); return img; }
     }
     return o_cachedForIcon ? o_cachedForIcon(self, _cmd, icon) : nil;
@@ -977,6 +1013,8 @@ static id tb_realForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) 
     if (TBApplyIconForDesktop()) {
         NSString *bid = TBBIDFromIcon(icon);
         UIImage *img = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self));
+        if (!gSystemMaskTemplate) TBLearnSystemMask(o_realForIconOpt ? o_realForIconOpt(self, _cmd, icon, opt) : nil);
+        img = TBMaskWithSystemShape(img);
         if (img) { gServe++; TBLogOnce([@"realImageForIcon|" stringByAppendingString:bid ?: @"?"], @"serve realImageForIcon %@", bid); return img; }
     }
     return o_realForIconOpt ? o_realForIconOpt(self, _cmd, icon, opt) : nil;
