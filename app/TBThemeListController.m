@@ -441,22 +441,29 @@ static void TBSwipeRedLabels(UIView *v, NSInteger depth) {
 static void TBSwipeApplyToPullView(UIView *pull) {
     if (!pull) return;
     CGFloat scale = [UIScreen mainScreen].scale;
-    pull.backgroundColor = [UIColor clearColor];
+    // 块的位置/大小：卡片在 cell 里上下各内缩 2pt（TBGlassCellBG），滑动容器是整行高，
+    // 不内缩就会比卡片高、盖住上下两行。这里按父视图高度算，重复布局也不会越缩越小。
+    UIView *sup = pull.superview;
+    if (sup && sup.bounds.size.height > 8) {
+        pull.frame = CGRectMake(pull.frame.origin.x, 2,
+                                pull.frame.size.width, sup.bounds.size.height - 4);
+    }
+    // 圆角玻璃由【容器自己】画：系统的 action 底色是一块方图，罩不住圆角，
+    // 所以底色改成透明，整块玻璃 + 圆角 + 边框都在这里做。
+    pull.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                          [UIColor colorWithWhite:1 alpha:0.14]);
     pull.layer.cornerRadius = 20;
     pull.layer.cornerCurve = kCACornerCurveContinuous;
     pull.clipsToBounds = YES;
+    pull.layer.borderWidth = 1.0 / scale;
+    pull.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                            [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
     for (UIView *btn in pull.subviews) {
-        // 卡片在 cell 里是上下各内缩 2pt（见 TBGlassCellBG：top +2 / bottom -2），
-        // 而滑动容器是整行高 → 不内缩的话删除块会比卡片高，盖住上下两行。
-        btn.frame = CGRectInset(btn.frame, 0, 2);
-        // 底色由 action 自己铺（见 trailingSwipeActions… 里的 del.backgroundColor），
-        // 这里不要再叠一层白，否则两层半透明白叠起来会显得发白发实。
-        btn.backgroundColor = [UIColor clearColor];
+        btn.backgroundColor = [UIColor clearColor];   // 不让系统/按钮再画一层方的
         btn.layer.cornerRadius = 20;
         btn.layer.cornerCurve = kCACornerCurveContinuous;
-        btn.layer.borderWidth = 1.0 / scale;
-        btn.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                               [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
+        btn.clipsToBounds = YES;
+        btn.layer.borderWidth = 0;
         TBSwipeRedLabels(btn, 0);
     }
 }
@@ -519,8 +526,9 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     }];
     // action 自己必须给底色：系统默认是灰底，只靠外面套样式一旦时机不对就会露灰。
     // 用和滑动容器同一套玻璃色，保证任何情况下都是「玻璃 + 红字」。
-    del.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
-                                         [UIColor colorWithWhite:1 alpha:0.14]);
+    // 底色交给滑动容器自己画（圆角玻璃），这里必须置空：系统画的是一块【方】底色，
+    // 我们的圆角罩不住它，滑完就露成方块。
+    del.backgroundColor = [UIColor clearColor];
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 
