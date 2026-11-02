@@ -415,12 +415,14 @@ static UIImage *TBMakeOpaqueOnBodyColor(UIImage *img) {
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
     fmt.scale = 1.0;
     fmt.opaque = YES;
+    UIColor *body = [UIColor colorWithRed:px[0] / 255.0 green:px[1] / 255.0 blue:px[2] / 255.0 alpha:1.0];
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(w, h) format:fmt];
+    // 注意：必须用 UIKit 的绘制 API。在 UIKit 上下文里直接 CGContextDrawImage
+    // 是 y 轴向上的语义，会把图上下翻转（表盘歪/镜像的元凶）。
     UIImage *out = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        CGContextRef gc = ctx.CGContext;
-        CGContextSetRGBFillColor(gc, px[0] / 255.0, px[1] / 255.0, px[2] / 255.0, 1.0);
-        CGContextFillRect(gc, CGRectMake(0, 0, w, h));
-        CGContextDrawImage(gc, CGRectMake(0, 0, w, h), cg);
+        [body setFill];
+        UIRectFill(CGRectMake(0, 0, w, h));
+        [img drawInRect:CGRectMake(0, 0, w, h)];
     }];
     CGColorSpaceRelease(cs);
     return out ?: img;
