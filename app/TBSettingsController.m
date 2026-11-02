@@ -46,7 +46,9 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
            @{@"t": @"分享面板", @"k": TBKeyApplyShare, @"v": @YES} ],
         @[ @{@"t": @"在文件管理器中打开主题目录", @"act": @"open"} ],
         @[ @{@"t": @"隐藏时钟指针", @"k": @"HideClockHands", @"v": @NO,
-             @"d": @"主题图标自己画了指针时打开，避免和系统指针重影"} ],
+             @"d": @"主题图标自己画了指针时打开，避免和系统指针重影"},
+           @{@"t": @"日历不叠加日期", @"k": @"NoCalendarDate", @"v": @NO,
+             @"d": @"主题日历图标已经画了日期时打开，直接用主题图标"} ],
         @[ @{@"t": @"跟随系统深色模式", @"k": @"FollowSystem", @"v": @YES, @"d": @"关掉则固定浅色"} ],
         @[ @{@"t": @"写日志", @"k": TBKeyLogEnabled, @"v": @YES},
            @{@"t": @"安全模式（只记录，不换图）", @"k": @"SafeMode", @"v": @NO},
@@ -63,6 +65,7 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
         @"导入主题…": @"square.and.arrow.down", @"在文件管理器中打开主题目录": @"folder.badge.gearshape",
         @"重新扫描主题": @"arrow.triangle.2.circlepath", @"清除当前主题": @"trash",
         @"隐藏时钟指针": @"clock.badge.xmark",
+        @"日历不叠加日期": @"calendar.badge.minus",
         @"跟随系统深色模式": @"circle.lefthalf.filled", @"写日志": @"doc.text", @"安全模式（只记录，不换图）": @"exclamationmark.shield",
         @"应用后清图标缓存": @"arrow.clockwise",
     };

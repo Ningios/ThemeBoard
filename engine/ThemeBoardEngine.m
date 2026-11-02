@@ -617,7 +617,10 @@ static BOOL TBIsDynamicBID(NSString *bid);
 static NSString *TBDynamicResourcePath(NSString *bid);
 
 /// 图标中央偏下区域是否已经有内容（主题自己画好了日期/数字）
-static BOOL TBImageHasContentInDateArea(UIImage *img) {
+/// 日期区指标：*ink 返回"墨"占比，*op 返回不透明占比（用来判断主题图标是否已画日期）
+static BOOL TBImageDateAreaMetrics(UIImage *img, CGFloat *ink, CGFloat *op) {
+    if (ink) *ink = 0; if (op) *op = 0;
+    if (!img) return NO;
     if (!img) return NO;
     const size_t W = 64, H = 64;
     unsigned char *buf = calloc(W * H * 4, 1);
@@ -645,9 +648,17 @@ static BOOL TBImageHasContentInDateArea(UIImage *img) {
     }
     free(buf);
     if (total < 10) return NO;
+    CGFloat inkPct = dark * 100.0 / total;
+    CGFloat opPct = opaque * 100.0 / total;
+    if (ink) *ink = inkPct;
+    if (op) *op = opPct;
     // 半透明（玻璃）底图不算"已画日期"：它没有日期可看，必须自己写上去
-    if (opaque * 100 / total < 80) return NO;
-    return (dark * 100 / total) > 3;
+    if (opPct < 80) return NO;
+    return inkPct > 3;
+}
+
+static BOOL TBImageHasContentInDateArea(UIImage *img) {
+    return TBImageDateAreaMetrics(img, NULL, NULL);
 }
 
 /// 表盘素材中心区域是否已经有指针（个别主题直接把指针画进表盘素材里，
@@ -870,7 +881,20 @@ static UIImage *TBImageForBundle(NSString *bid) {
     if (cached) return cached;
 
     UIImage *img = [[UIImage alloc] initWithContentsOfFile:path];   // 不用被 hook 的类方法
-    BOOL calDynamic = (cameFromMaterial || !TBImageHasContentInDateArea(img));
+    CGFloat inkPct = 0, opPct = 0;
+    BOOL looksDrawn = TBImageDateAreaMetrics(img, &inkPct, &opPct);
+    BOOL forceNoDate = NO;
+    id ndv = TBPref(@"NoCalendarDate");
+    if (ndv) forceNoDate = [ndv boolValue];
+    BOOL calDynamic = cameFromMaterial || !looksDrawn;
+    if (forceNoDate) calDynamic = NO;
+    if (isCalendar && img) {
+        TBLogOnce([@"caljudge|" stringByAppendingFormat:@"%@|%d", bid, (int)looksDrawn],
+                  @"日历判定：墨 %.1f%% / 不透明 %.1f%% → %@%@",
+                  inkPct, opPct,
+                  (calDynamic ? @"自己写日期" : @"用主题图标原样"),
+                  (forceNoDate ? @"（设置里强制不叠加）" : @""));
+    }
     if (img && isCalendar) {
         if (!calDynamic) {
             // 主题图标自己已经画了日期/星期 → 直接用，不叠加（否则会重影）
