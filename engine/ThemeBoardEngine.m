@@ -2142,10 +2142,17 @@ static void TBApplyClockImagesToSet(id set) {
         // 与 SnowBoard 同一步：把主题图缩放到系统那一项的尺寸。
         // 关键：点尺寸和 scale 都要和系统原本那张完全一致，否则像素尺寸变大，
         // 系统按像素铺开 → 指针看起来又粗又长。
+        // SnowBoard 的规则：**只缩小，从不放大**。
+        // 主题针比系统那项小就原样用（放大只会把细针糊成一坨粗块 —— 这就是"针变粗"的原因）；
+        // 比系统大才按比例缩到能放进去。
         CGFloat oscale = orig.scale > 0.5 ? orig.scale : 1.0;
-        if (fabs(img.size.width - target.width) > 0.01 ||
-            fabs(img.size.height - target.height) > 0.01 ||
-            fabs(img.scale - oscale) > 0.01) {
+        CGSize tsz = img.size, osz = target;
+        BOOL bigger = (tsz.width > osz.width + 0.01) || (tsz.height > osz.height + 0.01);
+        if (bigger) {
+            CGFloat k = MIN(osz.width / MAX(tsz.width, 0.01), osz.height / MAX(tsz.height, 0.01));
+            target = CGSizeMake(tsz.width * k, tsz.height * k);
+        }
+        if (bigger || fabs(img.scale - oscale) > 0.01) {
             UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
             fmt.scale = oscale;
             fmt.opaque = NO;
@@ -2153,12 +2160,10 @@ static void TBApplyClockImagesToSet(id set) {
             img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
                 [img drawInRect:CGRectMake(0, 0, target.width, target.height)];
             }];
-            TBLogOnce([@"clockscale|" stringByAppendingString:map[i].key],
-                      @"时钟素材 ScaleToSize %@：系统 %.0fx%.0f pt scale=%.0f → 注入 %.0fx%.0f pt scale=%.0f（像素 %.0fx%.0f vs %.0fx%.0f）",
-                      map[i].key, target.width, target.height, orig.scale,
-                      img.size.width, img.size.height, img.scale,
-                      img.size.width * img.scale, img.size.height * img.scale,
-                      orig.size.width * orig.scale, orig.size.height * orig.scale);
+            TBLogOnce([@"clockscale|" stringByAppendingFormat:@"%@|%@", map[i].key, TBActiveTheme() ?: @""],
+                      @"时钟针 %@：主题 %.0fx%.0f → 注入 %.0fx%.0f pt（系统那一项 %.0fx%.0f，%@）",
+                      map[i].key, tsz.width, tsz.height, img.size.width, img.size.height,
+                      osz.width, osz.height, bigger ? @"按比例缩小" : @"原样用，不放大");
         }
 
         SEL setter = NSSelectorFromString([NSString stringWithFormat:@"set%@%@:",
