@@ -871,8 +871,7 @@ static UIImage *TBImageForBundle(NSString *bid) {
             if (logged < 20) { logged++; TBLog(@"dynamic %@", bid); }
             img = TBDynamicIcon(img, bid);
         }
-        // 有系统遮罩模板时由调用方按系统形状裁；没有才退回自己的超椭圆
-        if (!gSystemMaskTemplate) img = TBIconRoundedImage(img);
+        // 不在这里遮罩：素材由 SBIcon 那层交给系统，遮罩由系统自己做（SnowBoard 做法）
         if (!dynamic) [gImageCache setObject:img forKey:bid];
     }
     return img;
@@ -989,92 +988,63 @@ typedef id (*FnISGenerateImage)(id, SEL);
 static FnISGenerateImage o_isGenerateImage;
 
 static id tb_imageForIcon(id self, SEL _cmd, id icon) {
+    // 直通：图像的"成品"由系统自己合成（素材由 SBIcon 那层给），我们不再在这里返回成品图
     TBRemember(self);
-    if (TBApplyIconForDesktop()) {
-        NSString *bid = TBBIDFromIcon(icon);
-        UIImage *img = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self));
-        if (!gSystemMaskTemplate) TBLearnSystemMask(o_imageForIcon ? o_imageForIcon(self, _cmd, icon) : nil);
-        img = TBMaskWithSystemShape(img);
-        if (img) { gServe++; TBLogOnce([@"imageForIcon|" stringByAppendingString:bid ?: @"?"], @"serve imageForIcon %@", bid); return img; }
-        gMiss++;
-        TBLogOnce([@"miss|" stringByAppendingString:bid ?: @"?"], @"miss %@", bid ?: @"(无bid)");
-    }
     return o_imageForIcon ? o_imageForIcon(self, _cmd, icon) : nil;
 }
 
 static id tb_imageForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
-    if (TBApplyIconForDesktop()) {
-        NSString *bid = TBBIDFromIcon(icon);
-        UIImage *img = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self));
-        if (!gSystemMaskTemplate) TBLearnSystemMask(o_imageForIconOpt ? o_imageForIconOpt(self, _cmd, icon, opt) : nil);
-        img = TBMaskWithSystemShape(img);
-        if (img) { gServe++; TBLogOnce([@"imageForIconOpt|" stringByAppendingString:bid ?: @"?"], @"serve imageForIcon:options: %@", bid); return img; }
-    }
     return o_imageForIconOpt ? o_imageForIconOpt(self, _cmd, icon, opt) : nil;
 }
 
 static id tb_cachedForIcon(id self, SEL _cmd, id icon) {
     TBRemember(self);
-    if (TBApplyIconForDesktop()) {
-        NSString *bid = TBBIDFromIcon(icon);
-        UIImage *img = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self));
-        img = TBMaskWithSystemShape(img);
-        if (img) { gServe++; TBLogOnce([@"cachedImageForIcon|" stringByAppendingString:bid ?: @"?"], @"serve cachedImageForIcon %@", bid); return img; }
-    }
     return o_cachedForIcon ? o_cachedForIcon(self, _cmd, icon) : nil;
 }
 
 static id tb_realForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
-    if (TBApplyIconForDesktop()) {
-        NSString *bid = TBBIDFromIcon(icon);
-        UIImage *img = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self));
-        if (!gSystemMaskTemplate) TBLearnSystemMask(o_realForIconOpt ? o_realForIconOpt(self, _cmd, icon, opt) : nil);
-        img = TBMaskWithSystemShape(img);
-        if (img) { gServe++; TBLogOnce([@"realImageForIcon|" stringByAppendingString:bid ?: @"?"], @"serve realImageForIcon %@", bid); return img; }
-    }
     return o_realForIconOpt ? o_realForIconOpt(self, _cmd, icon, opt) : nil;
 }
 
 static id tb_unmaskedForIcon(id self, SEL _cmd, id icon) {
     TBRemember(self);
-    if (TBApplyIconForDesktop()) {
-        NSString *bid = TBBIDFromIcon(icon);
-        UIImage *img = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self));
-        if (img) { gServe++; TBLogOnce([@"unmaskedImageForIcon|" stringByAppendingString:bid ?: @"?"], @"serve unmaskedImageForIcon %@", bid); return img; }
-    }
     return o_unmaskedForIcon ? o_unmaskedForIcon(self, _cmd, icon) : nil;
 }
 
 static id tb_unmaskedForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
-    if (TBApplyIconForDesktop()) {
-        NSString *bid = TBBIDFromIcon(icon);
-        UIImage *img = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self));
-        if (img) { gServe++; TBLogOnce([@"unmaskedImageForIconOpt|" stringByAppendingString:bid ?: @"?"], @"serve unmaskedImageForIcon:options %@", bid); return img; }
-    }
     return o_unmaskedForIconOpt ? o_unmaskedForIconOpt(self, _cmd, icon, opt) : nil;
 }
 
 /// 缓存落盘的那一刻换掉图 —— 这样所有后续消费者（含变体缓存）拿到的都是主题图
 static id tb_cacheImageForIcon(id self, SEL _cmd, id image, id icon) {
+    // 直通：系统自己会把从 SBIcon 层拿到的素材缓存起来（SnowBoard 不在写入端接管）
     TBRemember(self);
-    NSString *bid = TBBIDFromIcon(icon);
-    // 缓存写入端接管：拖拽/重建时系统会把「非主题」图写进缓存，这里拦下来换成主题图
-    if (bid.length && TBApplyIconForDesktop() && !TBSafeMode()) {
-        @try {
-            UIImage *mine = TBImageForBundle(bid);
-            if (mine && image != mine) {
-                UIImage *fit = TBFitImage(mine, TBInfoOfCache(self));
-                if (fit) {
-                    TBLogOnce([@"cachewrite|" stringByAppendingString:bid], @"cachewrite %@", bid);
-                    return o_cacheImageForIcon ? o_cacheImageForIcon(self, _cmd, fit, icon) : nil;
-                }
-            }
-        } @catch (NSException *e) { }
-    }
     return o_cacheImageForIcon ? o_cacheImageForIcon(self, _cmd, image, icon) : nil;
+}
+
+typedef id (*FnInfoImage)(id, SEL, TBImageInfo);
+static FnInfoImage o_iconImageWithInfo, o_unmaskedIconImageWithInfo;
+
+/// SnowBoard 的通道：在 SBIcon 这层交出【原始素材】，遮罩/合成/缓存/刷新全交给系统
+static id tb_iconImageWithInfo(id self, SEL _cmd, TBImageInfo info) {
+    if (TBApplyIconForDesktop()) {
+        NSString *bid = TBBIDFromIcon(self);
+        UIImage *img = TBImageForBundle(bid);
+        if (img) { gServe++; TBLogOnce([@"iconInfo|" stringByAppendingString:bid ?: @"?"], @"serve iconImageWithInfo %@", bid); return img; }
+    }
+    return o_iconImageWithInfo ? o_iconImageWithInfo(self, _cmd, info) : nil;
+}
+
+static id tb_unmaskedIconImageWithInfo(id self, SEL _cmd, TBImageInfo info) {
+    if (TBApplyIconForDesktop()) {
+        NSString *bid = TBBIDFromIcon(self);
+        UIImage *img = TBImageForBundle(bid);
+        if (img) { gServe++; TBLogOnce([@"iconInfoU|" stringByAppendingString:bid ?: @"?"], @"serve unmaskedIconImageWithInfo %@", bid); return img; }
+    }
+    return o_unmaskedIconImageWithInfo ? o_unmaskedIconImageWithInfo(self, _cmd, info) : nil;
 }
 
 static id tb_generateIconImageWithInfo(id self, SEL _cmd, TBImageInfo info) {
@@ -1296,7 +1266,8 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
     if (!special &&
         ([v respondsToSelector:NSSelectorFromString(@"icon")] ||
          [v respondsToSelector:NSSelectorFromString(@"_iconImageView")])) {
-        if (TBApplyThemeToIconView(v)) fixed++;
+        // （不再重贴图标图：素材由 SBIcon 层提供给系统，系统会自己合成）
+        (void)0;
         if (iconsOut && iconsOut.count < 250) {
             @try {
                 SEL iconSel = NSSelectorFromString(@"icon");
@@ -2662,6 +2633,14 @@ static void TBInstall(void) {
         if (TBHasMethod(icon, @"generateIconImageWithInfo:")) {
             o_generateIconImageWithInfo = (FnGen)TBHook(icon, @"generateIconImageWithInfo:",
                                                         (IMP)tb_generateIconImageWithInfo, "generateIconImageWithInfo");
+        }
+        if (TBHasMethod(icon, @"iconImageWithInfo:")) {
+            o_iconImageWithInfo = (FnInfoImage)TBHook(icon, @"iconImageWithInfo:",
+                                                      (IMP)tb_iconImageWithInfo, "iconImageWithInfo");
+        }
+        if (TBHasMethod(icon, @"unmaskedIconImageWithInfo:")) {
+            o_unmaskedIconImageWithInfo = (FnInfoImage)TBHook(icon, @"unmaskedIconImageWithInfo:",
+                                                             (IMP)tb_unmaskedIconImageWithInfo, "unmaskedIconImageWithInfo");
         }
     }
 }
