@@ -632,18 +632,21 @@ static BOOL TBImageHasContentInDateArea(UIImage *img) {
     UIGraphicsPopContext();
     CGContextRelease(ctx);
 
-    NSInteger dark = 0, total = 0;
+    NSInteger dark = 0, total = 0, opaque = 0;
     for (size_t y = (size_t)(H * 0.30); y < (size_t)(H * 0.85); y++) {
         for (size_t x = (size_t)(W * 0.25); x < (size_t)(W * 0.75); x++) {
             unsigned char *p = buf + (y * W + x) * 4;
             if (p[3] < 40) continue;
             CGFloat luma = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
             total++;
+            if (p[3] > 200) opaque++;
             if (luma < 110) dark++;
         }
     }
     free(buf);
     if (total < 10) return NO;
+    // 半透明（玻璃）底图不算"已画日期"：它没有日期可看，必须自己写上去
+    if (opaque * 100 / total < 80) return NO;
     return (dark * 100 / total) > 3;
 }
 
@@ -708,6 +711,9 @@ static BOOL TBClockShouldHideHands(void) {
     if (!TBEnabled() || TBSafeMode()) return NO;
     NSString *theme = TBActiveTheme();
     if (!theme.length) return NO;                  // 没主题：系统表盘 + 系统指针
+    // 用户手动指定优先（设置 → 隐藏时钟指针）
+    id hv = TBPref(@"HideClockHands");
+    if (hv) return [hv boolValue];
 
     // 按主题缓存一次结论（这个判断每分钟左右都会问到）
     static NSString *cachedTheme = nil;
@@ -1354,6 +1360,14 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             }
             // 不指望系统重取：直接把当前主题的表盘写进这个视图（它就是表盘本身，
             // 没有子视图；指针是它自己的子图层/自己画的）。
+            // 指针开关：不依赖 updateClockImages 的 hook，这里直接按判定设置
+            {
+                BOOL hide = TBClockShouldHideHands();
+                NSInteger n = 0;
+                for (CALayer *l in ((UIView *)v).layer.sublayers) { l.hidden = hide; n++; }
+                TBLogOnce([@"clockhandsapply|" stringByAppendingFormat:@"%@|%d", TBActiveTheme() ?: @"", (int)hide],
+                          @"时钟：指针 %@（%ld 个子层）", hide ? @"已隐藏" : @"显示", (long)n);
+            }
             UIImage *cface = TBClockFaceForView((UIView *)v);
             if (cface && cface.CGImage) {
                 @try {
