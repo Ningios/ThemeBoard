@@ -1269,6 +1269,8 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                 if (face && face.CGImage) {
                     ((UIView *)v).layer.contents = (__bridge id)face.CGImage;
                     @try { [v setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
+                    ((UIView *)v).layer.contentsGravity = kCAGravityResize;
+                    [(UIView *)v setNeedsDisplay];
                     TBLog(@"时钟表盘：已强制写入 %.0fx%.0f", face.size.width, face.size.height);
                 }
             }
@@ -2115,7 +2117,23 @@ static void TBApplyClockImagesToSet(id set) {
             if ([v isKindOfClass:[UIImage class]]) orig = v;
         }
 
+        // 系统那一项的尺寸：只认第一次读到的"正常值"，之后读到坏值（0 或过小）一律忽略。
+        // 否则一旦注入过坏尺寸的图，下次读到的就是它自己 → 越传越坏，系统拉伸铺满 → 针变粗。
+        static NSMutableDictionary *gMemberSize = nil;
+        static dispatch_once_t onceTok;
+        dispatch_once(&onceTok, ^{ gMemberSize = [NSMutableDictionary dictionary]; });
         CGSize target = orig ? orig.size : CGSizeZero;
+        NSValue *cachedSize = gMemberSize[map[i].key];
+        if (target.width < 4 || target.height < 4) {
+            if (cachedSize) {
+                target = cachedSize.CGSizeValue;
+                TBLogOnce([@"clocksizefb|" stringByAppendingFormat:@"%@|%@", map[i].key, TBActiveTheme() ?: @""],
+                          @"时钟针 %@：系统那一项尺寸异常，改用首次记录的正常值 %.0fx%.0f pt",
+                          map[i].key, target.width, target.height);
+            }
+        } else if (!cachedSize) {
+            gMemberSize[map[i].key] = [NSValue valueWithCGSize:target];
+        }
         TBLogOnce([@"clocksize|" stringByAppendingFormat:@"%@|%@", map[i].key, TBActiveTheme() ?: @""],
                   @"时钟素材尺寸 %@：主题原图 %.0fx%.0f pt scale=%.0f → 目标 %.0fx%.0f pt",
                   map[i].key, img.size.width, img.size.height, img.scale,
