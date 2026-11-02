@@ -276,8 +276,8 @@ static NSString *TBReadLogLossy(NSString *path) {
         logIcon.frame = CGRectMake(16, 14, 16, 16);
         [cell.contentView addSubview:logIcon];
 
-        UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(38, 8, t.bounds.size.width - 62, 268)];
-        tv.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        UITextView *tv = [[UITextView alloc] initWithFrame:CGRectZero];
+        tv.translatesAutoresizingMaskIntoConstraints = NO;
         tv.backgroundColor = [UIColor clearColor];
         tv.editable = NO;
         // 长行（bundleID / 路径）也要折行，否则右边直接被裁掉
@@ -289,6 +289,12 @@ static NSString *TBReadLogLossy(NSString *path) {
         tv.textColor = [UIColor secondaryLabelColor];
         tv.text = self.logText;
         [cell.contentView addSubview:tv];
+        [NSLayoutConstraint activateConstraints:@[
+            [tv.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:10],
+            [tv.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:38],
+            [tv.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-14],
+            [tv.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-10],
+        ]];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     }
     return cell;
@@ -301,6 +307,37 @@ static NSString *TBReadLogLossy(NSString *path) {
         UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [g impactOccurred];
     }
+}
+
+- (UIView *)tableView:(UITableView *)t viewForHeaderInSection:(NSInteger)s {
+    if (s != 2) return nil;
+    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, t.bounds.size.width, 34)];
+
+    UILabel *lb = [[UILabel alloc] initWithFrame:CGRectMake(20, 6, 160, 20)];
+    lb.text = @"引擎日志";
+    lb.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    lb.textColor = [UIColor secondaryLabelColor];
+    [v addSubview:lb];
+
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.frame = CGRectMake(t.bounds.size.width - 124, 2, 104, 28);
+    b.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    [b setTitle:@" 日志目录" forState:UIControlStateNormal];
+    [b setImage:[UIImage systemImageNamed:@"folder"] forState:UIControlStateNormal];
+    b.tintColor = [UIColor secondaryLabelColor];
+    b.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                       [UIColor colorWithWhite:1 alpha:0.12]);
+    b.layer.cornerRadius = 14;
+    b.layer.cornerCurve = kCACornerCurveContinuous;
+    TBApplyRim(b, 0.40);
+    [b addTarget:self action:@selector(openLogFolder) forControlEvents:UIControlEventTouchUpInside];
+    [v addSubview:b];
+    return v;
+}
+
+- (CGFloat)tableView:(UITableView *)t heightForHeaderInSection:(NSInteger)s {
+    return s == 2 ? 34 : UITableViewAutomaticDimension;
 }
 
 - (void)openLogFolder {

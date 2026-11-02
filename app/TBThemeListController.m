@@ -162,7 +162,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 - (void)buildToolbar {
     CGFloat w = MAX(320.0, self.tableView.bounds.size.width);
-    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 64)];
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 52)];
     head.backgroundColor = [UIColor clearColor];
     head.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
@@ -172,8 +172,8 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     [NSLayoutConstraint activateConstraints:@[
         [bar.leadingAnchor constraintEqualToAnchor:head.leadingAnchor constant:20],
         [bar.trailingAnchor constraintEqualToAnchor:head.trailingAnchor constant:-20],
-        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:8],
-        [bar.heightAnchor constraintEqualToConstant:44],
+        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:6],
+        [bar.heightAnchor constraintEqualToConstant:38],
     ]];
 
     // 顺序：扫描 / 导入 / 清除；导入最大，扫描略小，清除与导入等大
@@ -181,9 +181,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     UIButton *imp  = TBGlassButton(@"导入主题", NO);
     UIButton *clr  = TBGlassButton(@"清除主题", YES);
 
-    scan.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    imp.titleLabel.font  = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
-    clr.titleLabel.font  = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    scan.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
+    imp.titleLabel.font  = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+    clr.titleLabel.font  = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
     // 导入是主功能，底色更实一点
     imp.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.88],
                                         [UIColor colorWithWhite:1 alpha:0.22]);
