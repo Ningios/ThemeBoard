@@ -312,6 +312,27 @@ static void TBLoadBundleResources(NSString *themeDir) {
 /// 这里把透明像素用表盘底色填满（圆角交给图标遮罩去切）。
 static UIImage *TBResourceImage(NSString *name);
 static BOOL TBImageIsMostlyOpaque(CGImageRef cg);
+static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys);
+
+/// 把主题素材统一到「系统原本那张图」的尺寸与 scale。
+/// 否则素材点数（800pt）与系统（180pt）不一致，系统会放大铺开 → 表盘看着歪掉/花纹不对。
+static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys) {
+    if (!img) return img;
+    if (!sys || sys.size.width < 2 || sys.size.height < 2) return img;
+    CGSize want = sys.size;
+    CGFloat scale = sys.scale > 0 ? sys.scale : 3.0;
+    if (fabs(img.size.width - want.width) < 1.0 && fabs(img.size.height - want.height) < 1.0) return img;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = scale;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:want format:fmt];
+    UIImage *out = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [img drawInRect:CGRectMake(0, 0, want.width, want.height)];
+    }];
+    TBLogOnce(@"facescale", @"表盘几何归一：素材 %.0fpt scale=%.1f → 系统 %.0fpt scale=%.1f",
+              img.size.width, img.scale, want.width, scale);
+    return out ?: img;
+}
 
 /// 玻璃素材缓存（主体高度透明 = 玻璃层）
 static NSMutableSet *gGlassNames;
@@ -1582,7 +1603,8 @@ static UIImage *tb_imageNamed(id self, SEL _cmd, NSString *name) {
     if (!TBIsThemedResourceName(name)) {
         return o_imageNamed ? o_imageNamed(self, _cmd, name) : nil;
     }
-    UIImage *img = TBResourceImage(name);
+    UIImage *sys0 = o_imageNamed ? o_imageNamed(self, _cmd, name) : nil;
+    UIImage *img = TBMatchSystemGeometry(TBResourceImage(name), sys0);
     TBLogResourceProbe(name, img ? @"hit" : nil);
     if (img) {
         gServe++;
@@ -1591,7 +1613,7 @@ static UIImage *tb_imageNamed(id self, SEL _cmd, NSString *name) {
         TBLog(@"serve 资源 %@", name);
         return img;
     }
-    return o_imageNamed ? o_imageNamed(self, _cmd, name) : nil;
+    return sys0;
 }
 
 /// +[UIImage imageNamed:inBundle:]、+[UIImage imageNamed:inBundle:compatibleWithTraitCollection:]
@@ -1601,7 +1623,7 @@ static UIImage *tb_imageNamedInBundle(id self, SEL _cmd, NSString *name, NSBundl
         return o_imageNamedInBundle ? o_imageNamedInBundle(self, _cmd, name, bundle) : nil;
     }
     UIImage *sys = o_imageNamedInBundle ? o_imageNamedInBundle(self, _cmd, name, bundle) : nil;
-    UIImage *img = TBResourceImage(name);
+    UIImage *img = TBMatchSystemGeometry(TBResourceImage(name), sys);
     TBLogResourceProbe(name, img ? @"hit(bundle)" : nil);
     if (img) {
         gServe++;
@@ -1618,7 +1640,7 @@ static UIImage *tb_imageNamedInBundleTrait(id self, SEL _cmd, NSString *name, NS
         return o_imageNamedInBundleTrait ? o_imageNamedInBundleTrait(self, _cmd, name, bundle, trait) : nil;
     }
     UIImage *sys = o_imageNamedInBundleTrait ? o_imageNamedInBundleTrait(self, _cmd, name, bundle, trait) : nil;
-    UIImage *img = TBResourceImage(name);
+    UIImage *img = TBMatchSystemGeometry(TBResourceImage(name), sys);
     TBLogResourceProbe(name, img ? @"hit(bundleTrait)" : nil);
     if (img) {
         gServe++;
