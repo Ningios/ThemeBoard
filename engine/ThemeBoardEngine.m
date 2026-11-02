@@ -1823,16 +1823,19 @@ static void TBApplyClockImagesToSet(id set) {
         if (target.width < 1 || target.height < 1) continue;   // 系统没有这项就别乱塞
 
         if (fabs(img.size.width - target.width) > 1.0 || fabs(img.size.height - target.height) > 1.0) {
+            // 关键：scale 必须跟「系统原本那根针」一致，否则点尺寸对了但像素尺寸仍然巨大，
+            // 图层按像素铺开 → 指针巨大（上一版就是这个坑）。
             UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-            fmt.scale = img.scale > 0 ? img.scale : 3.0;
+            fmt.scale = orig.scale > 0 ? orig.scale : 3.0;
             fmt.opaque = NO;
             UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:target format:fmt];
             img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
                 [img drawInRect:CGRectMake(0, 0, target.width, target.height)];
             }];
             TBLogOnce([@"clockscale|" stringByAppendingString:map[i].key],
-                      @"时钟素材缩放 %@：素材 %.0fx%.0f → 系统 %.0fx%.0f",
-                      map[i].key, img.size.width, img.size.height, target.width, target.height);
+                      @"时钟素材缩放 %@：系统 %.0fx%.0f pt scale=%.1f → 注入 %.0fx%.0f pt scale=%.1f",
+                      map[i].key, target.width, target.height, orig.scale,
+                      img.size.width, img.size.height, img.scale);
         }
 
         SEL setter = NSSelectorFromString([NSString stringWithFormat:@"set%@%@:",
