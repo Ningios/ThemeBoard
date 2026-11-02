@@ -313,6 +313,66 @@ static void TBLoadBundleResources(NSString *themeDir) {
 static UIImage *TBResourceImage(NSString *name);
 static BOOL TBImageIsMostlyOpaque(CGImageRef cg);
 static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys);
+static UIImage *TBKeyOutCornerColor(UIImage *img);
+
+/// 素材是否带透明像素（粗略判断：抽样看有没有 alpha 明显偏低的像素）
+static BOOL TBImageHasTransparency(CGImageRef cg) {
+    if (!cg) return YES;
+    size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
+    if (w < 2 || h < 2) return YES;
+    enum { N = 48 };
+    unsigned char buf[N * N * 4];
+    memset(buf, 0, sizeof(buf));
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef c = CGBitmapContextCreate(buf, N, N, 8, N * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!c) return YES;
+    CGContextDrawImage(c, CGRectMake(0, 0, N, N), cg);
+    CGContextRelease(c);
+    for (int i = 0; i < N * N; i++) if (buf[i * 4 + 3] < 200) return YES;
+    return NO;
+}
+
+/// 完全没透明的素材 → 把四角颜色当背景抠掉（作者导出时忘了去白底）
+static UIImage *TBKeyOutCornerColor(UIImage *img) {
+    if (!img || !img.CGImage) return img;
+    if (TBImageHasTransparency(img.CGImage)) return img;   // 已有透明通道，不动
+    size_t w = CGImageGetWidth(img.CGImage), h = CGImageGetHeight(img.CGImage);
+    if (w < 4 || h < 4 || w * h > 8 * 1024 * 1024) return img;
+    size_t bytes = w * h * 4;
+    unsigned char *buf = malloc(bytes);
+    if (!buf) return img;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef c = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!c) { free(buf); return img; }
+    CGContextDrawImage(c, CGRectMake(0, 0, w, h), img.CGImage);
+    CGContextRelease(c);
+
+    // 四角颜色
+    long sr = 0, sg = 0, sb = 0;
+    size_t corners[4] = {0, (w - 1) * 4, (h - 1) * w * 4, ((h - 1) * w + w - 1) * 4};
+    for (int i = 0; i < 4; i++) { sr += buf[corners[i]]; sg += buf[corners[i] + 1]; sb += buf[corners[i] + 2]; }
+    int cr = (int)(sr / 4), cg2 = (int)(sg / 4), cb = (int)(sb / 4);
+    const int tol = 26;
+    for (size_t i = 0; i < w * h; i++) {
+        unsigned char *px = buf + i * 4;
+        if (abs((int)px[0] - cr) < tol && abs((int)px[1] - cg2) < tol && abs((int)px[2] - cb) < tol) {
+            px[0] = px[1] = px[2] = 0;
+            px[3] = 0;
+        }
+    }
+    CGDataProviderRef prov = CGDataProviderCreateWithData(NULL, buf, bytes, NULL);
+    CGImageRef outCg = prov ? CGImageCreate(w, h, 8, 32, w * 4, CGColorSpaceCreateDeviceRGB(),
+                                            kCGImageAlphaLast | kCGBitmapByteOrderDefault,
+                                            prov, NULL, false, kCGRenderingIntentDefault) : NULL;
+    if (prov) CGDataProviderRelease(prov);
+    if (!outCg) { free(buf); return img; }
+    UIImage *out = [UIImage imageWithCGImage:outCg];
+    CGImageRelease(outCg);
+    TBLogOnce(@"keyout", @"指针素材无透明通道，已按四角颜色抠底（rgb %d,%d,%d）", cr, cg2, cb);
+    return out ?: img;
+}
 
 /// 把主题素材统一到「系统原本那张图」的尺寸与 scale。
 /// 否则素材点数（800pt）与系统（180pt）不一致，系统会放大铺开 → 表盘看着歪掉/花纹不对。
@@ -1013,6 +1073,16 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
     if (!v || depth > 12) return 0;
     NSInteger fixed = 0;
     NSString *vcls = NSStringFromClass([v class]);
+    // 时钟视图：换主题后必须重画，否则表盘会一直停在上一个主题
+    if ([vcls rangeOfString:@"Clock"].location != NSNotFound) {
+        @try {
+            [v setNeedsLayout];
+            [v setNeedsDisplay];
+            if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
+                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
+            }
+        } @catch (NSException *e) { }
+    }
     BOOL special = ([vcls rangeOfString:@"Folder"].location != NSNotFound) ||
                    ([vcls rangeOfString:@"Clock"].location != NSNotFound) ||
                    ([vcls rangeOfString:@"Library"].location != NSNotFound);
@@ -1833,6 +1903,7 @@ static void TBApplyClockImagesToSet(id set) {
     for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         UIImage *img = TBResourceImage(map[i].res);
         if (!img) continue;
+        img = TBKeyOutCornerColor(img);   // 作者导出忘去白底时兜底
 
         // 关键：系统图像集里每根针都是按图标尺寸算好的，
         // 直接塞素材原图会大得离谱（248x547 那种画布）。这里取系统原本
@@ -1842,6 +1913,27 @@ static void TBApplyClockImagesToSet(id set) {
         if ([set respondsToSelector:getter]) {
             id v = ((id (*)(id, SEL))objc_msgSend)(set, getter);
             if ([v isKindOfClass:[UIImage class]]) orig = v;
+        }
+
+        // 一次性把「系统原本那根针」导出成文件，便于分析其画布/轴心约定
+        static BOOL dumped = NO;
+        if (!dumped && orig) {
+            dumped = YES;
+            NSString *dir = @"/var/mobile/Library/ThemeBoard/clockdump";
+            [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                      withIntermediateDirectories:YES attributes:nil error:NULL];
+            for (NSString *k in @[@"hours", @"minutes", @"seconds", @"hourMinuteDot", @"secondDot"]) {
+                SEL g = NSSelectorFromString(k);
+                if (![set respondsToSelector:g]) continue;
+                id v = ((id (*)(id, SEL))objc_msgSend)(set, g);
+                if (![v isKindOfClass:[UIImage class]]) continue;
+                NSData *png = UIImagePNGRepresentation((UIImage *)v);
+                if (!png) continue;
+                NSString *fp = [dir stringByAppendingPathComponent:
+                                [NSString stringWithFormat:@"sys-%@.png", k]];
+                [png writeToFile:fp atomically:YES];
+            }
+            TBLog(@"已导出系统指针图到 %@", dir);
         }
         CGSize target = orig ? orig.size : CGSizeZero;
         if (target.width < 1 || target.height < 1) continue;   // 系统没有这项就别乱塞
@@ -1966,15 +2058,7 @@ static void TBInstall(void) {
     // 桌面时钟图标（运行时检测）
     if (clockView && !gDoneClock) {
         gDoneClock = YES;
-        // SnowBoard 同款：接管图像集构建，把主题的指针/轴心注入进去
-        if (TBHasMethod(clockView, @"makeImageSetForMetrics:")) {
-            o_makeImageSet = (ClockImageSetFn)TBHookClass(clockView, @"makeImageSetForMetrics:",
-                                                          (IMP)tb_makeImageSet, "时钟图像集1");
-        }
-        if (TBHasMethod(clockView, @"imageSetForMetrics:")) {
-            o_imageSet = (ClockImageSetFn)TBHookClass(clockView, @"imageSetForMetrics:",
-                                                      (IMP)tb_imageSet, "时钟图像集2");
-        }
+        // 指针一律用系统自己的（黑时针 + 黑分针 + 橙秒针），不注入主题指针。
         // 不接管 iconImageWithImageInfo:includingMask:
         // 那一层返回的是「表盘+指针」的合成图，接管后系统画的指针会变形
         //（三根一样粗、橙秒针消失）。改由资源重定向提供 ClockIconBackgroundSquare，
