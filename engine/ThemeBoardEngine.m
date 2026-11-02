@@ -1269,19 +1269,25 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             // 保证下次系统重绘也用我们的新表盘。
             {
                 UIImage *face = TBClockMaterialFace((UIView *)v);
-                if (!face) {
-                    // 主题没有表盘素材 / 已恢复系统默认 → 取系统原实现那张写回去，
-                    // 否则上一个主题的表盘会一直留着
-                    SEL cs = NSSelectorFromString(@"contentsImage");
-                    if (o_contentsImageLive) face = o_contentsImageLive(v, cs);
-                    if (face) TBLog(@"时钟表盘：无素材 → 写回系统表盘 %.0fx%.0f", face.size.width, face.size.height);
-                }
                 if (face && face.CGImage) {
+                    // 有素材 → 强制写入主题表盘
                     ((UIView *)v).layer.contents = (__bridge id)face.CGImage;
                     @try { [v setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
                     ((UIView *)v).layer.contentsGravity = kCAGravityResize;
                     [(UIView *)v setNeedsDisplay];
                     TBLog(@"时钟表盘：已强制写入 %.0fx%.0f", face.size.width, face.size.height);
+                } else {
+                    // 主题没有表盘素材 / 已恢复系统默认：什么都不写！
+                    // 系统原实现返回的那张可能自带指针，写进 layer.contents 会和指针图层
+                    // 叠成两套针（这就是"恢复默认多一套指针"）。只清掉我们写过的，让系统重建。
+                    ((UIView *)v).layer.contents = nil;
+                    @try { [v setValue:nil forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
+                    if ([v respondsToSelector:NSSelectorFromString(@"updateUnanimated")]) {
+                        ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateUnanimated"));
+                    }
+                    [v setNeedsLayout];
+                    [v setNeedsDisplay];
+                    TBLog(@"时钟表盘：无素材 → 清除自写表盘，交回系统");
                 }
             }
         } @catch (NSException *e) { }
