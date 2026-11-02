@@ -947,23 +947,6 @@ static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
 static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *iconsOut) {
     if (!v || depth > 12) return 0;
     NSInteger fixed = 0;
-    // SnowBoard 的刷新流程（丢缓存 → 重新取图）必须作用在「图标图片视图」上。
-    // 之前误对着时钟图标视图 / 文件夹图标视图调用，换主题时会把 SpringBoard 搞崩。
-    @try {
-        SEL ivSel = NSSelectorFromString(@"_iconImageView");
-        if ([v respondsToSelector:ivSel]) {
-            id iv = ((id (*)(id, SEL))objc_msgSend)(v, ivSel);
-            if (iv) {
-                // 只调用「时钟指针重画」这一个专用方法；其余私有方法
-                //（clearCachedImages / updateImageAnimated: / _updateOverlayImage）
-                // 风险高，换主题时曾把 SpringBoard 搞崩，这里不再调用。
-                if ([iv respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
-                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"updateClockImages"));
-                }
-            }
-        }
-    } @catch (NSException *e) { }
-
     NSString *vcls = NSStringFromClass([v class]);
     BOOL special = ([vcls rangeOfString:@"Folder"].location != NSNotFound) ||
                    ([vcls rangeOfString:@"Clock"].location != NSNotFound) ||
@@ -990,6 +973,7 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
 static void TBHealAllIconViews(void) {
     if (gHealDepth > 0) return;
     gHealDepth++;
+    TBLog(@"heal: 开始遍历窗口树");
     @try {
         NSInteger fixed = 0;
         NSMutableArray *seen = [NSMutableArray array];
@@ -997,6 +981,7 @@ static void TBHealAllIconViews(void) {
             fixed += TBHealViewTree(w, 0, seen);
             if (fixed > 400) break;   // 上限保护
         }
+        TBLog(@"heal: 遍历完成 fixed=%ld seen=%lu", (long)fixed, (unsigned long)seen.count);
         if (fixed > 0) TBLog(@"换主题后重贴 %ld 个图标视图（%lu 个图标）", (long)fixed, (unsigned long)seen.count);
 
         // 只清「屏幕上真正碰到」的这些图标，避免 purgeAllCachedImages 一次清掉
@@ -1005,9 +990,12 @@ static void TBHealAllIconViews(void) {
             [gLock lock];
             NSArray *cacheList = gCaches.allObjects;
             [gLock unlock];
+            TBLog(@"heal: 开始按需清缓存 %lu 个图标", (unsigned long)seen.count);
             for (NSValue *cv in cacheList) { TBPurgeIcons(cv, seen); }
+            TBLog(@"heal: 清缓存完成");
         }
     } @catch (NSException *e) { }
+    TBLog(@"heal: 结束");
     gHealDepth--;
 }
 
