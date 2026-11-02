@@ -458,10 +458,6 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         }]];
         [self presentViewController:ac animated:YES completion:nil];
     }];
-    // 兜底：直接给 action 上底色。系统默认会画成灰底，一旦滑动容器没及时被套上
-    // 样式就会露灰；这里设成同一套玻璃色，最差情况也不会是灰的。
-    del.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
-                                         [UIColor colorWithWhite:1 alpha:0.14]);
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 

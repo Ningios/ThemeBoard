@@ -1069,53 +1069,6 @@ static BOOL TBApplyThemeToIconView(id self) {
 
 static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
 
-// ---- 时钟表盘：换主题时把「我们发出去的表盘图」就地换成新主题的 ----
-static NSMutableArray *gClockFaces;   // 我们返回给系统的时钟表盘图（保留最近 8 张）
-static NSMutableSet  *gClockFaceCGs;  // 对应的 CGImage 指针
-
-static void TBRegisterClockFace(UIImage *img) {
-    if (!img) return;
-    @try {
-        if (!gClockFaces) { gClockFaces = [NSMutableArray array]; gClockFaceCGs = [NSMutableSet set]; }
-        if (![gClockFaces containsObject:img]) {
-            [gClockFaces addObject:img];
-            if (img.CGImage) [gClockFaceCGs addObject:[NSValue valueWithPointer:img.CGImage]];
-            while (gClockFaces.count > 8) [gClockFaces removeObjectAtIndex:0];
-        }
-    } @catch (NSException *e) { }
-}
-
-static BOOL TBIsOurClockFaceImage(UIImage *img) {
-    if (!img) return NO;
-    if (gClockFaces && [gClockFaces containsObject:img]) return YES;
-    if (img.CGImage && gClockFaceCGs) return [gClockFaceCGs containsObject:[NSValue valueWithPointer:img.CGImage]];
-    return NO;
-}
-
-static BOOL TBIsOurClockFaceCG(CGImageRef cg) {
-    if (!cg || !gClockFaceCGs) return NO;
-    return [gClockFaceCGs containsObject:[NSValue valueWithPointer:cg]];
-}
-
-/// 递归替换：只动「确认是我们发出去的」那些图，系统的指针层一律不碰
-static NSInteger TBClockSwapFace(UIView *v, UIImage *face) {
-    if (!v) return 0;
-    NSInteger n = 0;
-    @try {
-        if ([v isKindOfClass:[UIImageView class]]) {
-            UIImageView *iv = (UIImageView *)v;
-            if (TBIsOurClockFaceImage(iv.image)) { iv.image = face; n++; }
-        }
-        id c = v.layer.contents;
-        if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID()) {
-            CGImageRef cg = (__bridge CGImageRef)c;
-            if (TBIsOurClockFaceCG(cg)) { v.layer.contents = (__bridge id)face.CGImage; n++; }
-        }
-    } @catch (NSException *e) { }
-    for (UIView *sv in v.subviews) n += TBClockSwapFace(sv, face);
-    return n;
-}
-
 static NSString *TBViewTreeDesc(UIView *v, NSInteger depth) {
     NSMutableString *s = [NSMutableString string];
     for (NSInteger i = 0; i < depth; i++) [s appendString:@"  "];
@@ -1194,14 +1147,18 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
             }
-            // 【不要清缓存】purgeCachedImagesForIcons: 对屏幕上正在显示的图标调用会
-            // 直接干掉 SpringBoard（0.13.67 实测：日志停在重画之后，随后连续重生 11 次）。
-            // 改成下面这样：把「我们自己发出去的旧主题表盘」就地换成新主题的表盘。
-            UIImage *cface = TBResourceImage(@"ClockIconBackgroundSquare");
-            if (cface) {
-                NSInteger sw = TBClockSwapFace((UIView *)v, cface);
-                if (sw > 0) TBLog(@"时钟表盘替换：%ld 处", (long)sw);
-                else TBLog(@"时钟表盘替换：0 处（表盘不在我们发出的图里）");
+            // SnowBoard 同款刷新顺序：clearCachedImages → updateClockImages →
+            // updateImageAnimated: 。只对【这一个时钟视图】调用（对整棵视图树调用会崩）。
+            if ([v respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
+                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"clearCachedImages"));
+            } else if ([v respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
+                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_clearCachedImages"));
+            }
+            if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
+                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
+            }
+            if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
             }
         } @catch (NSException *e) { }
     }
@@ -1805,7 +1762,6 @@ static UIImage *tb_imageNamed(id self, SEL _cmd, NSString *name) {
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 imageNamed %@", name);
         TBLog(@"serve 资源 %@", name);
-        if ([name hasPrefix:@"ClockIconBackground"]) TBRegisterClockFace(img);
         return img;
     }
     return sys0;
@@ -1825,7 +1781,6 @@ static UIImage *tb_imageNamedInBundle(id self, SEL _cmd, NSString *name, NSBundl
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 inBundle %@", name);
         TBLog(@"serve 资源(bundle) %@", name);
-        if ([name hasPrefix:@"ClockIconBackground"]) TBRegisterClockFace(img);
         return img;
     }
     return sys;
@@ -1843,7 +1798,6 @@ static UIImage *tb_imageNamedInBundleTrait(id self, SEL _cmd, NSString *name, NS
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 inBundleTrait %@", name);
         TBLog(@"serve 资源(bundleTrait) %@", name);
-        if ([name hasPrefix:@"ClockIconBackground"]) TBRegisterClockFace(img);
         return img;
     }
     return sys;
@@ -2112,6 +2066,89 @@ static BOOL gDoneISIcon = NO;
 static BOOL gDoneActivity = NO;
 static BOOL gDoneCache = NO;
 static BOOL gDoneClock = NO;
+
+// ---- 时钟表盘：SBHClockApplicationIconImageView 把整块表盘合成进自己的 contents，
+//      没有子视图，所以「重画」不会让它重新取图。SnowBoard 的做法是 hook
+//      SBLiveIconImageView -contentsImage / -squareContentsImage，直接返回主题表盘。
+typedef id (*ContentsImgFn)(id, SEL);
+static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
+static __thread BOOL sInClockContents = NO;   // 防自调用（hook 装错层会无限递归）
+
+static BOOL TBIsClockView(id v) {
+    NSString *cls = NSStringFromClass([v class]);
+    return [cls rangeOfString:@"Clock"].location != NSNotFound;
+}
+
+/// 按视图当前尺寸把主题表盘做成对应像素尺寸的图
+static UIImage *TBClockFaceForView(UIView *v) {
+    UIImage *face = TBResourceImage(@"ClockIconBackgroundSquare");
+    if (!face) return nil;
+    CGFloat sc = [UIScreen mainScreen].scale;
+    if (sc < 0.5) sc = 3.0;
+    TBInfo info; info.size = v.bounds.size; info.scale = sc; info.ratio = 0;
+    if (info.size.width < 1 || info.size.height < 1) { info.size = CGSizeMake(60, 60); }
+    return TBFitImage(face, info);
+}
+
+static id tb_clockContentsImage(id self, SEL _cmd) {
+    if (!sInClockContents && TBIsClockView(self)) {
+        UIImage *face = TBClockFaceForView((UIView *)self);
+        if (face) {
+            TBLogOnce(@"clockface|contents", @"时钟表盘：contentsImage 返回主题表盘 %.0fx%.0f",
+                      face.size.width, face.size.height);
+            return face;
+        }
+    }
+    if (sInClockContents) return nil;                 // 逃出递归
+    if (!o_contentsImageLive) return nil;
+    sInClockContents = YES;
+    id r = o_contentsImageLive(self, _cmd);
+    sInClockContents = NO;
+    return r;
+}
+
+static id tb_clockSquareContentsImage(id self, SEL _cmd) {
+    if (!sInClockContents && TBIsClockView(self)) {
+        UIImage *face = TBClockFaceForView((UIView *)self);
+        if (face) return face;
+    }
+    if (sInClockContents) return nil;
+    if (!o_squareContentsImageLive) return nil;
+    sInClockContents = YES;
+    id r = o_squareContentsImageLive(self, _cmd);
+    sInClockContents = NO;
+    return r;
+}
+
+/// 找真正「自己声明」了这个方法的类（不能挂到只有继承实现的类上，否则原实现
+/// 指针会指向我们自己的 hook → 自调用递归）
+static Class TBClassDeclaring(Class cls, SEL sel) {
+    for (Class c = cls; c && c != [NSObject class]; c = class_getSuperclass(c)) {
+        unsigned int n = 0;
+        Method *ms = class_copyMethodList(c, &n);
+        BOOL found = NO;
+        for (unsigned int i = 0; i < n; i++) {
+            if (method_getName(ms[i]) == sel) { found = YES; break; }
+        }
+        free(ms);
+        if (found) return c;
+    }
+    return Nil;
+}
+
+/// 安装：优先挂 SBLiveIconImageView（时钟视图的父类，SnowBoard 也是挂这里），
+/// 再兜底挂 SBIconImageView 的同名实现。
+static void TBInstallClockContentsHooks(void) {
+    Class live = NSClassFromString(@"SBLiveIconImageView");
+    if (!live) live = NSClassFromString(@"SBIconImageView");
+    if (!live) { TBLog(@"contentsImage：找不到图标图片视图类"); return; }
+    Class c1 = TBClassDeclaring(live, NSSelectorFromString(@"contentsImage"));
+    if (c1) o_contentsImageLive = (ContentsImgFn)TBHookClass(c1, @"contentsImage",
+                                                             (IMP)tb_clockContentsImage, "时钟contents");
+    Class c2 = TBClassDeclaring(live, NSSelectorFromString(@"squareContentsImage"));
+    if (c2) o_squareContentsImageLive = (ContentsImgFn)TBHookClass(c2, @"squareContentsImage",
+                                                                   (IMP)tb_clockSquareContentsImage, "时钟squareContents");
+}
 static BOOL gDoneSpecifier = NO;
 static BOOL gDoneGen = NO;
 static BOOL gDoneISGeneration = NO;
@@ -2184,6 +2221,8 @@ static void TBInstall(void) {
     if (clockView && !gDoneClock) {
         gDoneClock = YES;
         // 指针一律用系统自己的（黑时针 + 黑分针 + 橙秒针），不注入主题指针。
+        // 表盘：hook contentsImage，始终返回当前主题的表盘（换主题后自然就是新表盘）
+        TBInstallClockContentsHooks();
         // 不接管 iconImageWithImageInfo:includingMask:
         // 那一层返回的是「表盘+指针」的合成图，接管后系统画的指针会变形
         //（三根一样粗、橙秒针消失）。改由资源重定向提供 ClockIconBackgroundSquare，
