@@ -446,6 +446,9 @@ static void TBSwipeApplyToPullView(UIView *pull) {
     pull.layer.cornerCurve = kCACornerCurveContinuous;
     pull.clipsToBounds = YES;
     for (UIView *btn in pull.subviews) {
+        // 卡片在 cell 里是上下各内缩 2pt（见 TBGlassCellBG：top +2 / bottom -2），
+        // 而滑动容器是整行高 → 不内缩的话删除块会比卡片高，盖住上下两行。
+        btn.frame = CGRectInset(btn.frame, 0, 2);
         // 底色由 action 自己铺（见 trailingSwipeActions… 里的 del.backgroundColor），
         // 这里不要再叠一层白，否则两层半透明白叠起来会显得发白发实。
         btn.backgroundColor = [UIColor clearColor];

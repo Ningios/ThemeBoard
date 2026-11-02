@@ -1068,6 +1068,7 @@ static BOOL TBApplyThemeToIconView(id self) {
 }
 
 static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
+static UIImage *TBClockFaceForView(UIView *v);   // 定义在后面（时钟段）
 
 static NSString *TBViewTreeDesc(UIView *v, NSInteger depth) {
     NSMutableString *s = [NSMutableString string];
@@ -1130,6 +1131,23 @@ static void TBClockDumpNow(id v) {
         }
         TBLog(@"时钟方法: %@", ms);
         TBLog(@"时钟视图树:\n%@", TBViewTreeDesc((UIView *)v, 0));
+        @try {
+            UIView *uv = (UIView *)v;
+            NSMutableString *ls = [NSMutableString string];
+            [ls appendFormat:@"自身 layer contents=%@\n",
+                uv.layer.contents ? @"有" : @"无"];
+            for (CALayer *l in uv.layer.sublayers) {
+                CGSize cs = CGSizeZero;
+                id c = l.contents;
+                if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID()) {
+                    cs = CGSizeMake(CGImageGetWidth((__bridge CGImageRef)c),
+                                    CGImageGetHeight((__bridge CGImageRef)c));
+                }
+                [ls appendFormat:@"  子层 %@ f=%@ contents=%.0fx%.0f\n",
+                    NSStringFromClass([l class]), NSStringFromCGRect(l.frame), cs.width, cs.height];
+            }
+            TBLog(@"时钟图层:\n%@", ls);
+        } @catch (NSException *e) { }
     } @catch (NSException *e) { TBLog(@"时钟探针异常: %@", e.reason); }
 }
 
@@ -1159,6 +1177,19 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             }
             if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
                 ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
+            }
+            // 不指望系统重取：直接把当前主题的表盘写进这个视图（它就是表盘本身，
+            // 没有子视图；指针是它自己的子图层/自己画的）。
+            UIImage *cface = TBClockFaceForView((UIView *)v);
+            if (cface && cface.CGImage) {
+                @try {
+                    ((UIView *)v).layer.contents = (__bridge id)cface.CGImage;
+                    [v setValue:cface forKey:@"mappedContentsImage"];
+                    TBLog(@"时钟表盘：直接写入 layer.contents %.0fx%.0f",
+                          cface.size.width, cface.size.height);
+                } @catch (NSException *e) {
+                    TBLog(@"时钟表盘：写入失败 %@", e.reason);
+                }
             }
         } @catch (NSException *e) { }
     }
