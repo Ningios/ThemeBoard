@@ -670,6 +670,43 @@ static UIImage *TBCalendarCompositeImage(UIImage *bg) {
 }
 
 /// 取主题图：锁内只做字典查找，读盘/绘制都在锁外，避免 SpringBoard 被拖死
+/// 图标圆角遮罩：系统图标是超椭圆遮罩（不是普通圆角矩形）。主题里方角素材
+/// （WPS / 设置 / 相机 / 备忘录这些）不打遮罩就是方块，这里统一按超椭圆裁。
+static UIImage *TBIconRoundedImage(UIImage *img) {
+    if (!img) return img;
+    CGSize pt = img.size;
+    if (pt.width < 16 || pt.height < 16) return img;
+    CGFloat w = pt.width, h = pt.height;
+    CGFloat a = w / 2.0, b = h / 2.0, cx = w / 2.0, cy = h / 2.0;
+    const CGFloat n = 5.0;                 // 苹果图标轮廓 ≈ 超椭圆 n=5
+    const NSInteger steps = 180;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = img.scale;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *rd = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
+    return [rd imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        UIBezierPath *path = [UIBezierPath bezierPath];
+        for (NSInteger i = 0; i <= steps * 4; i++) {
+            CGFloat t = (CGFloat)i / (CGFloat)(steps * 4) * 2.0 * M_PI;
+            CGFloat ct = cos(t), st = sin(t);
+            CGFloat x = cx + a * copysign(pow(fabs(ct), 2.0 / n), ct);
+            CGFloat y = cy + b * copysign(pow(fabs(st), 2.0 / n), st);
+            if (i == 0) [path moveToPoint:CGPointMake(x, y)];
+            else [path addLineToPoint:CGPointMake(x, y)];
+        }
+        [path closePath];
+        [path addClip];
+        [img drawInRect:CGRectMake(0, 0, w, h)];
+    }];
+}
+
+static UIImage *gSystemClockFace;   // 系统自己的时钟表盘（主题取消后还原用）
+
+/// 无主题 / 主题没有表盘素材时，把系统原来的表盘还回去
+static UIImage *TBSystemClockFace(void) {
+    return gSystemClockFace;
+}
+
 static UIImage *TBImageForBundle(NSString *bid) {
     if (!bid.length || !TBEnabled()) return nil;
     if (TBSafeMode()) return nil;   // 安全模式：只记日志，绝不改图
@@ -717,9 +754,9 @@ static UIImage *TBImageForBundle(NSString *bid) {
             static int logged = 0;
             if (logged < 20) { logged++; TBLog(@"dynamic %@", bid); }
             img = TBDynamicIcon(img, bid);
-        } else {
-            [gImageCache setObject:img forKey:bid];
         }
+        img = TBIconRoundedImage(img);      // 方角素材统一裁成系统那种圆角
+        if (!dynamic) [gImageCache setObject:img forKey:bid];
     }
     return img;
 }
@@ -1793,6 +1830,7 @@ static UIImage *tb_imageNamed(id self, SEL _cmd, NSString *name) {
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 imageNamed %@", name);
         TBLog(@"serve 资源 %@", name);
+        if ([name hasPrefix:@"ClockIconBackground"] && sys0) gSystemClockFace = sys0;
         return img;
     }
     return sys0;
@@ -1812,6 +1850,7 @@ static UIImage *tb_imageNamedInBundle(id self, SEL _cmd, NSString *name, NSBundl
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 inBundle %@", name);
         TBLog(@"serve 资源(bundle) %@", name);
+        if ([name hasPrefix:@"ClockIconBackground"] && sys) gSystemClockFace = sys;
         return img;
     }
     return sys;
@@ -1829,6 +1868,7 @@ static UIImage *tb_imageNamedInBundleTrait(id self, SEL _cmd, NSString *name, NS
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 inBundleTrait %@", name);
         TBLog(@"serve 资源(bundleTrait) %@", name);
+        if ([name hasPrefix:@"ClockIconBackground"] && sys) gSystemClockFace = sys;
         return img;
     }
     return sys;
@@ -2193,7 +2233,12 @@ static UIImage *TBClockRoundedFace(UIImage *img) {
 }
 
 static UIImage *TBClockFaceForView(UIView *v) {
+    // 1) 主题 Bundles/ 下的表盘素材（ClockIconBackgroundSquare）
     UIImage *face = TBResourceImage(@"ClockIconBackgroundSquare");
+    // 2) 主题没有 Bundles 目录 → 用主题 IconBundles 里的时钟图标当表盘
+    if (!face) face = TBImageForBundle(@"com.apple.mobiletimer");
+    // 3) 没主题 / 主题没有时钟素材 → 还原系统自己的表盘
+    if (!face) face = TBSystemClockFace();
     if (!face) return nil;
     CGFloat sc = [UIScreen mainScreen].scale;
     if (sc < 0.5) sc = 3.0;

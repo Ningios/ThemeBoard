@@ -4,7 +4,6 @@
 #import "TBPrefs.h"
 #import "TBGlass.h"
 #import "TBTableViewController.h"
-#import <objc/runtime.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 // 统一的文件夹选择器：iOS14+ 走 UTType，老系统回退；任何异常都不让它崩
 static UIDocumentPickerViewController *TBNewFolderPicker(void) {
@@ -33,7 +32,6 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
 @implementation TBThemeListController
 
 - (void)viewDidLoad {
-    [[self class] tb_installSwipeStyle];
     [super viewDidLoad];
     self.title = @"主题";
     self.tableView.rowHeight = 76;
@@ -366,33 +364,46 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 #pragma mark - 删除
 
+/// 给这一行套上样式；找不到滑动容器返回 NO（外观与原来完全一致，只是把
+/// 「找容器」这件事做得更彻底：cell / cell 的父视图 / 表格 / 整个窗口都试一遍）
+- (BOOL)styleSwipeForRowAtIndexPath:(NSIndexPath *)indexPath tableView:(UITableView *)tableView {
+    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+    UIView *root = cell ? (cell.superview ?: cell) : tableView;
+    UIView *pull = nil;
+    if (root) pull = [self findSwipePullView:root depth:0];
+    if (!pull && cell) pull = [self findSwipePullView:cell depth:0];
+    if (!pull) pull = [self findSwipePullView:tableView depth:0];
+    if (!pull) {
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            pull = [self findSwipePullView:w depth:0];
+            if (pull) break;
+        }
+    }
+    if (!pull) return NO;
+    [self styleSwipePullView:pull];
+    return YES;
+}
+
+/// 原来只在 0.05 秒找一次，那一次没抓到容器就回落成系统默认灰底 —— 这就是
+/// 「有时候变灰」。没抓到才补试几次，抓到了就什么都不额外做。
+- (void)retryStyleSwipeForRowAtIndexPath:(NSIndexPath *)indexPath
+                               tableView:(UITableView *)tableView
+                                 attempt:(NSInteger)attempt {
+    if (attempt >= 4) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if ([self styleSwipeForRowAtIndexPath:indexPath tableView:tableView]) return;
+        [self retryStyleSwipeForRowAtIndexPath:indexPath tableView:tableView attempt:attempt + 1];
+    });
+}
+
 - (void)tableView:(UITableView *)tableView willBeginEditingRowAtIndexPath:(NSIndexPath *)indexPath {
-    // 只给这一次滑动的那一行做样式，绝不碰表格其它部分。
-    // 之前只试一次 0.05s：滑动容器有时是稍后才建好 / 建好又被系统重建，
-    // 那一次没抓到就回落成系统默认灰底 → 表现就是「有时候变灰」。
-    // 改成多次重试 + 全窗口扫描（不再依赖 cellForRowAtIndexPath 拿得到 cell）。
-    for (NSNumber *d in @[@0.02, @0.08, @0.18, @0.32, @0.55, @0.85]) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d.doubleValue * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [self styleEverySwipePullView];
-        });
-    }
-}
-
-/// 扫描所有窗口，给每一个滑动容器套样式
-- (void)styleEverySwipePullView {
-    for (UIWindow *w in [UIApplication sharedApplication].windows) {
-        [self stylePullViewsIn:w depth:0];
-    }
-}
-
-- (void)stylePullViewsIn:(UIView *)root depth:(NSInteger)depth {
-    if (!root || depth > 6) return;
-    if ([NSStringFromClass(root.class) containsString:@"UISwipeActionPullView"]) {
-        [self styleSwipePullView:root];
-        return;
-    }
-    for (UIView *v in root.subviews) [self stylePullViewsIn:v depth:depth + 1];
+    // 只在这一次滑动的那一行里做样式，绝不碰表格其它部分
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if ([self styleSwipeForRowAtIndexPath:indexPath tableView:tableView]) return;
+        [self retryStyleSwipeForRowAtIndexPath:indexPath tableView:tableView attempt:0];
+    });
 }
 
 - (UIView *)findSwipePullView:(UIView *)root depth:(NSInteger)depth {
@@ -422,88 +433,6 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         btn.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
                                                [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
         [self paintRedLabels:btn depth:0];
-    }
-}
-
-#pragma mark - 左滑删除样式（swizzle：每次滑动都套上，不看时间点脸色）
-
-static void TBSwipeRedLabels(UIView *v, NSInteger depth) {
-    if (!v || depth > 3) return;
-    for (UIView *sub in v.subviews) {
-        if ([sub isKindOfClass:[UILabel class]]) {
-            ((UILabel *)sub).textColor = [UIColor systemRedColor];
-        } else {
-            TBSwipeRedLabels(sub, depth + 1);
-        }
-    }
-}
-
-// 卡片的几何：TBGlassCellBG(12) → 上下各内缩 2pt、左右各内缩 12pt、圆角 20
-static const NSInteger kTBSwipeGlassTag = 0x54424731;   // 'TBG1'
-
-static BOOL TBSwipeViewHasLabel(UIView *v) {
-    for (UIView *sv in v.subviews) {
-        if ([sv isKindOfClass:[UILabel class]]) return YES;
-    }
-    return NO;
-}
-
-static void TBSwipeApplyToPullView(UIView *pull) {
-    if (!pull) return;
-    CGFloat scale = [UIScreen mainScreen].scale;
-    pull.backgroundColor = [UIColor clearColor];
-
-    // 自己垫一块【和左边卡片一样大】的圆角玻璃：
-    // 高度 = 容器高 - 4（卡片上下各 2pt），右边缘 = 容器右边 - 12（卡片右边缩 12pt）。
-    UIView *glass = [pull viewWithTag:kTBSwipeGlassTag];
-    if (!glass) {
-        glass = [[UIView alloc] initWithFrame:pull.bounds];
-        glass.tag = kTBSwipeGlassTag;
-        glass.userInteractionEnabled = NO;
-        // 放在最上层：系统自己那层灰底（方图）在下面，被我们这块盖住就看不见了；
-        // 带文字的按钮随后提到最前面，所以红字仍然可见（按钮底色已置透明）。
-        [pull addSubview:glass];
-    }
-    CGRect b = pull.bounds;
-    glass.frame = CGRectMake(0, 2, MAX(0, b.size.width - 12), MAX(0, b.size.height - 4));
-    glass.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
-                                           [UIColor colorWithWhite:1 alpha:0.14]);
-    glass.layer.cornerRadius = 20;
-    glass.layer.cornerCurve = kCACornerCurveContinuous;
-    glass.clipsToBounds = YES;
-    glass.layer.borderWidth = 1.0 / scale;
-    glass.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                             [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
-
-    NSMutableArray *labelHosts = [NSMutableArray array];
-    for (UIView *btn in pull.subviews) {
-        if (btn == glass) continue;
-        btn.backgroundColor = [UIColor clearColor];   // 系统那块灰底色不要露出来
-        btn.layer.borderWidth = 0;
-        TBSwipeRedLabels(btn, 0);
-        if (TBSwipeViewHasLabel(btn)) [labelHosts addObject:btn];
-    }
-    for (UIView *host in labelHosts) [pull bringSubviewToFront:host];
-}
-
-static void (*o_swipePullLayout)(id, SEL);
-static void tb_swipePullLayout(id self, SEL _cmd) {
-    if (o_swipePullLayout) o_swipePullLayout(self, _cmd);
-    TBSwipeApplyToPullView((UIView *)self);
-}
-
-/// 只装一次：滑动容器每次布局都重新套样式 —— 这样不管滑动发生在什么时候、
-/// 容器被系统重建几次，样式都在，不会回落成系统默认灰底。
-+ (void)tb_installSwipeStyle {
-    static BOOL done = NO;
-    if (done) return;
-    done = YES;
-    Class pull = NSClassFromString(@"UISwipeActionPullView");
-    if (!pull) return;
-    Method m = class_getInstanceMethod(pull, @selector(layoutSubviews));
-    if (m) {
-        o_swipePullLayout = (void (*)(id, SEL))method_getImplementation(m);
-        method_setImplementation(m, (IMP)tb_swipePullLayout);
     }
 }
 
@@ -542,11 +471,6 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         }]];
         [self presentViewController:ac animated:YES completion:nil];
     }];
-    // action 自己必须给底色：系统默认是灰底，只靠外面套样式一旦时机不对就会露灰。
-    // 用和滑动容器同一套玻璃色，保证任何情况下都是「玻璃 + 红字」。
-    // 底色交给滑动容器自己画（圆角玻璃），这里必须置空：系统画的是一块【方】底色，
-    // 我们的圆角罩不住它，滑完就露成方块。
-    del.backgroundColor = [UIColor clearColor];
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 
