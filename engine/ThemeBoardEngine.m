@@ -2114,7 +2114,20 @@ static void TBApplyClockImagesToSet(id set) {
     NSInteger applied = 0, restored = 0;
     static NSMutableDictionary *gOriginalMembers = nil;
     static dispatch_once_t onceMembers;
+    static BOOL captured = NO;
     dispatch_once(&onceMembers, ^{ gOriginalMembers = [NSMutableDictionary dictionary]; });
+    if (!captured) {
+        // 只在这套针集【第一次被我们碰到、还没注入过】时记录系统原图 —— 这是唯一干净的一份。
+        // （之前是"每项第一次见到就记"，结果把自己注入过的主题针也记成了系统原图 → 恢复时多一套针）
+        captured = YES;
+        for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+            SEL g = NSSelectorFromString(map[i].key);
+            if (![set respondsToSelector:g]) continue;
+            id v = ((id (*)(id, SEL))objc_msgSend)(set, g);
+            if ([v isKindOfClass:[UIImage class]]) gOriginalMembers[map[i].key] = v;
+        }
+        TBLog(@"时钟图像集：已记录系统原图 %lu 项", (unsigned long)gOriginalMembers.count);
+    }
     for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         SEL setter0 = NSSelectorFromString([NSString stringWithFormat:@"set%@%@:",
                                            [[map[i].key substringToIndex:1] uppercaseString],
@@ -2150,9 +2163,6 @@ static void TBApplyClockImagesToSet(id set) {
         dispatch_once(&onceTok, ^{ gMemberSize = [NSMutableDictionary dictionary]; });
         CGSize target = orig ? orig.size : CGSizeZero;
         NSValue *cachedSize = gMemberSize[map[i].key];
-        if ((target.width >= 4 && target.height >= 4) && !gOriginalMembers[map[i].key] && orig) {
-            gOriginalMembers[map[i].key] = orig;      // 记住系统原样，供以后还原
-        }
         if (target.width < 4 || target.height < 4) {
             if (cachedSize) {
                 target = cachedSize.CGSizeValue;
