@@ -1585,7 +1585,13 @@ static UIImage *tb_imageNamed(id self, SEL _cmd, NSString *name) {
     }
     UIImage *img = TBResourceImage(name);
     TBLogResourceProbe(name, img ? @"hit" : nil);
-    if (img) { gServe++; TBLog(@"serve 资源 %@", name); return img; }
+    if (img) {
+        gServe++;
+        if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
+                                        @"res2 imageNamed %@", name);
+        TBLog(@"serve 资源 %@", name);
+        return img;
+    }
     return o_imageNamed ? o_imageNamed(self, _cmd, name) : nil;
 }
 
@@ -1600,6 +1606,8 @@ static UIImage *tb_imageNamedInBundle(id self, SEL _cmd, NSString *name, NSBundl
     TBLogResourceProbe(name, img ? @"hit(bundle)" : nil);
     if (img) {
         gServe++;
+        if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
+                                        @"res2 inBundle %@", name);
         TBLog(@"serve 资源(bundle) %@", name);
         return img;
     }
@@ -1615,6 +1623,8 @@ static UIImage *tb_imageNamedInBundleTrait(id self, SEL _cmd, NSString *name, NS
     TBLogResourceProbe(name, img ? @"hit(bundleTrait)" : nil);
     if (img) {
         gServe++;
+        if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
+                                        @"res2 inBundleTrait %@", name);
         TBLog(@"serve 资源(bundleTrait) %@", name);
         return img;
     }
