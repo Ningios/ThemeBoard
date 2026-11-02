@@ -327,19 +327,26 @@ static BOOL TBIsGlassResource(NSString *name) {
     return glass;
 }
 
-/// 把玻璃层叠在系统原图之上（保住系统底盘的刻度/结构，只加玻璃质感）
-static UIImage *TBCompositeOver(UIImage *base, UIImage *overlay) {
-    if (!base) return overlay;
-    if (!overlay) return base;
-    CGSize size = (base.size.width > 1) ? base.size : overlay.size;
+/// 把半透明玻璃层垫上白色底盘，输出一张「完整表盘」用于真替换。
+/// 不能直接拿玻璃当底图（透明处会露出时钟视图的深色底盘 → 变黑）。
+static UIImage *TBFlattenOverWhite(UIImage *overlay) {
+    if (!overlay) return nil;
+    CGSize size = overlay.size;
     if (size.width < 1) return overlay;
+    if (TBImageIsMostlyOpaque(overlay.CGImage)) return overlay;
+    UIImage *base = [UIImage imageWithCGImage:overlay.CGImage
+                                        scale:overlay.scale
+                                  orientation:UIImageOrientationUp];
+    CGFloat scale = overlay.scale > 0 ? overlay.scale : 3.0;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-    fmt.scale = base.scale > 0 ? base.scale : 3.0;
+    fmt.scale = scale;
     fmt.opaque = NO;
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size format:fmt];
     return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextRef gc = ctx.CGContext;
+        CGContextSetRGBFillColor(gc, 1, 1, 1, 1);
+        CGContextFillRect(gc, CGRectMake(0, 0, size.width, size.height));
         [base drawInRect:CGRectMake(0, 0, size.width, size.height)];
-        [overlay drawInRect:CGRectMake(0, 0, size.width, size.height)];
     }];
 }
 
@@ -583,6 +590,9 @@ static UIImage *TBCalendarCompositeImage(UIImage *bg) {
 static UIImage *TBImageForBundle(NSString *bid) {
     if (!bid.length || !TBEnabled()) return nil;
     if (TBSafeMode()) return nil;   // 安全模式：只记日志，绝不改图
+    // 动态时钟图标由 SBHClockApplicationIconImageView 实时合成（表盘素材 + 系统指针），
+    // 不能再用 IconBundles 里的静态时钟图，否则会和表盘叠成一张（表现为黑钟/双底图）。
+    if ([bid isEqualToString:@"com.apple.mobiletimer"]) return nil;
 
     [gLock lock];
     TBLoadIndex();
@@ -1590,12 +1600,6 @@ static UIImage *tb_imageNamedInBundle(id self, SEL _cmd, NSString *name, NSBundl
     TBLogResourceProbe(name, img ? @"hit(bundle)" : nil);
     if (img) {
         gServe++;
-        if (!TBImageIsMostlyOpaque(img.CGImage)) {
-            TBLogOnce([@"glasscomp|" stringByAppendingString:name.lowercaseString],
-                      @"玻璃素材叠加到系统底图 %@", name);
-            UIImage *out = TBCompositeOver(sys, img);
-            if (out) return out;
-        }
         TBLog(@"serve 资源(bundle) %@", name);
         return img;
     }
@@ -1611,12 +1615,6 @@ static UIImage *tb_imageNamedInBundleTrait(id self, SEL _cmd, NSString *name, NS
     TBLogResourceProbe(name, img ? @"hit(bundleTrait)" : nil);
     if (img) {
         gServe++;
-        if (!TBImageIsMostlyOpaque(img.CGImage)) {
-            TBLogOnce([@"glasscomp|" stringByAppendingString:name.lowercaseString],
-                      @"玻璃素材叠加到系统底图 %@", name);
-            UIImage *out = TBCompositeOver(sys, img);
-            if (out) return out;
-        }
         TBLog(@"serve 资源(bundleTrait) %@", name);
         return img;
     }
@@ -1675,9 +1673,6 @@ static NSString *TBResourcePathNamed(NSString *name, NSString *ext) {
     NSString *key = ext.length ? [NSString stringWithFormat:@"%@.%@", name.lowercaseString, ext.lowercaseString]
                                : name.lowercaseString;
     NSString *hit = res[key] ?: res[name.lowercaseString];
-    // 半透明玻璃素材不拦路径：让系统拿到它自己的表盘，由后续 imageNamed
-    // 钩子把玻璃叠上去；否则玻璃直接当底图会露出黑色底层（时钟变黑）
-    if (hit.length && TBIsGlassResource(name)) return nil;
     return hit;
 }
 
