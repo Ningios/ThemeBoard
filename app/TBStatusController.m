@@ -3,6 +3,42 @@
 #import "TBThemeScanner.h"
 #import "TBTheme.h"
 #import "TBGlass.h"
+#import <sys/sysctl.h>
+
+/// 完整机型：hw.machine（如 iPhone15,2）→ 市场名
+static NSString *TBDeviceModelName(void) {
+    char buf[64] = {0};
+    size_t len = sizeof(buf);
+    if (sysctlbyname("hw.machine", buf, &len, NULL, 0) != 0 || len == 0) {
+        return [[UIDevice currentDevice] model];
+    }
+    NSString *ident = [NSString stringWithUTF8String:buf] ?: @"";
+    static NSDictionary *map = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        map = @{
+            @"iPhone12,1": @"iPhone 11", @"iPhone12,3": @"iPhone 11 Pro",
+            @"iPhone12,5": @"iPhone 11 Pro Max", @"iPhone12,8": @"iPhone SE (第 2 代)",
+            @"iPhone13,1": @"iPhone 12 mini", @"iPhone13,2": @"iPhone 12",
+            @"iPhone13,3": @"iPhone 12 Pro", @"iPhone13,4": @"iPhone 12 Pro Max",
+            @"iPhone14,4": @"iPhone 13 mini", @"iPhone14,5": @"iPhone 13",
+            @"iPhone14,2": @"iPhone 13 Pro", @"iPhone14,3": @"iPhone 13 Pro Max",
+            @"iPhone14,6": @"iPhone SE (第 3 代)",
+            @"iPhone14,7": @"iPhone 14", @"iPhone14,8": @"iPhone 14 Plus",
+            @"iPhone15,2": @"iPhone 14 Pro", @"iPhone15,3": @"iPhone 14 Pro Max",
+            @"iPhone15,4": @"iPhone 15", @"iPhone15,5": @"iPhone 15 Plus",
+            @"iPhone16,1": @"iPhone 15 Pro", @"iPhone16,2": @"iPhone 15 Pro Max",
+            @"iPhone17,1": @"iPhone 16 Pro", @"iPhone17,2": @"iPhone 16 Pro Max",
+            @"iPhone17,3": @"iPhone 16", @"iPhone17,4": @"iPhone 16 Plus",
+            @"iPhone18,1": @"iPhone 17 Pro", @"iPhone18,2": @"iPhone 17 Pro Max",
+            @"iPhone18,3": @"iPhone 17", @"iPhone18,4": @"iPhone Air",
+        };
+    });
+    NSString *name = map[ident];
+    if (name) return [NSString stringWithFormat:@"%@ (%@)", name, ident];
+    return ident.length ? ident : [[UIDevice currentDevice] model];
+}
+
 
 @interface TBStatusController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *table;
@@ -187,12 +223,31 @@ static NSString *TBReadLogLossy(NSString *path) {
             dot.layer.cornerRadius = 5;
             cell.accessoryView = dot;
 
-            UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(58, 46, t.bounds.size.width - 120, 18)];
+            UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(58, 46, t.bounds.size.width - 170, 18)];
             sub.text = self.engineDetail;
             sub.font = [UIFont systemFontOfSize:13];
             sub.textColor = [UIColor secondaryLabelColor];
             sub.tag = 900;
             [cell.contentView addSubview:sub];
+
+            // 副标题右边：一键跳到日志目录
+            UIButton *logBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+            logBtn.translatesAutoresizingMaskIntoConstraints = NO;
+            [logBtn setImage:[UIImage systemImageNamed:@"folder"] forState:UIControlStateNormal];
+            logBtn.tintColor = [UIColor secondaryLabelColor];
+            logBtn.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                                    [UIColor colorWithWhite:1 alpha:0.12]);
+            logBtn.layer.cornerRadius = 8;
+            logBtn.layer.cornerCurve = kCACornerCurveContinuous;
+            TBApplyRim(logBtn, 0.45);
+            [logBtn addTarget:self action:@selector(openLogFolder) forControlEvents:UIControlEventTouchUpInside];
+            [cell.contentView addSubview:logBtn];
+            [NSLayoutConstraint activateConstraints:@[
+                [logBtn.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-14],
+                [logBtn.centerYAnchor constraintEqualToAnchor:sub.centerYAnchor],
+                [logBtn.widthAnchor constraintEqualToConstant:36],
+                [logBtn.heightAnchor constraintEqualToConstant:26],
+            ]];
         } else if (ip.row == 1) {
             cell.textLabel.text = @"当前主题";
             cell.detailTextLabel.text = [self activeTheme];
@@ -204,9 +259,11 @@ static NSString *TBReadLogLossy(NSString *path) {
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
         }
     } else if (ip.section == 1) {
+        NSString *ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
+        NSString *build = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"";
         NSArray *rows = @[@[@"系统", [[UIDevice currentDevice] systemVersion], @"iphone"],
-                          @[@"机型", [[UIDevice currentDevice] model], @"iphone.gen3"],
-                          @[@"版本", @"0.13.3", @"number"]];
+                          @[@"机型", TBDeviceModelName(), @"iphone.gen3"],
+                          @[@"版本", build.length ? [NSString stringWithFormat:@"%@ (%@)", ver, build] : ver, @"number"]];
         cell.imageView.image = [UIImage systemImageNamed:rows[ip.row][2]];
         cell.imageView.tintColor = [UIColor secondaryLabelColor];
         cell.textLabel.text = rows[ip.row][0];
@@ -219,11 +276,16 @@ static NSString *TBReadLogLossy(NSString *path) {
         logIcon.frame = CGRectMake(16, 14, 16, 16);
         [cell.contentView addSubview:logIcon];
 
-        UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(40, 8, t.bounds.size.width - 88, 268)];
+        UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(38, 8, t.bounds.size.width - 62, 268)];
         tv.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         tv.backgroundColor = [UIColor clearColor];
         tv.editable = NO;
-        tv.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+        // 长行（bundleID / 路径）也要折行，否则右边直接被裁掉
+        tv.textContainer.widthTracksTextView = YES;
+        tv.textContainer.lineBreakMode = NSLineBreakByCharWrapping;
+        tv.textContainerInset = UIEdgeInsetsZero;
+        tv.textContainer.lineFragmentPadding = 0;
+        tv.font = [UIFont monospacedSystemFontOfSize:10.5 weight:UIFontWeightRegular];
         tv.textColor = [UIColor secondaryLabelColor];
         tv.text = self.logText;
         [cell.contentView addSubview:tv];
@@ -239,6 +301,30 @@ static NSString *TBReadLogLossy(NSString *path) {
         UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
         [g impactOccurred];
     }
+}
+
+- (void)openLogFolder {
+    NSString *dir = [[self logPath] stringByDeletingLastPathComponent];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:dir]) {
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    NSArray *cands = @[[NSString stringWithFormat:@"filza://view%@", dir],
+                       [NSString stringWithFormat:@"shareddocuments://%@", dir],
+                       [NSString stringWithFormat:@"filza://%@", dir]];
+    for (NSString *s in cands) {
+        NSURL *u = [NSURL URLWithString:s];
+        if (u && [[UIApplication sharedApplication] canOpenURL:u]) {
+            [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
+            return;
+        }
+    }
+    [UIPasteboard generalPasteboard].string = dir;
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已复制日志目录"
+                                                                message:dir
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 @end

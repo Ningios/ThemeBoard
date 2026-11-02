@@ -16,6 +16,7 @@ static NSString *const kGridID = @"grid";
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, strong) UILabel *summaryLabel;
 @property (nonatomic, strong) UIButton *applyButton;
+@property (nonatomic, strong) UIButton *cancelButton;
 @property (nonatomic, strong) UIButton *exportButton;
 @property (nonatomic, assign) NSUInteger covered;
 @property (nonatomic, assign) NSUInteger installed;
@@ -72,6 +73,8 @@ static NSString *const kGridID = @"grid";
     BOOL active = [[TBPrefs stringForKey:TBKeyActiveTheme] isEqualToString:self.theme.name];
     [self.applyButton setTitle:(active ? @"已应用" : @"应用这个主题") forState:UIControlStateNormal];
     self.applyButton.alpha = active ? 0.55 : 1.0;
+    self.cancelButton.enabled = active;
+    self.cancelButton.alpha = active ? 1.0 : 0.45;
     NSUInteger miss = self.installed > self.covered ? self.installed - self.covered : 0;
     // 右上角只保留「缺 N」（缺失列表入口）；应用/导出在卡片的按钮里
     self.navigationItem.rightBarButtonItems = @[
@@ -129,6 +132,20 @@ static NSString *const kGridID = @"grid";
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已应用"
         message:@"设置已写入。引擎生效后桌面会立即换图。" preferredStyle:UIAlertControllerStyleAlert];
     [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)cancelApplyTapped {
+    NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
+    if (![active isEqualToString:self.theme.name]) return;
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"取消应用？"
+        message:@"桌面图标会恢复系统原样，主题文件夹不会被删除" preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消应用" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        [TBPrefs setString:nil forKey:TBKeyActiveTheme];
+        [TBPrefs notifyChanged];
+        [self refreshApplyButton];
+    }]];
     [self presentViewController:ac animated:YES completion:nil];
 }
 
@@ -227,6 +244,21 @@ static NSString *const kGridID = @"grid";
         [cell.contentView addSubview:btn];
         self.applyButton = btn;
 
+        // 取消应用：和「应用」等宽，把原来那一整条平均分成两个
+        UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
+        cancel.translatesAutoresizingMaskIntoConstraints = NO;
+        [cancel setTitle:@"取消应用" forState:UIControlStateNormal];
+        cancel.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+        [cancel setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+        cancel.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                                [UIColor colorWithWhite:1 alpha:0.10]);
+        cancel.layer.cornerRadius = 13;
+        cancel.layer.cornerCurve = kCACornerCurveContinuous;
+        TBApplyRim(cancel, 0.55);
+        [cancel addTarget:self action:@selector(cancelApplyTapped) forControlEvents:UIControlEventTouchUpInside];
+        [cell.contentView addSubview:cancel];
+        self.cancelButton = cancel;
+
         // 导出按钮（与应用同款玻璃：半透明填充 + 白边 + 同圆角）
         UIButton *exp = [UIButton buttonWithType:UIButtonTypeSystem];
         exp.translatesAutoresizingMaskIntoConstraints = NO;
@@ -250,14 +282,19 @@ static NSString *const kGridID = @"grid";
             [btn.topAnchor constraintEqualToAnchor:summary.bottomAnchor constant:12],
             [btn.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
             [btn.heightAnchor constraintEqualToConstant:44],
-            [btn.widthAnchor constraintEqualToAnchor:exp.widthAnchor multiplier:3.0],
+            [btn.widthAnchor constraintEqualToAnchor:exp.widthAnchor multiplier:1.5 constant:-6],
+
+            [cancel.topAnchor constraintEqualToAnchor:btn.topAnchor],
+            [cancel.leadingAnchor constraintEqualToAnchor:btn.trailingAnchor constant:12],
+            [cancel.heightAnchor constraintEqualToAnchor:btn.heightAnchor],
+            [cancel.widthAnchor constraintEqualToAnchor:btn.widthAnchor],
 
             [exp.topAnchor constraintEqualToAnchor:btn.topAnchor],
             [exp.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
             [exp.heightAnchor constraintEqualToAnchor:btn.heightAnchor],
             [exp.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-14],
 
-            [btn.trailingAnchor constraintEqualToAnchor:exp.leadingAnchor constant:-12],
+            [cancel.trailingAnchor constraintEqualToAnchor:exp.leadingAnchor constant:-12],
         ]];
         return cell;
     }

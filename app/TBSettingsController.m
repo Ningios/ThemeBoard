@@ -44,10 +44,7 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
            @{@"t": @"设置页图标", @"k": TBKeyApplySettings, @"v": @YES},
            @{@"t": @"通知中心", @"k": TBKeyApplyNotification, @"v": @YES},
            @{@"t": @"分享面板", @"k": TBKeyApplyShare, @"v": @YES} ],
-        @[ @{@"t": @"导入主题…", @"act": @"import"},
-           @{@"t": @"在文件管理器中打开主题目录", @"act": @"open"},
-           @{@"t": @"重新扫描主题", @"act": @"rescan"},
-           @{@"t": @"清除当前主题", @"act": @"clear"} ],
+        @[ @{@"t": @"在文件管理器中打开主题目录", @"act": @"open"} ],
         @[ @{@"t": @"跟随系统深色模式", @"k": @"FollowSystem", @"v": @YES, @"d": @"关掉则固定浅色"} ],
         @[ @{@"t": @"写日志", @"k": TBKeyLogEnabled, @"v": @YES},
            @{@"t": @"安全模式（只记录，不换图）", @"k": @"SafeMode", @"v": @NO},
@@ -60,6 +57,7 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
         @"重启桌面": @"arrow.clockwise.circle",
         @"启用引擎": @"power", @"程序坞": @"dock.rectangle", @"文件夹预览": @"folder",
         @"App 切换器": @"rectangle.stack", @"设置页图标": @"gearshape", @"分享面板": @"square.and.arrow.up",
+        @"通知中心": @"bell.badge",
         @"导入主题…": @"square.and.arrow.down", @"在文件管理器中打开主题目录": @"folder.badge.gearshape",
         @"重新扫描主题": @"arrow.triangle.2.circlepath", @"清除当前主题": @"trash",
         @"跟随系统深色模式": @"circle.lefthalf.filled", @"写日志": @"doc.text", @"安全模式（只记录，不换图）": @"exclamationmark.shield",
@@ -87,6 +85,7 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
         case 1: return @"开关";
         case 2: return @"生效范围";
         case 3: return @"主题";
+        case 4: return @"外观";
         default: return @"诊断";
     }
 }
@@ -110,7 +109,8 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
         }
         return s;
     }
-    if (section == 4) return @"打开：应用主题后分批清理图标缓存，桌面立即刷新。关闭：资源库立即生效，桌面要等系统自然刷新或重启桌面。";
+    if (section == 4) return nil;
+    if (section == 5) return @"打开：应用主题后分批清理图标缓存，桌面立即刷新。关闭：资源库立即生效，桌面要等系统自然刷新或重启桌面。";
     return nil;
 }
 

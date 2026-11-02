@@ -42,13 +42,13 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
     self.navigationItem.searchController = self.search;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
 
-    UIBarButtonItem *import = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"plus"]
-                                                              style:UIBarButtonItemStylePlain
-                                                             target:self action:@selector(importTapped)];
     UIBarButtonItem *sort = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.arrow.down"]
                                                             style:UIBarButtonItemStylePlain
                                                            target:self action:@selector(sortTapped)];
-    self.navigationItem.rightBarButtonItems = @[import, sort];
+    self.navigationItem.rightBarButtonItems = @[sort];
+
+    // 顶部工具条：导入 / 重新扫描 / 清除当前主题（原来在设置页）
+    [self buildToolbar];
 
     UIRefreshControl *rc = [[UIRefreshControl alloc] init];
     [rc addTarget:self action:@selector(reload) forControlEvents:UIControlEventValueChanged];
@@ -63,6 +63,18 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self.tableView reloadData];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    UIView *head = self.tableView.tableHeaderView;
+    CGFloat w = self.tableView.bounds.size.width;
+    if (head && fabs(head.frame.size.width - w) > 0.5) {
+        CGRect f = head.frame;
+        f.size.width = w;
+        head.frame = f;
+        self.tableView.tableHeaderView = head;   // 触发重新布局
+    }
 }
 
 #pragma mark - 数据
@@ -144,6 +156,95 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:ac animated:YES completion:nil];
     }
+}
+
+#pragma mark - 顶部工具条
+
+- (void)buildToolbar {
+    CGFloat w = MAX(320.0, self.tableView.bounds.size.width);
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 64)];
+    head.backgroundColor = [UIColor clearColor];
+    head.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UIView *bar = [[UIView alloc] init];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    [head addSubview:bar];
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.leadingAnchor constraintEqualToAnchor:head.leadingAnchor constant:20],
+        [bar.trailingAnchor constraintEqualToAnchor:head.trailingAnchor constant:-20],
+        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:8],
+        [bar.heightAnchor constraintEqualToConstant:44],
+    ]];
+
+    // 顺序：扫描 / 导入 / 清除；导入最大，扫描略小，清除与导入等大
+    UIButton *scan = TBGlassButton(@"重新扫描", NO);
+    UIButton *imp  = TBGlassButton(@"导入主题", NO);
+    UIButton *clr  = TBGlassButton(@"清除主题", YES);
+
+    scan.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    imp.titleLabel.font  = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
+    clr.titleLabel.font  = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    // 导入是主功能，底色更实一点
+    imp.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.88],
+                                        [UIColor colorWithWhite:1 alpha:0.22]);
+
+    NSArray *all = @[scan, imp, clr];
+    for (UIButton *b in all) [bar addSubview:b];
+    scan.tag = 0; imp.tag = 1; clr.tag = 2;
+    for (UIButton *b in all) {
+        [b addTarget:self action:@selector(toolbarTapped:) forControlEvents:UIControlEventTouchUpInside];
+    }
+
+    [NSLayoutConstraint activateConstraints:@[
+        [scan.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor],
+        [scan.topAnchor constraintEqualToAnchor:bar.topAnchor],
+        [scan.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor],
+
+        [imp.leadingAnchor constraintEqualToAnchor:scan.trailingAnchor constant:10],
+        [imp.topAnchor constraintEqualToAnchor:bar.topAnchor],
+        [imp.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor],
+        [imp.widthAnchor constraintEqualToAnchor:scan.widthAnchor multiplier:1.61],
+
+        [clr.leadingAnchor constraintEqualToAnchor:imp.trailingAnchor constant:10],
+        [clr.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor],
+        [clr.topAnchor constraintEqualToAnchor:bar.topAnchor],
+        [clr.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor],
+        [clr.widthAnchor constraintEqualToAnchor:imp.widthAnchor],
+    ]];
+    self.tableView.tableHeaderView = head;
+}
+
+- (void)toolbarTapped:(UIButton *)b {
+    switch (b.tag) {
+        case 0: [self importTapped]; break;
+        case 1: [self rescanTapped]; break;
+        default: [self clearTapped]; break;
+    }
+}
+
+- (void)rescanTapped {
+    [self reload];
+    [self alertTitle:@"扫描完成"
+             message:[NSString stringWithFormat:@"找到 %lu 个主题", (unsigned long)self.themes.count]];
+}
+
+- (void)clearTapped {
+    NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
+    if (!active.length) {
+        [self alertTitle:@"当前没有应用主题" message:@"桌面已经是系统原样"];
+        return;
+    }
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:
+                             [NSString stringWithFormat:@"清除「%@」？", active]
+        message:@"桌面图标会恢复系统原样，主题文件夹不会被删除"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"清除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        [TBPrefs setString:nil forKey:TBKeyActiveTheme];
+        [TBPrefs notifyChanged];
+        [self reload];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 #pragma mark - Table
