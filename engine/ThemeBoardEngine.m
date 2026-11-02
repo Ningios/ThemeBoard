@@ -1076,6 +1076,7 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
     // 时钟视图：换主题后必须重画，否则表盘会一直停在上一个主题
     if ([vcls rangeOfString:@"Clock"].location != NSNotFound) {
         @try {
+            TBLogOnce([@"clockrefresh|" stringByAppendingString:vcls], @"时钟视图重画 %@", vcls);
             [v setNeedsLayout];
             [v setNeedsDisplay];
             if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
@@ -2415,6 +2416,12 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (mySeq != sReloadSeq) return;   // 期间又切了主题，交给最新那次处理
+            TBHealAllIconViews();
+        });
+        // 再补一次：时钟视图有时要等布局完成后才会重新取表盘
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.10 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (mySeq != sReloadSeq) return;
             TBHealAllIconViews();
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
