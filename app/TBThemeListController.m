@@ -301,7 +301,17 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cid];
         cell.backgroundColor = [UIColor clearColor];
         cell.contentView.backgroundColor = [UIColor clearColor];
-        cell.backgroundView = TBGlassCellBG(12);
+        // 卡片必须放进 contentView：系统左滑只平移 contentView，挂在 backgroundView
+        // 上的卡片不会跟着走（表现就是内容左移、卡片留在原地，内容跑到卡片外面）。
+        UIView *bg = TBGlassCellBG(12);
+        bg.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView insertSubview:bg atIndex:0];
+        [NSLayoutConstraint activateConstraints:@[
+            [bg.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor],
+            [bg.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor],
+            [bg.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor],
+            [bg.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor],
+        ]];
         cell.selectedBackgroundView = nil;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         cell.imageView.layer.cornerRadius = 11;
