@@ -2096,6 +2096,68 @@ static BOOL gDoneImageHooks = NO;      // UIImage / NSBundle 那组
 static BOOL gDoneISIcon = NO;
 static BOOL gDoneActivity = NO;
 static BOOL gDoneCache = NO;
+// ---- 左滑删除：一次性把滑动容器的真实层级打进日志（灰底到底是什么）----
+static NSString *TBColorDesc(UIColor *c) {
+    if (!c) return @"nil";
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if ([c getRed:&r green:&g blue:&b alpha:&a]) {
+        return [NSString stringWithFormat:@"rgba(%.2f,%.2f,%.2f,%.2f)", r, g, b, a];
+    }
+    return NSStringFromClass([c class]);
+}
+
+static BOOL TBViewHasLabel(UIView *v, NSInteger depth) {
+    if (depth > 3) return NO;
+    for (UIView *sv in v.subviews) {
+        if ([sv isKindOfClass:[UILabel class]]) return YES;
+        if (TBViewHasLabel(sv, depth + 1)) return YES;
+    }
+    return NO;
+}
+
+static void TBSwipeTreeDesc(UIView *v, NSInteger depth, NSMutableString *out) {
+    if (depth > 4) return;
+    for (NSInteger i = 0; i < depth; i++) [out appendString:@"  "];
+    NSString *ct = @"-";
+    id c = v.layer.contents;
+    if (c) {
+        if (CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID()) {
+            ct = [NSString stringWithFormat:@"CGImage %.0fx%.0f",
+                  CGImageGetWidth((__bridge CGImageRef)c), CGImageGetHeight((__bridge CGImageRef)c)];
+        } else {
+            ct = NSStringFromClass([(id)c class]);
+        }
+    }
+    [out appendFormat:@"%@ f=%@ bg=%@ r=%.1f clips=%d a=%.2f hid=%d label=%d contents=%@\n",
+        NSStringFromClass([v class]), NSStringFromCGRect(v.frame), TBColorDesc(v.backgroundColor),
+        v.layer.cornerRadius, v.layer.masksToBounds, v.alpha, v.isHidden,
+        TBViewHasLabel(v, 0), ct];
+    for (UIView *sv in v.subviews) TBSwipeTreeDesc(sv, depth + 1, out);
+}
+
+static void tb_swipePullLayout(id self, SEL _cmd) {
+    // 这里只做观测（一次性），不做任何修改
+    static BOOL done = NO;
+    if (!done && [self isKindOfClass:[UIView class]]) {
+        done = YES;
+        @try {
+            UIView *pull = (UIView *)self;
+            NSMutableString *o = [NSMutableString string];
+            [o appendFormat:@"滑动容器 %@ f=%@ bg=%@ r=%.1f clips=%d\n",
+                NSStringFromClass([pull class]), NSStringFromCGRect(pull.frame),
+                TBColorDesc(pull.backgroundColor), pull.layer.cornerRadius,
+                pull.layer.masksToBounds];
+            NSInteger i = 0;
+            for (UIView *p = pull.superview; p && i < 4; p = p.superview, i++) {
+                [o appendFormat:@"  父%ld %@ f=%@ bg=%@\n", (long)i, NSStringFromClass([p class]),
+                    NSStringFromCGRect(p.frame), TBColorDesc(p.backgroundColor)];
+            }
+            TBSwipeTreeDesc(pull, 0, o);
+            TBLog(@"左滑层级:\n%@", o);
+        } @catch (NSException *e) { }
+    }
+}
+
 static BOOL gDoneClock = NO;
 
 // ---- 时钟表盘：SBHClockApplicationIconImageView 把整块表盘合成进自己的 contents，
@@ -2111,6 +2173,25 @@ static BOOL TBIsClockView(id v) {
 }
 
 /// 按视图当前尺寸把主题表盘做成对应像素尺寸的图
+/// 表盘必须带圆角遮罩：系统给出的图标是遮罩过的（超椭圆），我们直接写
+/// layer.contents 的话，四角不透明就会露出方块（就是「时不时变成方的」）。
+static UIImage *TBClockRoundedFace(UIImage *img) {
+    if (!img) return img;
+    CGSize pt = img.size;
+    if (pt.width < 1 || pt.height < 1) return img;
+    CGFloat r = MIN(pt.width, pt.height) * 0.2237;   // iOS 图标圆角 ≈ 22.37%
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = img.scale;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *rd = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
+    return [rd imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, pt.width, pt.height)
+                                                    cornerRadius:r];
+        [p addClip];
+        [img drawInRect:CGRectMake(0, 0, pt.width, pt.height)];
+    }];
+}
+
 static UIImage *TBClockFaceForView(UIView *v) {
     UIImage *face = TBResourceImage(@"ClockIconBackgroundSquare");
     if (!face) return nil;
@@ -2118,7 +2199,7 @@ static UIImage *TBClockFaceForView(UIView *v) {
     if (sc < 0.5) sc = 3.0;
     TBInfo info; info.size = v.bounds.size; info.scale = sc; info.ratio = 0;
     if (info.size.width < 1 || info.size.height < 1) { info.size = CGSizeMake(60, 60); }
-    return TBFitImage(face, info);
+    return TBClockRoundedFace(TBFitImage(face, info));
 }
 
 static id tb_clockContentsImage(id self, SEL _cmd) {
@@ -2167,6 +2248,18 @@ static Class TBClassDeclaring(Class cls, SEL sel) {
     return Nil;
 }
 
+typedef void (*SetIconImageFn)(id, SEL, id, unsigned long long, unsigned long long, long long);
+static SetIconImageFn o_setIconImage;
+
+static void tb_clockSetImage(id self, SEL _cmd, id image,
+                             unsigned long long edges, unsigned long long outside, long long style) {
+    if (TBIsClockView(self)) {
+        UIImage *face = TBClockFaceForView((UIView *)self);
+        if (face) image = face;   // 系统每次贴图都换成当前主题的表盘（含圆角遮罩）
+    }
+    if (o_setIconImage) o_setIconImage(self, _cmd, image, edges, outside, style);
+}
+
 /// 安装：优先挂 SBLiveIconImageView（时钟视图的父类，SnowBoard 也是挂这里），
 /// 再兜底挂 SBIconImageView 的同名实现。
 static void TBInstallClockContentsHooks(void) {
@@ -2178,6 +2271,9 @@ static void TBInstallClockContentsHooks(void) {
     Class c1 = TBClassDeclaring(live, NSSelectorFromString(@"contentsImage"));
     if (c1) o_contentsImageLive = (ContentsImgFn)TBHook(c1, @"contentsImage",
                                                         (IMP)tb_clockContentsImage, "时钟contents");
+    Class c3 = TBClassDeclaring(live, NSSelectorFromString(@"_setImage:onEdges:outside:style:"));
+    if (c3) o_setIconImage = (SetIconImageFn)TBHook(c3, @"_setImage:onEdges:outside:style:",
+                                                    (IMP)tb_clockSetImage, "时钟贴图");
     Class c2 = TBClassDeclaring(live, NSSelectorFromString(@"squareContentsImage"));
     if (c2) o_squareContentsImageLive = (ContentsImgFn)TBHook(c2, @"squareContentsImage",
                                                               (IMP)tb_clockSquareContentsImage, "时钟squareContents");
@@ -2256,6 +2352,11 @@ static void TBInstall(void) {
         // 指针一律用系统自己的（黑时针 + 黑分针 + 橙秒针），不注入主题指针。
         // 表盘：hook contentsImage，始终返回当前主题的表盘（换主题后自然就是新表盘）
         TBInstallClockContentsHooks();
+        // 左滑删除：装一次观测，把滑动容器的层级结构打进日志
+        {
+            Class pull = NSClassFromString(@"UISwipeActionPullView");
+            if (pull) TBHook(pull, @"layoutSubviews", (IMP)tb_swipePullLayout, "左滑层级观测");
+        }
         // 不接管 iconImageWithImageInfo:includingMask:
         // 那一层返回的是「表盘+指针」的合成图，接管后系统画的指针会变形
         //（三根一样粗、橙秒针消失）。改由资源重定向提供 ClockIconBackgroundSquare，

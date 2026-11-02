@@ -441,6 +441,13 @@ static void TBSwipeRedLabels(UIView *v, NSInteger depth) {
 // 卡片的几何：TBGlassCellBG(12) → 上下各内缩 2pt、左右各内缩 12pt、圆角 20
 static const NSInteger kTBSwipeGlassTag = 0x54424731;   // 'TBG1'
 
+static BOOL TBSwipeViewHasLabel(UIView *v) {
+    for (UIView *sv in v.subviews) {
+        if ([sv isKindOfClass:[UILabel class]]) return YES;
+    }
+    return NO;
+}
+
 static void TBSwipeApplyToPullView(UIView *pull) {
     if (!pull) return;
     CGFloat scale = [UIScreen mainScreen].scale;
@@ -453,7 +460,9 @@ static void TBSwipeApplyToPullView(UIView *pull) {
         glass = [[UIView alloc] initWithFrame:pull.bounds];
         glass.tag = kTBSwipeGlassTag;
         glass.userInteractionEnabled = NO;
-        [pull insertSubview:glass atIndex:0];
+        // 放在最上层：系统自己那层灰底（方图）在下面，被我们这块盖住就看不见了；
+        // 带文字的按钮随后提到最前面，所以红字仍然可见（按钮底色已置透明）。
+        [pull addSubview:glass];
     }
     CGRect b = pull.bounds;
     glass.frame = CGRectMake(0, 2, MAX(0, b.size.width - 12), MAX(0, b.size.height - 4));
@@ -466,12 +475,15 @@ static void TBSwipeApplyToPullView(UIView *pull) {
     glass.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
                                              [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
 
+    NSMutableArray *labelHosts = [NSMutableArray array];
     for (UIView *btn in pull.subviews) {
         if (btn == glass) continue;
-        btn.backgroundColor = [UIColor clearColor];   // 系统那块方底色不要露出来
+        btn.backgroundColor = [UIColor clearColor];   // 系统那块灰底色不要露出来
         btn.layer.borderWidth = 0;
         TBSwipeRedLabels(btn, 0);
+        if (TBSwipeViewHasLabel(btn)) [labelHosts addObject:btn];
     }
+    for (UIView *host in labelHosts) [pull bringSubviewToFront:host];
 }
 
 static void (*o_swipePullLayout)(id, SEL);
