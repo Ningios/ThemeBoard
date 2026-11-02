@@ -1271,7 +1271,7 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             // 这就是"表盘要注销才更新"的原因）。写到 layer.contents 与 _mappedContentsImage，
             // 保证下次系统重绘也用我们的新表盘。
             {
-                UIImage *face = TBClockMaterialFace((UIView *)v);
+                UIImage *face = TBClockMaterialFaceCached((UIView *)v);
                 if (face && face.CGImage) {
                     // 有素材 → 强制写入主题表盘
                     ((UIView *)v).layer.contents = (__bridge id)face.CGImage;
@@ -2267,7 +2267,7 @@ static void TBApplyClockImagesToSet(id set) {
     {
         UIView *cv = gClockViewForFaceSync;
         if (cv) {
-            UIImage *face = TBClockMaterialFace(cv);
+            UIImage *face = TBClockMaterialFaceCached(cv);
             if (face && face.CGImage) {
                 cv.layer.contents = (__bridge id)face.CGImage;
                 @try { [cv setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
@@ -2408,6 +2408,20 @@ static UIImage *TBClockRoundedFace(UIImage *img) {
 /// 时钟表盘：SnowBoard 的做法 —— 主题 Bundles 里有 ClockIconBackgroundSquare 就用它
 /// （按图标圆角遮罩好），没有就返回 nil，让调用方走系统原实现。
 /// 注意：不走 IconBundles 的静态图标；静态图标只在列表/快照里用，不参与实时时钟。
+/// 表盘缓存：同一主题 + 同一尺寸只渲染一次（系统每分钟都会重建针集，
+/// 每次都重渲染一张 192x192 的小图虽然开销很小，但没必要）
+static UIImage *gFaceCacheImage;
+static NSString *gFaceCacheKey;
+static UIImage *TBClockMaterialFaceCached(UIView *v) {
+    NSString *key = [NSString stringWithFormat:@"%@|%.0fx%.0f", TBActiveTheme() ?: @"",
+                     v.bounds.size.width, v.bounds.size.height];
+    if (gFaceCacheImage && [gFaceCacheKey isEqualToString:key]) return gFaceCacheImage;
+    UIImage *face = TBClockMaterialFace(v);
+    gFaceCacheImage = face;
+    gFaceCacheKey = key;
+    return face;
+}
+
 static UIImage *TBClockMaterialFace(UIView *v) {
     UIImage *face = TBResourceImage(@"ClockIconBackgroundSquare");
     if (!face) return nil;
