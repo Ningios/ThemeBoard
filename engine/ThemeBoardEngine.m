@@ -2026,53 +2026,6 @@ static void TBLogClockImageSetShape(id set) {
           [found componentsJoinedByString:@" "]);
 }
 
-/// 把主题的针重排成系统约定（系统绕"画布中心"旋转；主题素材是"针尾=轴心、针尖朝上"）。
-/// 直接塞原图会偏出去、还会显粗。
-static UIImage *TBHandForSystemCanvas(UIImage *src, CGSize targetPt, CGFloat targetScale) {
-    if (!src || src.size.width < 1 || src.size.height < 1) return nil;
-    const size_t W = 128, H = 128;
-    unsigned char *buf = calloc(W * H * 4, 1);
-    if (!buf) return src;
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs, kCGImageAlphaPremultipliedLast);
-    CGColorSpaceRelease(cs);
-    if (!ctx) { free(buf); return src; }
-    UIGraphicsPushContext(ctx);
-    [src drawInRect:CGRectMake(0, 0, W, H)];
-    UIGraphicsPopContext();
-    CGContextRelease(ctx);
-    size_t x0 = W, y0 = H, x1 = 0, y1 = 0;
-    for (size_t y = 0; y < H; y++) {
-        for (size_t x = 0; x < W; x++) {
-            if (buf[(y * W + x) * 4 + 3] < 30) continue;
-            if (x < x0) x0 = x; if (y < y0) y0 = y;
-            if (x > x1) x1 = x; if (y > y1) y1 = y;
-        }
-    }
-    free(buf);
-    if (x1 <= x0 || y1 <= y0) return src;
-    CGFloat nx0 = (CGFloat)x0 / W, nx1 = (CGFloat)(x1 + 1) / W;
-    CGFloat ny0 = (CGFloat)y0 / H, ny1 = (CGFloat)(y1 + 1) / H;
-    CGFloat tailX = (nx0 + nx1) / 2.0, tailY = ny1, lenNorm = ny1 - ny0;
-
-    CGFloat scale = targetScale > 0.5 ? targetScale : 3.0;
-    CGSize canvasPt = targetPt;
-    if (canvasPt.width < 1 || canvasPt.height < 1) canvasPt = CGSizeMake(10, 30);
-    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-    fmt.scale = scale;
-    fmt.opaque = NO;
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:canvasPt format:fmt];
-    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        CGFloat wantLenPt = canvasPt.height / 2.0;                 // 系统针都是长满半格
-        CGFloat srcLenPt = lenNorm * src.size.height;
-        if (srcLenPt < 0.5) srcLenPt = src.size.height;
-        CGFloat k = wantLenPt / srcLenPt;
-        CGFloat dw = src.size.width * k, dh = src.size.height * k;
-        CGFloat cx = canvasPt.width / 2.0, cy = canvasPt.height / 2.0;
-        [src drawInRect:CGRectMake(cx - tailX * dw, cy - tailY * dh, dw, dh)];
-    }];
-}
-
 static void TBApplyClockImagesToSet(id set) {
     if (!set || !TBEnabled() || TBSafeMode()) return;
     TBLogClockImageSetShape(set);
@@ -2103,30 +2056,19 @@ static void TBApplyClockImagesToSet(id set) {
         CGSize target = orig ? orig.size : CGSizeZero;
         if (target.width < 1 || target.height < 1) continue;   // 系统没有这项就别乱塞
 
-        // 指针（时针/分针/秒针）必须重排到系统约定；圆点按尺寸缩放即可
-        BOOL isHand = [map[i].key isEqualToString:@"hours"] ||
-                      [map[i].key isEqualToString:@"minutes"] ||
-                      [map[i].key isEqualToString:@"seconds"];
-        if (isHand) {
-            UIImage *re = TBHandForSystemCanvas(img, target, orig.scale > 0.5 ? orig.scale : 3.0);
-            if (re) img = re;
-            TBLogOnce([@"clockhand|" stringByAppendingString:map[i].key],
-                      @"时钟针重排 %@：针尾→画布中心，长度对齐系统 %.0fx%.0f pt",
-                      map[i].key, target.width, target.height);
-        } else if (fabs(img.size.width - target.width) > 1.0 || fabs(img.size.height - target.height) > 1.0) {
-            // 关键：scale 必须跟「系统原本那根针」一致，否则点尺寸对了但像素尺寸仍然巨大，
-            // 图层按像素铺开 → 指针巨大（上一版就是这个坑）。
+        // 与 SnowBoard 完全一致：只做一步 —— 把主题这张图缩放到「系统原本那根针」的尺寸。
+        // 不做轴心换算、不改色、不动别的成员（主题没有的成员保持系统原样）。
+        if (fabs(img.size.width - target.width) > 0.01 || fabs(img.size.height - target.height) > 0.01) {
             UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-            fmt.scale = orig.scale > 0 ? orig.scale : 3.0;
+            fmt.scale = orig.scale > 0.5 ? orig.scale : 3.0;
             fmt.opaque = NO;
             UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:target format:fmt];
             img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
                 [img drawInRect:CGRectMake(0, 0, target.width, target.height)];
             }];
             TBLogOnce([@"clockscale|" stringByAppendingString:map[i].key],
-                      @"时钟素材缩放 %@：系统 %.0fx%.0f pt scale=%.1f → 注入 %.0fx%.0f pt scale=%.1f",
-                      map[i].key, target.width, target.height, orig.scale,
-                      img.size.width, img.size.height, img.scale);
+                      @"时钟素材 ScaleToSize %@：系统 %.0fx%.0f pt（与 SnowBoard 同一步）",
+                      map[i].key, target.width, target.height);
         }
 
         SEL setter = NSSelectorFromString([NSString stringWithFormat:@"set%@%@:",
@@ -2252,7 +2194,7 @@ static UIImage *TBClockRoundedFace(UIImage *img) {
     if (!img) return img;
     CGSize pt = img.size;
     if (pt.width < 1 || pt.height < 1) return img;
-    CGFloat r = MIN(pt.width, pt.height) * 0.2237;   // iOS 图标圆角 ≈ 22.37%
+    CGFloat r = MIN(pt.width, pt.height) * 0.2237;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
     fmt.scale = img.scale;
     fmt.opaque = NO;
