@@ -308,6 +308,37 @@ static void TBLoadBundleResources(NSString *themeDir) {
     TBLog(@"Bundles 资源 %lu 个", (unsigned long)gBundleRes.count);
 }
 
+/// 时钟底图这类素材自带「透明圆角」，直接交给系统会在四角透出壁纸。
+/// 这里把透明像素用表盘底色填满（圆角交给图标遮罩去切）。
+static UIImage *TBMakeOpaqueOnBodyColor(UIImage *img) {
+    if (!img || !img.CGImage) return img;
+    CGImageRef cg = img.CGImage;
+    size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
+    if (w < 2 || h < 2) return img;
+
+    // 取中心附近像素作为底色（表盘主体色）
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    static unsigned char px[4]; px[0]=255; px[1]=255; px[2]=255; px[3]=255;
+    CGContextRef probe = CGBitmapContextCreate(px, 1, 1, 8, 4, cs, kCGImageAlphaPremultipliedLast);
+    if (probe) {
+        CGContextDrawImage(probe, CGRectMake(-(CGFloat)w * 0.5, -(CGFloat)h * 0.5, (CGFloat)w, (CGFloat)h), cg);
+        CGContextRelease(probe);
+    }
+
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = 1.0;
+    fmt.opaque = YES;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(w, h) format:fmt];
+    UIImage *out = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextRef gc = ctx.CGContext;
+        CGContextSetRGBFillColor(gc, px[0] / 255.0, px[1] / 255.0, px[2] / 255.0, 1.0);
+        CGContextFillRect(gc, CGRectMake(0, 0, w, h));
+        CGContextDrawImage(gc, CGRectMake(0, 0, w, h), cg);
+    }];
+    CGColorSpaceRelease(cs);
+    return out ?: img;
+}
+
 /// 主题里是否有同名资源（表盘/指针/文件夹底等）
 static UIImage *TBResourceImage(NSString *name) {
     if (!name.length || TBSafeMode() || !TBEnabled()) return nil;
@@ -331,7 +362,21 @@ static UIImage *TBResourceImage(NSString *name) {
     // 必须用 init 方法：imageWithContentsOfFile: 已被本引擎 hook，
     // 在此调用会形成无限递归（栈溢出 → SpringBoard 崩溃循环）。
     if (!path) return nil;
-    return [[UIImage alloc] initWithContentsOfFile:path];
+    UIImage *img = [[UIImage alloc] initWithContentsOfFile:path];
+
+    // 时钟底图：素材自带透明圆角会在四角透出壁纸，这里填成不透明
+    NSString *lower = name.lowercaseString;
+    if ([lower hasPrefix:@"clockiconbackground"] && img) {
+        static NSMutableSet *done = nil;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ done = [NSMutableSet set]; });
+        if (![done containsObject:lower]) {
+            [done addObject:lower];
+            TBLogOnce(@"clockopaque", @"时钟底图不透明化（填掉透明圆角）");
+        }
+        img = TBMakeOpaqueOnBodyColor(img);
+    }
+    return img;
 }
 
 static void TBLoadIndex(void) {
