@@ -31,6 +31,28 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
 @property (nonatomic, assign) NSInteger sortMode;   // 0 名称 1 图标数
 @end
 
+static char kTBSwipeKey;
+
+@interface TBSwipeState : NSObject
+@property (nonatomic, weak) UITableViewCell *cell;
+@property (nonatomic, weak) UIView *pill;
+@property (nonatomic, copy) NSString *themeName;
+@property (nonatomic, assign) CGFloat offset;
+@end
+@implementation TBSwipeState
+@end
+
+/// 把卡片（背景视图）和内容一起平移；删除块固定在 cell 上，不跟着走
+static void TBApplySwipeOffset(TBSwipeState *st, CGFloat x) {
+    if (!st.cell) return;
+    st.offset = x;
+    st.pill.hidden = (x > -6);
+    CGAffineTransform tr = CGAffineTransformMakeTranslation(x, 0);
+    st.cell.contentView.transform = tr;
+    st.cell.backgroundView.transform = tr;
+}
+
+
 @implementation TBThemeListController
 
 - (void)viewDidLoad {
@@ -375,27 +397,6 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 }
 
 #pragma mark - 玻璃左滑删除（参考 MarkFont：自己做平移手势 + 圆角玻璃块，不碰系统滑动）
-
-static char kTBSwipeKey;
-
-@interface TBSwipeState : NSObject
-@property (nonatomic, weak) UITableViewCell *cell;
-@property (nonatomic, weak) UIView *pill;
-@property (nonatomic, copy) NSString *themeName;
-@property (nonatomic, assign) CGFloat offset;
-@end
-@implementation TBSwipeState
-@end
-
-/// 把卡片（背景视图）和内容一起平移；删除块固定在 cell 上，不跟着走
-static void TBApplySwipeOffset(TBSwipeState *st, CGFloat x) {
-    if (!st.cell) return;
-    st.offset = x;
-    st.pill.hidden = (x > -6);
-    CGAffineTransform tr = CGAffineTransformMakeTranslation(x, 0);
-    st.cell.contentView.transform = tr;
-    st.cell.backgroundView.transform = tr;
-}
 
 - (void)tb_swipeAttachToCell:(UITableViewCell *)cell theme:(TBTheme *)theme {
     TBSwipeState *st = objc_getAssociatedObject(cell, &kTBSwipeKey);
