@@ -1766,8 +1766,35 @@ static void tb_setupIconWithBundle(id self, SEL _cmd, id bundle) {
 typedef id (*ClockImageSetFn)(id, SEL, void *);
 static ClockImageSetFn o_makeImageSet, o_imageSet;
 
+/// 一次性打印图像集的类名与所有可用成员（排查表盘是从哪里来的）
+static void TBLogClockImageSetShape(id set) {
+    static BOOL done = NO;
+    if (done || !set) return;
+    done = YES;
+    NSMutableArray *found = [NSMutableArray array];
+    NSArray *keys = @[@"hours", @"minutes", @"seconds", @"hourMinuteDot", @"secondDot",
+                      @"blackDot", @"redDot", @"background", @"backgroundImage",
+                      @"squareBackground", @"backgroundSquare", @"face"];
+    for (NSString *k in keys) {
+        SEL sel = NSSelectorFromString(k);
+        if (![set respondsToSelector:sel]) continue;
+        @try {
+            id v = ((id (*)(id, SEL))objc_msgSend)(set, sel);
+            if ([v isKindOfClass:[UIImage class]]) {
+                UIImage *im = v;
+                [found addObject:[NSString stringWithFormat:@"%@=%.0fx%.0f", k, im.size.width, im.size.height]];
+            } else {
+                [found addObject:[NSString stringWithFormat:@"%@=%@", k, v ? NSStringFromClass([v class]) : @"nil"]];
+            }
+        } @catch (NSException *e) { }
+    }
+    TBLog(@"时钟图像集类=%@ 成员: %@", NSStringFromClass([set class]),
+          [found componentsJoinedByString:@" "]);
+}
+
 static void TBApplyClockImagesToSet(id set) {
     if (!set || !TBEnabled() || TBSafeMode()) return;
+    TBLogClockImageSetShape(set);
     // 主题素材 → 图像集成员（名字与 SnowBoard 反编译里一致）
     struct { NSString *key; NSString *res; } map[] = {
         {@"hours",         @"ClockIconHourHand"},
@@ -1780,6 +1807,32 @@ static void TBApplyClockImagesToSet(id set) {
     for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         UIImage *img = TBResourceImage(map[i].res);
         if (!img) continue;
+
+        // 关键：系统图像集里每根针都是按图标尺寸算好的，
+        // 直接塞素材原图会大得离谱（248x547 那种画布）。这里取系统原本
+        // 那一项的尺寸当目标，把主题素材缩放到同样大小（SnowBoard 同做法）。
+        SEL getter = NSSelectorFromString(map[i].key);
+        UIImage *orig = nil;
+        if ([set respondsToSelector:getter]) {
+            id v = ((id (*)(id, SEL))objc_msgSend)(set, getter);
+            if ([v isKindOfClass:[UIImage class]]) orig = v;
+        }
+        CGSize target = orig ? orig.size : CGSizeZero;
+        if (target.width < 1 || target.height < 1) continue;   // 系统没有这项就别乱塞
+
+        if (fabs(img.size.width - target.width) > 1.0 || fabs(img.size.height - target.height) > 1.0) {
+            UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+            fmt.scale = img.scale > 0 ? img.scale : 3.0;
+            fmt.opaque = NO;
+            UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:target format:fmt];
+            img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+                [img drawInRect:CGRectMake(0, 0, target.width, target.height)];
+            }];
+            TBLogOnce([@"clockscale|" stringByAppendingString:map[i].key],
+                      @"时钟素材缩放 %@：素材 %.0fx%.0f → 系统 %.0fx%.0f",
+                      map[i].key, img.size.width, img.size.height, target.width, target.height);
+        }
+
         SEL setter = NSSelectorFromString([NSString stringWithFormat:@"set%@%@:",
                                           [[map[i].key substringToIndex:1] uppercaseString],
                                           [map[i].key substringFromIndex:1]]);
