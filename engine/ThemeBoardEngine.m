@@ -724,32 +724,15 @@ static UIImage *TBCalendarCompositeImage(UIImage *bg) {
 /// 取主题图：锁内只做字典查找，读盘/绘制都在锁外，避免 SpringBoard 被拖死
 /// 图标圆角遮罩：系统图标是超椭圆遮罩（不是普通圆角矩形）。主题里方角素材
 /// （WPS / 设置 / 相机 / 备忘录这些）不打遮罩就是方块，这里统一按超椭圆裁。
+static UIImage *gSystemMaskTemplate;                 // 系统遮罩形状（学到后全用它）
+static UIImage *TBMaskWithSystemShape(UIImage *art);
+
 static UIImage *TBIconRoundedImage(UIImage *img) {
     if (!img) return img;
-    CGSize pt = img.size;
-    if (pt.width < 16 || pt.height < 16) return img;
-    CGFloat w = pt.width, h = pt.height;
-    CGFloat a = w / 2.0, b = h / 2.0, cx = w / 2.0, cy = h / 2.0;
-    const CGFloat n = 5.0;                 // 苹果图标轮廓 ≈ 超椭圆 n=5
-    const NSInteger steps = 180;
-    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-    fmt.scale = img.scale;
-    fmt.opaque = NO;
-    UIGraphicsImageRenderer *rd = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
-    return [rd imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        UIBezierPath *path = [UIBezierPath bezierPath];
-        for (NSInteger i = 0; i <= steps * 4; i++) {
-            CGFloat t = (CGFloat)i / (CGFloat)(steps * 4) * 2.0 * M_PI;
-            CGFloat ct = cos(t), st = sin(t);
-            CGFloat x = cx + a * copysign(pow(fabs(ct), 2.0 / n), ct);
-            CGFloat y = cy + b * copysign(pow(fabs(st), 2.0 / n), st);
-            if (i == 0) [path moveToPoint:CGPointMake(x, y)];
-            else [path addLineToPoint:CGPointMake(x, y)];
-        }
-        [path closePath];
-        [path addClip];
-        [img drawInRect:CGRectMake(0, 0, w, h)];
-    }];
+    // 一律用【系统自己的遮罩形状】（learned template）；还没学到就先不遮，
+    // 绝不使用我们自己画的形状（那条路径的调用方随后会补上系统遮罩）。
+    if (gSystemMaskTemplate) return TBMaskWithSystemShape(img);
+    return img;
 }
 
 static UIImage *gSystemClockFace;   // 系统自己的时钟表盘（主题取消后还原用）
@@ -762,8 +745,6 @@ static UIImage *TBSystemClockFace(void) {
 // ---- 图标圆角：用【系统自己的遮罩形状】，不再自己画超椭圆 ----
 // 我们是在 SBHIconImageCache 的读路径直接返回图的，这条路径系统认为是"已遮罩"的，
 // 所以必须自己遮 —— 但形状要用系统那张（第一次从系统原实现里取到后缓存成模板）。
-static UIImage *gSystemMaskTemplate;
-
 static UIImage *TBMaskWithSystemShape(UIImage *art) {
     if (!art || !gSystemMaskTemplate) return art;
     CGSize sz = gSystemMaskTemplate.size;
@@ -2291,6 +2272,9 @@ static BOOL TBIsClockView(id v) {
 /// layer.contents 的话，四角不透明就会露出方块（就是「时不时变成方的」）。
 static UIImage *TBClockRoundedFace(UIImage *img) {
     if (!img) return img;
+    // 有系统遮罩模板就用系统的形状（和系统图标完全一致）；
+    // 还没有模板时先用圆角矩形兜底（只是极短暂的过渡，不参与缓存）
+    if (gSystemMaskTemplate) return TBMaskWithSystemShape(img);
     CGSize pt = img.size;
     if (pt.width < 1 || pt.height < 1) return img;
     CGFloat r = MIN(pt.width, pt.height) * 0.2237;
