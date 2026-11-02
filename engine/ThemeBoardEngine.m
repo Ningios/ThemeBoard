@@ -1932,7 +1932,11 @@ static UIImage *tb_imageNamedInBundleTrait(id self, SEL _cmd, NSString *name, NS
                                         @"res2 inBundleTrait %@", name);
         // 时钟表盘素材：这条路径（系统按名字取资源）也要「圆角 + 白底」，
         // 否则半透明玻璃会透出系统那块深色底盘 → 显示发黑（资源路径之前漏了这步）
-        if ([name hasPrefix:@"ClockIconBackground"]) img = TBClockRoundedFace(img);
+        if ([name hasPrefix:@"ClockIconBackground"]) {
+            img = TBClockRoundedFace(img);
+            TBLogOnce([@"facefeed|res|" stringByAppendingString:(TBActiveTheme() ?: @"")],
+                      @"表盘供图[资源路径] 主题=%@ %@", TBActiveTheme() ?: @"?", name);
+        }
         TBLog(@"serve 资源(bundleTrait) %@", name);
         return img;
     }
@@ -2297,10 +2301,6 @@ static UIImage *TBClockRoundedFace(UIImage *img) {
     return [rd imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
         UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, pt.width, pt.height)
                                                     cornerRadius:r];
-        // 半透明玻璃表盘直接贴上去会透出系统那块深色底盘（看着发黑）；
-        // SB 的 maskedImage 出来是浅色的，这里先铺一层白底再画表盘，观感一致。
-        [[UIColor whiteColor] setFill];
-        [p fill];
         [p addClip];
         [img drawInRect:CGRectMake(0, 0, pt.width, pt.height)];
     }];
