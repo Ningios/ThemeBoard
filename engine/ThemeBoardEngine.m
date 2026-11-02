@@ -313,6 +313,11 @@ static void TBLoadBundleResources(NSString *themeDir) {
 static UIImage *TBResourceImage(NSString *name);
 static BOOL TBImageIsMostlyOpaque(CGImageRef cg);
 static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys);
+static UIImage *TBImageForBundle(NSString *bid);      // 前置：时钟判定要用
+static BOOL TBThemeHasClockMaterial(void);
+static BOOL TBClockShouldHideHands(void);
+static UIImage *TBClockFaceForView(UIView *v);
+static void TBApplyClockHands(id v);
 static UIImage *TBKeyOutCornerColor(UIImage *img);
 
 /// 素材是否带透明像素（粗略判断：抽样看有没有 alpha 明显偏低的像素）
@@ -693,8 +698,9 @@ static BOOL TBImageCenterHasInk(UIImage *img) {
     int median = 0, acc = 0;
     for (int i = 0; i < 256; i++) { acc += hist[i]; if (acc * 2 >= np) { median = i; break; } }
 
-    // 中心圆盘（半径 0.30）内偏离背景的像素
-    CGFloat cx = W / 2.0, cy = H / 2.0, r = W * 0.30;
+    // 只看圆心附近（半径 13%）：素材自己画的指针一定穿过圆心，
+    // 而刻度/数字离圆心很远，不会误判（用 0.30 半径时就是这样把数字当针的）
+    CGFloat cx = W / 2.0, cy = H / 2.0, r = W * 0.13;
     NSInteger ink = 0, total = 0;
     for (size_t y = 0; y < H; y++) {
         for (size_t x = 0; x < W; x++) {
@@ -708,8 +714,8 @@ static BOOL TBImageCenterHasInk(UIImage *img) {
         }
     }
     free(buf);
-    if (total < 50) return NO;
-    return (ink * 100 / total) > 2;   // 中心盘里 2% 以上是"墨"= 画了指针
+    if (total < 20) return NO;
+    return (ink * 100 / total) > 1.5;   // 圆心附近有"墨"= 素材自己画了指针
 }
 
 /// 主题只给了 IconBundles 静态图标（Bundles 里没有整套动态素材）→
@@ -740,11 +746,19 @@ static BOOL TBClockShouldHideHands(void) {
         hasStatic = gIndex[@"com.apple.mobiletimer"] != nil;
         [gLock unlock];
     }
-    BOOL hide = forced || (!hasMaterial && hasStatic);
+    // 实际要用的那张表盘：如果素材本身已经画了指针（圆心有墨），必须隐藏系统指针
+    BOOL faceHasHands = NO;
+    if (hasMaterial || hasStatic) {
+        UIImage *face = hasMaterial ? TBResourceImage(@"ClockIconBackgroundSquare")
+                                    : TBImageForBundle(@"com.apple.mobiletimer");
+        faceHasHands = TBImageCenterHasInk(face);
+    }
+    BOOL hide = forced || (!hasMaterial && hasStatic) || faceHasHands;
     TBLogOnce([@"clockhands|" stringByAppendingFormat:@"%@|%d", theme, (int)hide],
-              @"时钟指针判定：%@（表盘=%@%@）",
+              @"时钟指针判定：%@（表盘=%@%@%@）",
               hide ? @"隐藏指针" : @"显示系统指针",
               hasMaterial ? @"Bundles 素材" : (hasStatic ? @"IconBundles 静态图标" : @"无，系统原样"),
+              faceHasHands ? @", 素材中心已画指针" : @"",
               forced ? @"，手动强制隐藏" : @"");
     return hide;
 }
@@ -1264,7 +1278,6 @@ static BOOL TBApplyThemeToIconView(id self) {
 }
 
 static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
-static UIImage *TBClockFaceForView(UIView *v);   // 定义在后面（时钟段）
 
 static NSString *TBViewTreeDesc(UIView *v, NSInteger depth) {
     NSMutableString *s = [NSMutableString string];
@@ -1377,13 +1390,7 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             // 不指望系统重取：直接把当前主题的表盘写进这个视图（它就是表盘本身，
             // 没有子视图；指针是它自己的子图层/自己画的）。
             // 指针开关：不依赖 updateClockImages 的 hook，这里直接按判定设置
-            {
-                BOOL hide = TBClockShouldHideHands();
-                NSInteger n = 0;
-                for (CALayer *l in ((UIView *)v).layer.sublayers) { l.hidden = hide; n++; }
-                TBLogOnce([@"clockhandsapply|" stringByAppendingFormat:@"%@|%d", TBActiveTheme() ?: @"", (int)hide],
-                          @"时钟：指针 %@（%ld 个子层）", hide ? @"已隐藏" : @"显示", (long)n);
-            }
+            TBApplyClockHands((id)v);
             UIImage *cface = TBClockFaceForView((UIView *)v);
             if (cface && cface.CGImage) {
                 @try {
@@ -1444,8 +1451,43 @@ static void TBHealAllIconViews(void) {
     gHealDepth--;
 }
 
+static __weak UIView *gLastClockView;   // 最近一次看到的时钟视图
+
+/// 时钟指针：把时钟视图的指针子图层统一隐藏/显示（每次布局都执行 → 系统重绘也留得住）
+static void TBApplyClockHands(id v) {
+    if (![v isKindOfClass:[UIView class]]) return;
+    NSString *cls = NSStringFromClass([v class]);
+    if ([cls rangeOfString:@"Clock"].location == NSNotFound) return;
+    gLastClockView = (UIView *)v;
+    BOOL hide = TBClockShouldHideHands();
+    NSInteger n = 0;
+    for (CALayer *l in ((UIView *)v).layer.sublayers) { l.hidden = hide; n++; }
+    if (n) {
+        TBLogOnce([@"clockhandsapply|" stringByAppendingFormat:@"%@|%d", TBActiveTheme() ?: @"", (int)hide],
+                  @"时钟：指针 %@（%ld 个子层）", hide ? @"已隐藏" : @"显示", (long)n);
+    }
+}
+
+/// 系统每分钟重绘指针时会把我们设的 hidden 清掉，所以再挂一个 1.5s 的兜底，
+/// 只要判定是隐藏，就一直保持隐藏（判定变了会自动恢复）
+static void TBStartClockHandsKeeper(void) {
+    static BOOL started = NO;
+    if (started) return;
+    started = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *timer) {
+            UIView *w = gLastClockView;
+            if (!w) return;
+            if (!TBClockShouldHideHands()) return;     // 该显示时不动它
+            for (CALayer *l in w.layer.sublayers) l.hidden = YES;
+        }];
+        (void)t;
+    });
+}
+
 static void tb_iconViewLayoutSubviews(id self, SEL _cmd) {
     if (o_iconViewLayout) o_iconViewLayout(self, _cmd);
+    TBApplyClockHands(self);   // 时钟视图每次布局都重新按判定设置指针显隐
     if (!TBApplyIconForDesktop() || TBSafeMode() || !TBEnabled()) return;
     TBApplyThemeToIconView(self);
 }
@@ -2480,6 +2522,7 @@ static void tb_clockSetImage(id self, SEL _cmd, id image,
         if (face) image = face;   // 系统每次贴图都换成当前主题的表盘（含圆角遮罩）
     }
     if (o_setIconImage) o_setIconImage(self, _cmd, image, edges, outside, style);
+    TBApplyClockHands(self);
 }
 
 /// 安装：优先挂 SBLiveIconImageView（时钟视图的父类，SnowBoard 也是挂这里），
@@ -2574,6 +2617,7 @@ static void TBInstall(void) {
         // 指针一律用系统自己的（黑时针 + 黑分针 + 橙秒针），不注入主题指针。
         // 表盘：hook contentsImage，始终返回当前主题的表盘（换主题后自然就是新表盘）
         TBInstallClockContentsHooks();
+        TBStartClockHandsKeeper();
         // 指针：主题只给静态图标时隐藏系统指针
         {
             Class cv = NSClassFromString(@"SBHClockApplicationIconImageView");
