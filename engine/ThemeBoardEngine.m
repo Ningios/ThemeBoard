@@ -310,6 +310,39 @@ static void TBLoadBundleResources(NSString *themeDir) {
 
 /// 时钟底图这类素材自带「透明圆角」，直接交给系统会在四角透出壁纸。
 /// 这里把透明像素用表盘底色填满（圆角交给图标遮罩去切）。
+static UIImage *TBResourceImage(NSString *name);
+static BOOL TBImageIsMostlyOpaque(CGImageRef cg);
+
+/// 玻璃素材缓存（主体高度透明 = 玻璃层）
+static NSMutableSet *gGlassNames;
+static BOOL TBIsGlassResource(NSString *name) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ gGlassNames = [NSMutableSet set]; });
+    NSString *key = name.lowercaseString;
+    if ([gGlassNames containsObject:key]) return YES;
+    UIImage *img = TBResourceImage(name);
+    if (!img || !img.CGImage) return NO;
+    BOOL glass = !TBImageIsMostlyOpaque(img.CGImage);
+    if (glass) [gGlassNames addObject:key];
+    return glass;
+}
+
+/// 把玻璃层叠在系统原图之上（保住系统底盘的刻度/结构，只加玻璃质感）
+static UIImage *TBCompositeOver(UIImage *base, UIImage *overlay) {
+    if (!base) return overlay;
+    if (!overlay) return base;
+    CGSize size = (base.size.width > 1) ? base.size : overlay.size;
+    if (size.width < 1) return overlay;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = base.scale > 0 ? base.scale : 3.0;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [base drawInRect:CGRectMake(0, 0, size.width, size.height)];
+        [overlay drawInRect:CGRectMake(0, 0, size.width, size.height)];
+    }];
+}
+
 /// 判断素材是否「主体不透明」（只有圆角透明）还是「半透明玻璃层」。
 /// 玻璃类素材绝不能填白，否则玻璃感会被抹成白板。
 static BOOL TBImageIsMostlyOpaque(CGImageRef cg) {
@@ -986,14 +1019,10 @@ static void TBHealAllIconViews(void) {
 
         // 只清「屏幕上真正碰到」的这些图标，避免 purgeAllCachedImages 一次清掉
         // 上千张图、紧接着全量重绘造成尖峰（曾被系统看门狗杀掉）。
-        if (seen.count > 0) {
-            [gLock lock];
-            NSArray *cacheList = gCaches.allObjects;
-            [gLock unlock];
-            TBLog(@"heal: 开始按需清缓存 %lu 个图标", (unsigned long)seen.count);
-            for (NSValue *cv in cacheList) { TBPurgeIcons(cv, seen); }
-            TBLog(@"heal: 清缓存完成");
-        }
+        // 注意：这里【不要】清缓存。对屏幕上正在显示的图标调
+        // purgeCachedImagesForIcons: 会把 SpringBoard 搞崩（14:33 那次注销的元凶），
+        // 而且实测 fixed 恒为 0，本来就没有效果。
+        (void)seen;
     } @catch (NSException *e) { }
     TBLog(@"heal: 结束");
     gHealDepth--;
@@ -1556,20 +1585,42 @@ static UIImage *tb_imageNamedInBundle(id self, SEL _cmd, NSString *name, NSBundl
     if (!TBIsThemedResourceName(name)) {
         return o_imageNamedInBundle ? o_imageNamedInBundle(self, _cmd, name, bundle) : nil;
     }
+    UIImage *sys = o_imageNamedInBundle ? o_imageNamedInBundle(self, _cmd, name, bundle) : nil;
     UIImage *img = TBResourceImage(name);
     TBLogResourceProbe(name, img ? @"hit(bundle)" : nil);
-    if (img) { gServe++; TBLog(@"serve 资源(bundle) %@", name); return img; }
-    return o_imageNamedInBundle ? o_imageNamedInBundle(self, _cmd, name, bundle) : nil;
+    if (img) {
+        gServe++;
+        if (!TBImageIsMostlyOpaque(img.CGImage)) {
+            TBLogOnce([@"glasscomp|" stringByAppendingString:name.lowercaseString],
+                      @"玻璃素材叠加到系统底图 %@", name);
+            UIImage *out = TBCompositeOver(sys, img);
+            if (out) return out;
+        }
+        TBLog(@"serve 资源(bundle) %@", name);
+        return img;
+    }
+    return sys;
 }
 
 static UIImage *tb_imageNamedInBundleTrait(id self, SEL _cmd, NSString *name, NSBundle *bundle, id trait) {
     if (!TBIsThemedResourceName(name)) {
         return o_imageNamedInBundleTrait ? o_imageNamedInBundleTrait(self, _cmd, name, bundle, trait) : nil;
     }
+    UIImage *sys = o_imageNamedInBundleTrait ? o_imageNamedInBundleTrait(self, _cmd, name, bundle, trait) : nil;
     UIImage *img = TBResourceImage(name);
     TBLogResourceProbe(name, img ? @"hit(bundleTrait)" : nil);
-    if (img) { gServe++; TBLog(@"serve 资源(bundleTrait) %@", name); return img; }
-    return o_imageNamedInBundleTrait ? o_imageNamedInBundleTrait(self, _cmd, name, bundle, trait) : nil;
+    if (img) {
+        gServe++;
+        if (!TBImageIsMostlyOpaque(img.CGImage)) {
+            TBLogOnce([@"glasscomp|" stringByAppendingString:name.lowercaseString],
+                      @"玻璃素材叠加到系统底图 %@", name);
+            UIImage *out = TBCompositeOver(sys, img);
+            if (out) return out;
+        }
+        TBLog(@"serve 资源(bundleTrait) %@", name);
+        return img;
+    }
+    return sys;
 }
 
 /// 只有这些名字才值得查主题资源。imageWithContentsOfFile 是极热接口，
@@ -1624,6 +1675,9 @@ static NSString *TBResourcePathNamed(NSString *name, NSString *ext) {
     NSString *key = ext.length ? [NSString stringWithFormat:@"%@.%@", name.lowercaseString, ext.lowercaseString]
                                : name.lowercaseString;
     NSString *hit = res[key] ?: res[name.lowercaseString];
+    // 半透明玻璃素材不拦路径：让系统拿到它自己的表盘，由后续 imageNamed
+    // 钩子把玻璃叠上去；否则玻璃直接当底图会露出黑色底层（时钟变黑）
+    if (hit.length && TBIsGlassResource(name)) return nil;
     return hit;
 }
 
