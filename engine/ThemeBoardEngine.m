@@ -1895,7 +1895,6 @@ static UIImage *tb_imageNamed(id self, SEL _cmd, NSString *name) {
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 imageNamed %@", name);
         TBLog(@"serve 资源 %@", name);
-        if ([name hasPrefix:@"ClockIconBackground"] && sys0) gSystemClockFace = sys0;
         return img;
     }
     return sys0;
@@ -1915,7 +1914,6 @@ static UIImage *tb_imageNamedInBundle(id self, SEL _cmd, NSString *name, NSBundl
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 inBundle %@", name);
         TBLog(@"serve 资源(bundle) %@", name);
-        if ([name hasPrefix:@"ClockIconBackground"] && sys) gSystemClockFace = sys;
         return img;
     }
     return sys;
@@ -1932,8 +1930,10 @@ static UIImage *tb_imageNamedInBundleTrait(id self, SEL _cmd, NSString *name, NS
         gServe++;
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 inBundleTrait %@", name);
+        // 时钟表盘素材：这条路径（系统按名字取资源）也要「圆角 + 白底」，
+        // 否则半透明玻璃会透出系统那块深色底盘 → 显示发黑（资源路径之前漏了这步）
+        if ([name hasPrefix:@"ClockIconBackground"]) img = TBClockRoundedFace(img);
         TBLog(@"serve 资源(bundleTrait) %@", name);
-        if ([name hasPrefix:@"ClockIconBackground"] && sys) gSystemClockFace = sys;
         return img;
     }
     return sys;
