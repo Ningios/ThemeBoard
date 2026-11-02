@@ -515,18 +515,8 @@ static UIImage *TBResourceImage(NSString *name) {
     if (!path) return nil;
     UIImage *img = [[UIImage alloc] initWithContentsOfFile:path];
 
-    // 时钟底图：素材自带透明圆角会在四角透出壁纸，这里填成不透明
-    NSString *lower = name.lowercaseString;
-    if ([lower hasPrefix:@"clockiconbackground"] && img) {
-        static NSMutableSet *done = nil;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{ done = [NSMutableSet set]; });
-        if (![done containsObject:lower]) {
-            [done addObject:lower];
-            TBLogOnce(@"clockopaque", @"时钟底图不透明化（填掉透明圆角）");
-        }
-        img = TBMakeOpaqueOnBodyColor(img);
-    }
+    // 注意：不做任何"填白/不透明化"。SnowBoard 也不做 —— 填色会把半透明玻璃表盘
+    // 整块填成主题主体色（玻璃主题就变成一块黑）。四角由图标圆角遮罩处理即可。
     return img;
 }
 
@@ -1191,17 +1181,25 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
     if (!v || depth > 12) return 0;
     NSInteger fixed = 0;
     NSString *vcls = NSStringFromClass([v class]);
-    // 时钟视图：换主题后必须重画，否则表盘会一直停在上一个主题
+    // 时钟视图：换主题后要重画。顺序完全照 SnowBoard 的 refreshIconView:fully:：
+    //   ① 图标自身清缓存（purgeCachedImages / reloadIconImage）
+    //   ② 图片视图 clearCachedImages（无则 _clearCachedImages）
+    //   ③ updateClockImages ④ updateImageAnimated:NO ⑤ _updateOverlayImage
+    // 只在【这一个时钟视图】上做，对整棵视图树调用会崩。
     if ([vcls rangeOfString:@"Clock"].location != NSNotFound) {
         @try {
             TBLogOnce([@"clockrefresh|" stringByAppendingString:vcls], @"时钟视图重画 %@", vcls);
-            [v setNeedsLayout];
-            [v setNeedsDisplay];
-            if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
-                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
+            SEL iconSel = NSSelectorFromString(@"icon");
+            if ([v respondsToSelector:iconSel]) {
+                id icon = ((id (*)(id, SEL))objc_msgSend)(v, iconSel);
+                if (icon) {
+                    if ([icon respondsToSelector:NSSelectorFromString(@"purgeCachedImages")]) {
+                        ((void (*)(id, SEL))objc_msgSend)(icon, NSSelectorFromString(@"purgeCachedImages"));
+                    } else if ([icon respondsToSelector:NSSelectorFromString(@"reloadIconImage")]) {
+                        ((void (*)(id, SEL))objc_msgSend)(icon, NSSelectorFromString(@"reloadIconImage"));
+                    }
+                }
             }
-            // SnowBoard 同款刷新顺序：clearCachedImages → updateClockImages →
-            // updateImageAnimated: 。只对【这一个时钟视图】调用（对整棵视图树调用会崩）。
             if ([v respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"clearCachedImages"));
             } else if ([v respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
@@ -1213,20 +1211,8 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
                 ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
             }
-            // 不指望系统重取：直接把当前主题的表盘写进这个视图（它就是表盘本身，
-            // 没有子视图；指针是它自己的子图层/自己画的）。
-            // 指针开关：不依赖 updateClockImages 的 hook，这里直接按判定设置
-            // SnowBoard 的刷新顺序（只对这一个时钟视图调用）
-            if ([v respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
-                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"clearCachedImages"));
-            } else if ([v respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
-                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_clearCachedImages"));
-            }
-            if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
-                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
-            }
-            if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
-                ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
+            if ([v respondsToSelector:NSSelectorFromString(@"_updateOverlayImage")]) {
+                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_updateOverlayImage"));
             }
         } @catch (NSException *e) { }
     }
@@ -2040,6 +2026,53 @@ static void TBLogClockImageSetShape(id set) {
           [found componentsJoinedByString:@" "]);
 }
 
+/// 把主题的针重排成系统约定（系统绕"画布中心"旋转；主题素材是"针尾=轴心、针尖朝上"）。
+/// 直接塞原图会偏出去、还会显粗。
+static UIImage *TBHandForSystemCanvas(UIImage *src, CGSize targetPt, CGFloat targetScale) {
+    if (!src || src.size.width < 1 || src.size.height < 1) return nil;
+    const size_t W = 128, H = 128;
+    unsigned char *buf = calloc(W * H * 4, 1);
+    if (!buf) return src;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return src; }
+    UIGraphicsPushContext(ctx);
+    [src drawInRect:CGRectMake(0, 0, W, H)];
+    UIGraphicsPopContext();
+    CGContextRelease(ctx);
+    size_t x0 = W, y0 = H, x1 = 0, y1 = 0;
+    for (size_t y = 0; y < H; y++) {
+        for (size_t x = 0; x < W; x++) {
+            if (buf[(y * W + x) * 4 + 3] < 30) continue;
+            if (x < x0) x0 = x; if (y < y0) y0 = y;
+            if (x > x1) x1 = x; if (y > y1) y1 = y;
+        }
+    }
+    free(buf);
+    if (x1 <= x0 || y1 <= y0) return src;
+    CGFloat nx0 = (CGFloat)x0 / W, nx1 = (CGFloat)(x1 + 1) / W;
+    CGFloat ny0 = (CGFloat)y0 / H, ny1 = (CGFloat)(y1 + 1) / H;
+    CGFloat tailX = (nx0 + nx1) / 2.0, tailY = ny1, lenNorm = ny1 - ny0;
+
+    CGFloat scale = targetScale > 0.5 ? targetScale : 3.0;
+    CGSize canvasPt = targetPt;
+    if (canvasPt.width < 1 || canvasPt.height < 1) canvasPt = CGSizeMake(10, 30);
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = scale;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:canvasPt format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGFloat wantLenPt = canvasPt.height / 2.0;                 // 系统针都是长满半格
+        CGFloat srcLenPt = lenNorm * src.size.height;
+        if (srcLenPt < 0.5) srcLenPt = src.size.height;
+        CGFloat k = wantLenPt / srcLenPt;
+        CGFloat dw = src.size.width * k, dh = src.size.height * k;
+        CGFloat cx = canvasPt.width / 2.0, cy = canvasPt.height / 2.0;
+        [src drawInRect:CGRectMake(cx - tailX * dw, cy - tailY * dh, dw, dh)];
+    }];
+}
+
 static void TBApplyClockImagesToSet(id set) {
     if (!set || !TBEnabled() || TBSafeMode()) return;
     TBLogClockImageSetShape(set);
@@ -2070,7 +2103,17 @@ static void TBApplyClockImagesToSet(id set) {
         CGSize target = orig ? orig.size : CGSizeZero;
         if (target.width < 1 || target.height < 1) continue;   // 系统没有这项就别乱塞
 
-        if (fabs(img.size.width - target.width) > 1.0 || fabs(img.size.height - target.height) > 1.0) {
+        // 指针（时针/分针/秒针）必须重排到系统约定；圆点按尺寸缩放即可
+        BOOL isHand = [map[i].key isEqualToString:@"hours"] ||
+                      [map[i].key isEqualToString:@"minutes"] ||
+                      [map[i].key isEqualToString:@"seconds"];
+        if (isHand) {
+            UIImage *re = TBHandForSystemCanvas(img, target, orig.scale > 0.5 ? orig.scale : 3.0);
+            if (re) img = re;
+            TBLogOnce([@"clockhand|" stringByAppendingString:map[i].key],
+                      @"时钟针重排 %@：针尾→画布中心，长度对齐系统 %.0fx%.0f pt",
+                      map[i].key, target.width, target.height);
+        } else if (fabs(img.size.width - target.width) > 1.0 || fabs(img.size.height - target.height) > 1.0) {
             // 关键：scale 必须跟「系统原本那根针」一致，否则点尺寸对了但像素尺寸仍然巨大，
             // 图层按像素铺开 → 指针巨大（上一版就是这个坑）。
             UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
