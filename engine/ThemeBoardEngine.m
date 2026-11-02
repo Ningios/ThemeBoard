@@ -1069,6 +1069,53 @@ static BOOL TBApplyThemeToIconView(id self) {
 
 static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
 
+// ---- 时钟表盘：换主题时把「我们发出去的表盘图」就地换成新主题的 ----
+static NSMutableArray *gClockFaces;   // 我们返回给系统的时钟表盘图（保留最近 8 张）
+static NSMutableSet  *gClockFaceCGs;  // 对应的 CGImage 指针
+
+static void TBRegisterClockFace(UIImage *img) {
+    if (!img) return;
+    @try {
+        if (!gClockFaces) { gClockFaces = [NSMutableArray array]; gClockFaceCGs = [NSMutableSet set]; }
+        if (![gClockFaces containsObject:img]) {
+            [gClockFaces addObject:img];
+            if (img.CGImage) [gClockFaceCGs addObject:[NSValue valueWithPointer:img.CGImage]];
+            while (gClockFaces.count > 8) [gClockFaces removeObjectAtIndex:0];
+        }
+    } @catch (NSException *e) { }
+}
+
+static BOOL TBIsOurClockFaceImage(UIImage *img) {
+    if (!img) return NO;
+    if (gClockFaces && [gClockFaces containsObject:img]) return YES;
+    if (img.CGImage && gClockFaceCGs) return [gClockFaceCGs containsObject:[NSValue valueWithPointer:img.CGImage]];
+    return NO;
+}
+
+static BOOL TBIsOurClockFaceCG(CGImageRef cg) {
+    if (!cg || !gClockFaceCGs) return NO;
+    return [gClockFaceCGs containsObject:[NSValue valueWithPointer:cg]];
+}
+
+/// 递归替换：只动「确认是我们发出去的」那些图，系统的指针层一律不碰
+static NSInteger TBClockSwapFace(UIView *v, UIImage *face) {
+    if (!v) return 0;
+    NSInteger n = 0;
+    @try {
+        if ([v isKindOfClass:[UIImageView class]]) {
+            UIImageView *iv = (UIImageView *)v;
+            if (TBIsOurClockFaceImage(iv.image)) { iv.image = face; n++; }
+        }
+        id c = v.layer.contents;
+        if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID()) {
+            CGImageRef cg = (__bridge CGImageRef)c;
+            if (TBIsOurClockFaceCG(cg)) { v.layer.contents = (__bridge id)face.CGImage; n++; }
+        }
+    } @catch (NSException *e) { }
+    for (UIView *sv in v.subviews) n += TBClockSwapFace(sv, face);
+    return n;
+}
+
 static NSString *TBViewTreeDesc(UIView *v, NSInteger depth) {
     NSMutableString *s = [NSMutableString string];
     for (NSInteger i = 0; i < depth; i++) [s appendString:@"  "];
@@ -1147,24 +1194,14 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
             }
-            // 表盘会被时钟视图攥住（换主题后系统根本不再请求资源）→ 只针对时钟这一个
-            // 图标清一次图片缓存并通知观察者，让它重新取图。单图标，不是整屏。
-            id cicon = nil;
-            SEL ciconSel = NSSelectorFromString(@"icon");
-            if ([v respondsToSelector:ciconSel]) cicon = ((id (*)(id, SEL))objc_msgSend)(v, ciconSel);
-            if (cicon) {
-                [gLock lock]; NSArray *cs = gCaches.allObjects; [gLock unlock];
-                for (NSValue *cv in cs) TBPurgeIcons(cv, @[cicon]);
-                TBLog(@"时钟：已清 %lu 个图片缓存中该图标", (unsigned long)cs.count);
-                SEL n1 = NSSelectorFromString(@"notifyObserversOfUpdateForIcon:");
-                SEL n2 = NSSelectorFromString(@"notifyObserversOfUnmaskedUpdateForIcon:");
-                for (NSValue *cv in cs) {
-                    id c = (__bridge id)cv.pointerValue;
-                    @try {
-                        if ([c respondsToSelector:n1]) ((void (*)(id, SEL, id))objc_msgSend)(c, n1, cicon);
-                        if ([c respondsToSelector:n2]) ((void (*)(id, SEL, id))objc_msgSend)(c, n2, cicon);
-                    } @catch (NSException *e) { }
-                }
+            // 【不要清缓存】purgeCachedImagesForIcons: 对屏幕上正在显示的图标调用会
+            // 直接干掉 SpringBoard（0.13.67 实测：日志停在重画之后，随后连续重生 11 次）。
+            // 改成下面这样：把「我们自己发出去的旧主题表盘」就地换成新主题的表盘。
+            UIImage *cface = TBResourceImage(@"ClockIconBackgroundSquare");
+            if (cface) {
+                NSInteger sw = TBClockSwapFace((UIView *)v, cface);
+                if (sw > 0) TBLog(@"时钟表盘替换：%ld 处", (long)sw);
+                else TBLog(@"时钟表盘替换：0 处（表盘不在我们发出的图里）");
             }
         } @catch (NSException *e) { }
     }
@@ -1768,6 +1805,7 @@ static UIImage *tb_imageNamed(id self, SEL _cmd, NSString *name) {
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 imageNamed %@", name);
         TBLog(@"serve 资源 %@", name);
+        if ([name hasPrefix:@"ClockIconBackground"]) TBRegisterClockFace(img);
         return img;
     }
     return sys0;
@@ -1787,6 +1825,7 @@ static UIImage *tb_imageNamedInBundle(id self, SEL _cmd, NSString *name, NSBundl
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 inBundle %@", name);
         TBLog(@"serve 资源(bundle) %@", name);
+        if ([name hasPrefix:@"ClockIconBackground"]) TBRegisterClockFace(img);
         return img;
     }
     return sys;
@@ -1804,6 +1843,7 @@ static UIImage *tb_imageNamedInBundleTrait(id self, SEL _cmd, NSString *name, NS
         if (name.length < 48) TBLogOnce([@"res2|" stringByAppendingString:name.lowercaseString],
                                         @"res2 inBundleTrait %@", name);
         TBLog(@"serve 资源(bundleTrait) %@", name);
+        if ([name hasPrefix:@"ClockIconBackground"]) TBRegisterClockFace(img);
         return img;
     }
     return sys;
