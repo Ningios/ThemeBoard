@@ -315,9 +315,6 @@ static BOOL TBImageIsMostlyOpaque(CGImageRef cg);
 static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys);
 static UIImage *TBImageForBundle(NSString *bid);      // 前置：时钟判定要用
 static BOOL TBThemeHasClockMaterial(void);
-static BOOL TBClockShouldHideHands(void);
-static UIImage *TBClockFaceForView(UIView *v);
-static void TBApplyClockHands(id v);
 static UIImage *TBKeyOutCornerColor(UIImage *img);
 
 /// 素材是否带透明像素（粗略判断：抽样看有没有 alpha 明显偏低的像素）
@@ -666,101 +663,10 @@ static BOOL TBImageHasContentInDateArea(UIImage *img) {
     return TBImageDateAreaMetrics(img, NULL, NULL);
 }
 
-/// 表盘素材中心区域是否已经有指针（个别主题直接把指针画进表盘素材里，
-/// 再叠系统指针就重影）。做法：取全图亮度中位数当背景，看中心圆盘内
-/// 与背景差异明显的像素占比。
-static BOOL TBImageCenterHasInk(UIImage *img) {
-    if (!img) return NO;
-    const size_t W = 96, H = 96;
-    unsigned char *buf = calloc(W * H * 4, 1);
-    if (!buf) return NO;
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs,
-                                             kCGImageAlphaPremultipliedLast);
-    CGColorSpaceRelease(cs);
-    if (!ctx) { free(buf); return NO; }
-    UIGraphicsPushContext(ctx);
-    [img drawInRect:CGRectMake(0, 0, W, H)];
-    UIGraphicsPopContext();
-    CGContextRelease(ctx);
-
-    // 亮度中位数 = 背景
-    int hist[256] = {0};
-    NSInteger np = 0;
-    for (size_t i = 0; i < W * H; i++) {
-        unsigned char *px = buf + i * 4;
-        if (px[3] < 40) continue;
-        int l = (int)(0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2]);
-        if (l > 255) l = 255;
-        hist[l]++;
-        np++;
-    }
-    int median = 0, acc = 0;
-    for (int i = 0; i < 256; i++) { acc += hist[i]; if (acc * 2 >= np) { median = i; break; } }
-
-    // 只看圆心附近（半径 13%）：素材自己画的指针一定穿过圆心，
-    // 而刻度/数字离圆心很远，不会误判（用 0.30 半径时就是这样把数字当针的）
-    CGFloat cx = W / 2.0, cy = H / 2.0, r = W * 0.13;
-    NSInteger ink = 0, total = 0;
-    for (size_t y = 0; y < H; y++) {
-        for (size_t x = 0; x < W; x++) {
-            CGFloat dx = x - cx, dy = y - cy;
-            if (sqrt(dx * dx + dy * dy) > r) continue;
-            unsigned char *px = buf + (y * W + x) * 4;
-            if (px[3] < 40) continue;
-            int l = (int)(0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2]);
-            total++;
-            if (abs(l - median) > 60) ink++;
-        }
-    }
-    free(buf);
-    if (total < 20) return NO;
-    return (ink * 100 / total) > 1.5;   // 圆心附近有"墨"= 素材自己画了指针
-}
-
 /// 主题只给了 IconBundles 静态图标（Bundles 里没有整套动态素材）→
 /// 图标自己就画了日期/指针，我们不该再叠一层
 static BOOL TBThemeHasClockMaterial(void) {
     return TBResourceImage(@"ClockIconBackgroundSquare") != nil;
-}
-
-static BOOL TBClockShouldHideHands(void) {
-    if (!TBEnabled() || TBSafeMode()) return NO;
-    NSString *theme = TBActiveTheme();
-    if (!theme.length) return NO;                  // 没主题：系统表盘 + 系统指针
-
-    // 手动开关只用于「强制隐藏」（打开才生效，关掉 = 自动）
-    id hv = TBPref(@"HideClockHands");
-    BOOL forced = (hv && [hv boolValue]);
-
-    // 自动规则（按表盘实际来源）：
-    //  · 有 Bundles 表盘素材 ClockIconBackgroundSquare.png → 用素材，指针显示系统指针
-    //    （即使同时也有 IconBundles 静态图标，也优先用 Bundles 素材）
-    //  · 没有 Bundles 素材，只有 IconBundles 静态图标 → 用静态图标，隐藏系统指针
-    //  · 都没有 → 系统原样，指针照常
-    BOOL hasMaterial = TBThemeHasClockMaterial();
-    BOOL hasStatic = NO;
-    if (!hasMaterial) {
-        [gLock lock];
-        TBLoadIndex();
-        hasStatic = gIndex[@"com.apple.mobiletimer"] != nil;
-        [gLock unlock];
-    }
-    // 实际要用的那张表盘：如果素材本身已经画了指针（圆心有墨），必须隐藏系统指针
-    BOOL faceHasHands = NO;
-    if (hasMaterial || hasStatic) {
-        UIImage *face = hasMaterial ? TBResourceImage(@"ClockIconBackgroundSquare")
-                                    : TBImageForBundle(@"com.apple.mobiletimer");
-        faceHasHands = TBImageCenterHasInk(face);
-    }
-    BOOL hide = forced || (!hasMaterial && hasStatic) || faceHasHands;
-    TBLogOnce([@"clockhands|" stringByAppendingFormat:@"%@|%d", theme, (int)hide],
-              @"时钟指针判定：%@（表盘=%@%@%@）",
-              hide ? @"隐藏指针" : @"显示系统指针",
-              hasMaterial ? @"Bundles 素材" : (hasStatic ? @"IconBundles 静态图标" : @"无，系统原样"),
-              faceHasHands ? @", 素材中心已画指针" : @"",
-              forced ? @"，手动强制隐藏" : @"");
-    return hide;
 }
 
 /// 日历合成（SnowBoard 同款）：主题底图 + 红色星期 + 黑色日期
@@ -1279,87 +1185,8 @@ static BOOL TBApplyThemeToIconView(id self) {
 
 static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
 
-static NSString *TBViewTreeDesc(UIView *v, NSInteger depth) {
-    NSMutableString *s = [NSMutableString string];
-    for (NSInteger i = 0; i < depth; i++) [s appendString:@"  "];
-    [s appendFormat:@"%@ f=%@", NSStringFromClass([v class]), NSStringFromCGRect(v.frame)];
-    if ([v isKindOfClass:[UIImageView class]]) {
-        UIImage *im = ((UIImageView *)v).image;
-        [s appendFormat:@" img=%@", im ? [NSString stringWithFormat:@"%.0fx%.0f", im.size.width, im.size.height] : @"nil"];
-    }
-    if (v.layer.contents) [s appendString:@" [contents]"];
-    if (v.isHidden) [s appendString:@" hidden"];
-    [s appendString:@"\n"];
-    if (depth < 6) for (UIView *sv in v.subviews) [s appendString:TBViewTreeDesc(sv, depth + 1)];
-    return s;
-}
-
 /// 一次性探针：时钟视图的类链 / ivar / 相关方法 / 子视图树，用来确定表盘图存在哪
 static void TBClockDumpNow(id v);
-static void TBClockDumpOnce(id v) {
-    static BOOL done = NO;
-    if (done) return;
-    done = YES;
-    // 延后一点：等这次布局跑完，视图树里才有真正的表盘节点
-    __weak id wv = v;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        id v = wv; if (!v) return;
-        TBClockDumpNow(v);
-    });
-}
-
-static void TBClockDumpNow(id v) {
-    @try {
-        NSMutableString *chain = [NSMutableString string];
-        for (Class c = [v class]; c && c != [NSObject class]; c = class_getSuperclass(c))
-            [chain appendFormat:@"%@ ", NSStringFromClass(c)];
-        TBLog(@"时钟类链: %@", chain);
-
-        NSMutableString *ivs = [NSMutableString string];
-        for (Class c = [v class]; c && c != [NSObject class]; c = class_getSuperclass(c)) {
-            unsigned int n = 0; Ivar *list = class_copyIvarList(c, &n);
-            for (unsigned int i = 0; i < n; i++) { const char *nm = ivar_getName(list[i]); if (nm) [ivs appendFormat:@"%s ", nm]; }
-            free(list);
-        }
-        TBLog(@"时钟 ivar: %@", ivs);
-
-        NSMutableString *ms = [NSMutableString string];
-        for (Class c = [v class]; c && c != [NSObject class]; c = class_getSuperclass(c)) {
-            unsigned int n = 0; Method *list = class_copyMethodList(c, &n);
-            for (unsigned int i = 0; i < n; i++) {
-                NSString *sn = NSStringFromSelector(method_getName(list[i]));
-                if ([sn rangeOfString:@"mage"].location != NSNotFound ||
-                    [sn rangeOfString:@"lock"].location != NSNotFound ||
-                    [sn rangeOfString:@"ackground"].location != NSNotFound ||
-                    [sn rangeOfString:@"pdate"].location != NSNotFound ||
-                    [sn rangeOfString:@"efresh"].location != NSNotFound)
-                    [ms appendFormat:@"%@ ", sn];
-            }
-            free(list);
-        }
-        TBLog(@"时钟方法: %@", ms);
-        TBLog(@"时钟视图树:\n%@", TBViewTreeDesc((UIView *)v, 0));
-        @try {
-            UIView *uv = (UIView *)v;
-            NSMutableString *ls = [NSMutableString string];
-            [ls appendFormat:@"自身 layer contents=%@\n",
-                uv.layer.contents ? @"有" : @"无"];
-            for (CALayer *l in uv.layer.sublayers) {
-                CGSize cs = CGSizeZero;
-                id c = l.contents;
-                if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID()) {
-                    cs = CGSizeMake(CGImageGetWidth((__bridge CGImageRef)c),
-                                    CGImageGetHeight((__bridge CGImageRef)c));
-                }
-                [ls appendFormat:@"  子层 %@ f=%@ contents=%.0fx%.0f\n",
-                    NSStringFromClass([l class]), NSStringFromCGRect(l.frame), cs.width, cs.height];
-            }
-            TBLog(@"时钟图层:\n%@", ls);
-        } @catch (NSException *e) { }
-    } @catch (NSException *e) { TBLog(@"时钟探针异常: %@", e.reason); }
-}
-
 static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *iconsOut) {
     if (!v || depth > 12) return 0;
     NSInteger fixed = 0;
@@ -1368,7 +1195,6 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
     if ([vcls rangeOfString:@"Clock"].location != NSNotFound) {
         @try {
             TBLogOnce([@"clockrefresh|" stringByAppendingString:vcls], @"时钟视图重画 %@", vcls);
-            TBClockDumpOnce(v);
             [v setNeedsLayout];
             [v setNeedsDisplay];
             if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
@@ -1390,17 +1216,17 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             // 不指望系统重取：直接把当前主题的表盘写进这个视图（它就是表盘本身，
             // 没有子视图；指针是它自己的子图层/自己画的）。
             // 指针开关：不依赖 updateClockImages 的 hook，这里直接按判定设置
-            TBApplyClockHands((id)v);
-            UIImage *cface = TBClockFaceForView((UIView *)v);
-            if (cface && cface.CGImage) {
-                @try {
-                    ((UIView *)v).layer.contents = (__bridge id)cface.CGImage;
-                    [v setValue:cface forKey:@"mappedContentsImage"];
-                    TBLog(@"时钟表盘：直接写入 layer.contents %.0fx%.0f",
-                          cface.size.width, cface.size.height);
-                } @catch (NSException *e) {
-                    TBLog(@"时钟表盘：写入失败 %@", e.reason);
-                }
+            // SnowBoard 的刷新顺序（只对这一个时钟视图调用）
+            if ([v respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
+                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"clearCachedImages"));
+            } else if ([v respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
+                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_clearCachedImages"));
+            }
+            if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
+                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
+            }
+            if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
             }
         } @catch (NSException *e) { }
     }
@@ -1453,41 +1279,8 @@ static void TBHealAllIconViews(void) {
 
 static __weak UIView *gLastClockView;   // 最近一次看到的时钟视图
 
-/// 时钟指针：把时钟视图的指针子图层统一隐藏/显示（每次布局都执行 → 系统重绘也留得住）
-static void TBApplyClockHands(id v) {
-    if (![v isKindOfClass:[UIView class]]) return;
-    NSString *cls = NSStringFromClass([v class]);
-    if ([cls rangeOfString:@"Clock"].location == NSNotFound) return;
-    gLastClockView = (UIView *)v;
-    BOOL hide = TBClockShouldHideHands();
-    NSInteger n = 0;
-    for (CALayer *l in ((UIView *)v).layer.sublayers) { l.hidden = hide; n++; }
-    if (n) {
-        TBLogOnce([@"clockhandsapply|" stringByAppendingFormat:@"%@|%d", TBActiveTheme() ?: @"", (int)hide],
-                  @"时钟：指针 %@（%ld 个子层）", hide ? @"已隐藏" : @"显示", (long)n);
-    }
-}
-
-/// 系统每分钟重绘指针时会把我们设的 hidden 清掉，所以再挂一个 1.5s 的兜底，
-/// 只要判定是隐藏，就一直保持隐藏（判定变了会自动恢复）
-static void TBStartClockHandsKeeper(void) {
-    static BOOL started = NO;
-    if (started) return;
-    started = YES;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *timer) {
-            UIView *w = gLastClockView;
-            if (!w) return;
-            if (!TBClockShouldHideHands()) return;     // 该显示时不动它
-            for (CALayer *l in w.layer.sublayers) l.hidden = YES;
-        }];
-        (void)t;
-    });
-}
-
 static void tb_iconViewLayoutSubviews(id self, SEL _cmd) {
     if (o_iconViewLayout) o_iconViewLayout(self, _cmd);
-    TBApplyClockHands(self);   // 时钟视图每次布局都重新按判定设置指针显隐
     if (!TBApplyIconForDesktop() || TBSafeMode() || !TBEnabled()) return;
     TBApplyThemeToIconView(self);
 }
@@ -2274,26 +2067,6 @@ static void TBApplyClockImagesToSet(id set) {
             if ([v isKindOfClass:[UIImage class]]) orig = v;
         }
 
-        // 一次性把「系统原本那根针」导出成文件，便于分析其画布/轴心约定
-        static BOOL dumped = NO;
-        if (!dumped && orig) {
-            dumped = YES;
-            NSString *dir = @"/var/mobile/Library/ThemeBoard/clockdump";
-            [[NSFileManager defaultManager] createDirectoryAtPath:dir
-                                      withIntermediateDirectories:YES attributes:nil error:NULL];
-            for (NSString *k in @[@"hours", @"minutes", @"seconds", @"hourMinuteDot", @"secondDot"]) {
-                SEL g = NSSelectorFromString(k);
-                if (![set respondsToSelector:g]) continue;
-                id v = ((id (*)(id, SEL))objc_msgSend)(set, g);
-                if (![v isKindOfClass:[UIImage class]]) continue;
-                NSData *png = UIImagePNGRepresentation((UIImage *)v);
-                if (!png) continue;
-                NSString *fp = [dir stringByAppendingPathComponent:
-                                [NSString stringWithFormat:@"sys-%@.png", k]];
-                [png writeToFile:fp atomically:YES];
-            }
-            TBLog(@"已导出系统指针图到 %@", dir);
-        }
         CGSize target = orig ? orig.size : CGSizeZero;
         if (target.width < 1 || target.height < 1) continue;   // 系统没有这项就别乱塞
 
@@ -2327,62 +2100,15 @@ static void TBApplyClockImagesToSet(id set) {
     }
 }
 
-/// 指定尺寸的透明图
-static UIImage *TBTransparentImage(CGSize size) {
-    if (size.width < 1 || size.height < 1) size = CGSizeMake(1, 1);
-    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-    fmt.scale = 1;
-    fmt.opaque = NO;
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size format:fmt];
-    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {}];
-}
-
-/// 把图像集里的指针成员换成透明图（尺寸不变，布局不变）→ 系统没针可画
-static void TBClearClockHandsInSet(id set) {
-    if (!set) return;
-    NSArray *keys = @[@"hours", @"minutes", @"seconds", @"hourMinuteDot", @"secondDot"];
-    NSInteger n = 0;
-    for (NSString *k in keys) {
-        @try {
-            SEL getter = NSSelectorFromString(k);
-            if (![set respondsToSelector:getter]) continue;
-            UIImage *orig = ((id (*)(id, SEL))objc_msgSend)(set, getter);
-            CGSize sz = [orig isKindOfClass:[UIImage class]] ? orig.size : CGSizeMake(1, 1);
-            UIImage *blank = TBTransparentImage(sz);
-            NSString *sn = [NSString stringWithFormat:@"set%@%@:",
-                            [[k substringToIndex:1] uppercaseString], [k substringFromIndex:1]];
-            SEL setter = NSSelectorFromString(sn);
-            if ([set respondsToSelector:setter]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(set, setter, blank);
-                n++;
-            }
-        } @catch (NSException *e) { }
-    }
-    if (n) TBLogOnce(@"clockclear|set", @"时钟图像集：%ld 项置透明（= 不画指针）", (long)n);
-}
-
 static id tb_makeImageSet(id self, SEL _cmd, void *metrics) {
     id set = o_makeImageSet ? o_makeImageSet(self, _cmd, metrics) : nil;
-    if (TBClockShouldHideHands()) {
-        TBClearClockHandsInSet(set);          // 判定隐藏 → 全部置透明，没针可画
-    } else {
-        id uv = TBPref(@"UseThemeClockHands");
-        if (uv && [uv boolValue]) {
-            // 开关打开才用主题的针（主题针的锚点/朝向和系统的未必一致，默认不用）
-            TBApplyClockImagesToSet(set);
-        }
-    }
+    TBApplyClockImagesToSet(set);   // 主题有的成员才替换，没有的保持系统的
     return set;
 }
 
 static id tb_imageSet(id self, SEL _cmd, void *metrics) {
     id set = o_imageSet ? o_imageSet(self, _cmd, metrics) : nil;
-    if (TBClockShouldHideHands()) {
-        TBClearClockHandsInSet(set);
-    } else {
-        id uv = TBPref(@"UseThemeClockHands");
-        if (uv && [uv boolValue]) TBApplyClockImagesToSet(set);
-    }
+    TBApplyClockImagesToSet(set);
     return set;
 }
 
@@ -2456,14 +2182,6 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 
 // ---- 静态图标模式：隐藏系统指针（图标自己画了指针，否则会重影）----
 static void (*o_updateClockImages)(id, SEL);
-static void tb_updateClockImages(id self, SEL _cmd) {
-    if (o_updateClockImages) o_updateClockImages(self, _cmd);
-    if (![self isKindOfClass:[UIView class]]) return;
-    BOOL hide = TBClockShouldHideHands();
-    for (CALayer *l in ((UIView *)self).layer.sublayers) l.hidden = hide;
-    if (hide) TBLogOnce(@"clockhands|hidden", @"时钟：主题只给了静态图标 → 隐藏系统指针");
-}
-
 static BOOL gDoneClock = NO;
 
 // ---- 时钟表盘：SBHClockApplicationIconImageView 把整块表盘合成进自己的 contents，
@@ -2474,21 +2192,6 @@ typedef UIColor *(*HandColorFn)(id, SEL);
 typedef BOOL (*HandBoolFn)(id, SEL);
 static HandColorFn o_hmHandColor, o_secHandColor;
 static HandBoolFn o_hidesSeconds;
-
-static UIColor *tb_hmHandColor(id self, SEL _cmd) {
-    if (TBClockShouldHideHands()) return [UIColor clearColor];
-    return o_hmHandColor ? o_hmHandColor(self, _cmd) : nil;
-}
-
-static UIColor *tb_secHandColor(id self, SEL _cmd) {
-    if (TBClockShouldHideHands()) return [UIColor clearColor];
-    return o_secHandColor ? o_secHandColor(self, _cmd) : nil;
-}
-
-static BOOL tb_hidesSeconds(id self, SEL _cmd) {
-    if (TBClockShouldHideHands()) return YES;
-    return o_hidesSeconds ? o_hidesSeconds(self, _cmd) : NO;
-}
 
 typedef id (*ContentsImgFn)(id, SEL);
 static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
@@ -2519,24 +2222,25 @@ static UIImage *TBClockRoundedFace(UIImage *img) {
     }];
 }
 
-static UIImage *TBClockFaceForView(UIView *v) {
-    // 1) 主题 Bundles/ 下的表盘素材（ClockIconBackgroundSquare）
+/// 时钟表盘：SnowBoard 的做法 —— 主题 Bundles 里有 ClockIconBackgroundSquare 就用它
+/// （按图标圆角遮罩好），没有就返回 nil，让调用方走系统原实现。
+/// 注意：不走 IconBundles 的静态图标；静态图标只在列表/快照里用，不参与实时时钟。
+static UIImage *TBClockMaterialFace(UIView *v) {
     UIImage *face = TBResourceImage(@"ClockIconBackgroundSquare");
-    // 2) 主题没有 Bundles 目录 → 用主题 IconBundles 里的时钟图标当表盘
-    if (!face) face = TBImageForBundle(@"com.apple.mobiletimer");
-    // 3) 没主题 / 主题没有时钟素材 → 还原系统自己的表盘
-    if (!face) face = TBSystemClockFace();
     if (!face) return nil;
     CGFloat sc = [UIScreen mainScreen].scale;
     if (sc < 0.5) sc = 3.0;
-    TBInfo info; info.size = v.bounds.size; info.scale = sc; info.ratio = 0;
-    if (info.size.width < 1 || info.size.height < 1) { info.size = CGSizeMake(60, 60); }
+    TBInfo info;
+    info.size = v.bounds.size;
+    info.scale = sc;
+    info.ratio = 0;
+    if (info.size.width < 1 || info.size.height < 1) info.size = CGSizeMake(64, 64);
     return TBClockRoundedFace(TBFitImage(face, info));
 }
 
 static id tb_clockContentsImage(id self, SEL _cmd) {
     if (!sInClockContents && TBIsClockView(self)) {
-        UIImage *face = TBClockFaceForView((UIView *)self);
+        UIImage *face = TBClockMaterialFace((UIView *)self);
         if (face) {
             TBLogOnce(@"clockface|contents", @"时钟表盘：contentsImage 返回主题表盘 %.0fx%.0f",
                       face.size.width, face.size.height);
@@ -2553,7 +2257,7 @@ static id tb_clockContentsImage(id self, SEL _cmd) {
 
 static id tb_clockSquareContentsImage(id self, SEL _cmd) {
     if (!sInClockContents && TBIsClockView(self)) {
-        UIImage *face = TBClockFaceForView((UIView *)self);
+        UIImage *face = TBClockMaterialFace((UIView *)self);
         if (face) return face;
     }
     if (sInClockContents) return nil;
@@ -2580,18 +2284,6 @@ static Class TBClassDeclaring(Class cls, SEL sel) {
     return Nil;
 }
 
-typedef void (*SetIconImageFn)(id, SEL, id, unsigned long long, unsigned long long, long long);
-static SetIconImageFn o_setIconImage;
-
-static void tb_clockSetImage(id self, SEL _cmd, id image,
-                             unsigned long long edges, unsigned long long outside, long long style) {
-    if (TBIsClockView(self)) {
-        UIImage *face = TBClockFaceForView((UIView *)self);
-        if (face) image = face;   // 系统每次贴图都换成当前主题的表盘（含圆角遮罩）
-    }
-    if (o_setIconImage) o_setIconImage(self, _cmd, image, edges, outside, style);
-    TBApplyClockHands(self);
-}
 
 /// 安装：优先挂 SBLiveIconImageView（时钟视图的父类，SnowBoard 也是挂这里），
 /// 再兜底挂 SBIconImageView 的同名实现。
@@ -2599,18 +2291,27 @@ static void TBInstallClockContentsHooks(void) {
     Class live = NSClassFromString(@"SBLiveIconImageView");
     if (!live) live = NSClassFromString(@"SBIconImageView");
     if (!live) { TBLog(@"contentsImage：找不到图标图片视图类"); return; }
-    // 注意：contentsImage / squareContentsImage 都是【实例方法】，必须用 TBHook
-    // （TBHookClass 挂的是类方法，用错了会静默失败：日志「类方法不存在」）
+    // contentsImage / squareContentsImage 都是实例方法（用 TBHook，不是 TBHookClass）
     Class c1 = TBClassDeclaring(live, NSSelectorFromString(@"contentsImage"));
     if (c1) o_contentsImageLive = (ContentsImgFn)TBHook(c1, @"contentsImage",
                                                         (IMP)tb_clockContentsImage, "时钟contents");
-    Class c3 = TBClassDeclaring(live, NSSelectorFromString(@"_setImage:onEdges:outside:style:"));
-    if (c3) o_setIconImage = (SetIconImageFn)TBHook(c3, @"_setImage:onEdges:outside:style:",
-                                                    (IMP)tb_clockSetImage, "时钟贴图");
     Class c2 = TBClassDeclaring(live, NSSelectorFromString(@"squareContentsImage"));
     if (c2) o_squareContentsImageLive = (ContentsImgFn)TBHook(c2, @"squareContentsImage",
                                                               (IMP)tb_clockSquareContentsImage, "时钟squareContents");
+    // 指针：SnowBoard 同款 makeImageSetForMetrics: 注入（主题有的才替换）
+    Class clock = NSClassFromString(@"SBHClockApplicationIconImageView");
+    if (clock) {
+        if (TBHasMethod(clock, @"makeImageSetForMetrics:")) {
+            o_makeImageSet = (ClockImageSetFn)TBHookClass(clock, @"makeImageSetForMetrics:",
+                                                          (IMP)tb_makeImageSet, "时钟图像集");
+        }
+        if (TBHasMethod(clock, @"imageSetForMetrics:")) {
+            o_imageSet = (ClockImageSetFn)TBHookClass(clock, @"imageSetForMetrics:",
+                                                      (IMP)tb_imageSet, "时钟图像集2");
+        }
+    }
 }
+
 static BOOL gDoneSpecifier = NO;
 static BOOL gDoneGen = NO;
 static BOOL gDoneISGeneration = NO;
@@ -2685,46 +2386,7 @@ static void TBInstall(void) {
         // 指针一律用系统自己的（黑时针 + 黑分针 + 橙秒针），不注入主题指针。
         // 表盘：hook contentsImage，始终返回当前主题的表盘（换主题后自然就是新表盘）
         TBInstallClockContentsHooks();
-        // 指针显隐（系统接口，SnowBoard 同款）：颜色置透明 + 隐藏秒针
-        if (TBHasMethod(clockView, @"hoursMinutesHandColor")) {
-            o_hmHandColor = (HandColorFn)TBHookClass(clockView, @"hoursMinutesHandColor",
-                                                    (IMP)tb_hmHandColor, "时钟时分手颜色");
-        } else TBLog(@"· 时钟：没有 hoursMinutesHandColor");
-        if (TBHasMethod(clockView, @"secondsHandColor")) {
-            o_secHandColor = (HandColorFn)TBHookClass(clockView, @"secondsHandColor",
-                                                     (IMP)tb_secHandColor, "时钟秒针颜色");
-        } else TBLog(@"· 时钟：没有 secondsHandColor");
-        if (TBHasMethod(clockView, @"hidesSecondsHand")) {
-            o_hidesSeconds = (HandBoolFn)TBHookClass(clockView, @"hidesSecondsHand",
-                                                    (IMP)tb_hidesSeconds, "时钟隐藏秒针");
-        } else TBLog(@"· 时钟：没有 hidesSecondsHand");
-        // 图像集：隐藏时把指针成员置透明
-        if (TBHasMethod(clockView, @"makeImageSetForMetrics:")) {
-            o_makeImageSet = (ClockImageSetFn)TBHookClass(clockView, @"makeImageSetForMetrics:",
-                                                         (IMP)tb_makeImageSet, "时钟图像集");
-        }
-        if (TBHasMethod(clockView, @"imageSetForMetrics:")) {
-            o_imageSet = (ClockImageSetFn)TBHookClass(clockView, @"imageSetForMetrics:",
-                                                      (IMP)tb_imageSet, "时钟图像集2");
-        }
-        TBStartClockHandsKeeper();
-        // 指针：主题只给静态图标时隐藏系统指针
-        {
-            Class cv = NSClassFromString(@"SBHClockApplicationIconImageView");
-            if (!cv) cv = NSClassFromString(@"SBLiveIconImageView");
-            SEL usel = NSSelectorFromString(@"updateClockImages");
-            Class owner = nil;
-            for (Class c = cv; c && c != [NSObject class]; c = class_getSuperclass(c)) {
-                unsigned int n = 0;
-                Method *ms = class_copyMethodList(c, &n);
-                BOOL found = NO;
-                for (unsigned int i = 0; i < n; i++) if (method_getName(ms[i]) == usel) { found = YES; break; }
-                free(ms);
-                if (found) { owner = c; break; }
-            }
-            if (owner) o_updateClockImages = (void (*)(id, SEL))TBHook(owner, @"updateClockImages",
-                                                                      (IMP)tb_updateClockImages, "时钟指针开关");
-        }
+
         // 左滑删除：装一次观测，把滑动容器的层级结构打进日志
         {
             Class pull = NSClassFromString(@"UISwipeActionPullView");
