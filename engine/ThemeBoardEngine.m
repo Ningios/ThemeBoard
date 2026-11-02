@@ -1189,31 +1189,50 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
     if ([vcls rangeOfString:@"Clock"].location != NSNotFound) {
         @try {
             TBLogOnce([@"clockrefresh|" stringByAppendingString:vcls], @"时钟视图重画 %@", vcls);
+            NSMutableString *st = [NSMutableString string];
             SEL iconSel = NSSelectorFromString(@"icon");
             if ([v respondsToSelector:iconSel]) {
                 id icon = ((id (*)(id, SEL))objc_msgSend)(v, iconSel);
                 if (icon) {
                     if ([icon respondsToSelector:NSSelectorFromString(@"purgeCachedImages")]) {
                         ((void (*)(id, SEL))objc_msgSend)(icon, NSSelectorFromString(@"purgeCachedImages"));
+                        [st appendString:@"icon.purge "];
                     } else if ([icon respondsToSelector:NSSelectorFromString(@"reloadIconImage")]) {
                         ((void (*)(id, SEL))objc_msgSend)(icon, NSSelectorFromString(@"reloadIconImage"));
+                        [st appendString:@"icon.reload "];
+                    } else {
+                        [st appendString:@"icon.none "];
                     }
                 }
             }
             if ([v respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"clearCachedImages"));
+                [st appendString:@"clear "];
             } else if ([v respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_clearCachedImages"));
+                [st appendString:@"_clear "];
+            } else {
+                [st appendString:@"clear.none "];
             }
             if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
             }
             if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
                 ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
+                [st appendString:@"updateImage "];
             }
             if ([v respondsToSelector:NSSelectorFromString(@"_updateOverlayImage")]) {
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_updateOverlayImage"));
+                [st appendString:@"overlay "];
             }
+            if ([v respondsToSelector:NSSelectorFromString(@"_iconImageView")]) {
+                id iv = ((id (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_iconImageView"));
+                if (iv && iv != v && [iv respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
+                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"clearCachedImages"));
+                    [st appendString:@"iv.clear "];
+                }
+            }
+            TBLog(@"时钟刷新：%@", st);
         } @catch (NSException *e) { }
     }
     BOOL special = ([vcls rangeOfString:@"Folder"].location != NSNotFound) ||
@@ -2058,17 +2077,26 @@ static void TBApplyClockImagesToSet(id set) {
 
         // 与 SnowBoard 完全一致：只做一步 —— 把主题这张图缩放到「系统原本那根针」的尺寸。
         // 不做轴心换算、不改色、不动别的成员（主题没有的成员保持系统原样）。
-        if (fabs(img.size.width - target.width) > 0.01 || fabs(img.size.height - target.height) > 0.01) {
+        // 与 SnowBoard 同一步：把主题图缩放到系统那一项的尺寸。
+        // 关键：点尺寸和 scale 都要和系统原本那张完全一致，否则像素尺寸变大，
+        // 系统按像素铺开 → 指针看起来又粗又长。
+        CGFloat oscale = orig.scale > 0.5 ? orig.scale : 1.0;
+        if (fabs(img.size.width - target.width) > 0.01 ||
+            fabs(img.size.height - target.height) > 0.01 ||
+            fabs(img.scale - oscale) > 0.01) {
             UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-            fmt.scale = orig.scale > 0.5 ? orig.scale : 3.0;
+            fmt.scale = oscale;
             fmt.opaque = NO;
             UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:target format:fmt];
             img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
                 [img drawInRect:CGRectMake(0, 0, target.width, target.height)];
             }];
             TBLogOnce([@"clockscale|" stringByAppendingString:map[i].key],
-                      @"时钟素材 ScaleToSize %@：系统 %.0fx%.0f pt（与 SnowBoard 同一步）",
-                      map[i].key, target.width, target.height);
+                      @"时钟素材 ScaleToSize %@：系统 %.0fx%.0f pt scale=%.0f → 注入 %.0fx%.0f pt scale=%.0f（像素 %.0fx%.0f vs %.0fx%.0f）",
+                      map[i].key, target.width, target.height, orig.scale,
+                      img.size.width, img.size.height, img.scale,
+                      img.size.width * img.scale, img.size.height * img.scale,
+                      orig.size.width * orig.scale, orig.size.height * orig.scale);
         }
 
         SEL setter = NSSelectorFromString([NSString stringWithFormat:@"set%@%@:",
@@ -2202,6 +2230,10 @@ static UIImage *TBClockRoundedFace(UIImage *img) {
     return [rd imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
         UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, pt.width, pt.height)
                                                     cornerRadius:r];
+        // 半透明玻璃表盘直接贴上去会透出系统那块深色底盘（看着发黑）；
+        // SB 的 maskedImage 出来是浅色的，这里先铺一层白底再画表盘，观感一致。
+        [[UIColor whiteColor] setFill];
+        [p fill];
         [p addClip];
         [img drawInRect:CGRectMake(0, 0, pt.width, pt.height)];
     }];
