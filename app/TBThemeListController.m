@@ -29,9 +29,61 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
 @property (nonatomic, assign) NSInteger sortMode;   // 0 名称 1 图标数
 @end
 
+static UIView *TBFindSwipePullView(UIView *root, NSInteger depth) {
+    if (depth > 4) return nil;
+    for (UIView *v in root.subviews) {
+        if ([NSStringFromClass(v.class) containsString:@"UISwipeActionPullView"]) return v;
+        UIView *r = TBFindSwipePullView(v, depth + 1);
+        if (r) return r;
+    }
+    return nil;
+}
+
+static void TBStyleSwipePullView(UIView *pull) {
+    CGFloat scale = [UIScreen mainScreen].scale;
+    pull.backgroundColor = [UIColor clearColor];
+    pull.layer.cornerRadius = 20;
+    pull.layer.cornerCurve = kCACornerCurveContinuous;
+    pull.clipsToBounds = YES;
+
+    for (UIView *btn in pull.subviews) {
+        btn.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                             [UIColor colorWithWhite:1 alpha:0.14]);
+        btn.layer.cornerRadius = 20;
+        btn.layer.cornerCurve = kCACornerCurveContinuous;
+        btn.clipsToBounds = YES;
+        btn.layer.borderWidth = 1.0 / scale;
+        btn.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                               [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
+        TBPaintRedLabels(btn, 0);
+    }
+}
+
+/// 只把删除按钮里的文字染红；不设 tintColor（会向下继承，染红整张表）
+static void TBPaintRedLabels(UIView *v, NSInteger depth) {
+    if (!v || depth > 3) return;
+    for (UIView *sub in v.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            ((UILabel *)sub).textColor = [UIColor systemRedColor];
+        } else {
+            TBPaintRedLabels(sub, depth + 1);
+        }
+    }
+}
+
+/// 滑动容器每次布局都重新套样式：样式和原来一模一样，只是时机提前到首帧之前，
+/// 不会先闪一下系统灰底，也不会因为「那次没抓到」而整行变灰。
+static void (*o_swipePullLayout)(id, SEL);
+static void tb_swipePullLayout(id self, SEL _cmd) {
+    if (o_swipePullLayout) o_swipePullLayout(self, _cmd);
+    if ([self isKindOfClass:[UIView class]]) TBStyleSwipePullView((UIView *)self);
+}
+
+
 @implementation TBThemeListController
 
 - (void)viewDidLoad {
+    [TBThemeListController tb_installSwipeStyle];
     [super viewDidLoad];
     self.title = @"主题";
     self.tableView.rowHeight = 76;
@@ -308,7 +360,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         [cell.contentView insertSubview:bg atIndex:0];
         [NSLayoutConstraint activateConstraints:@[
             [bg.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor],
-            [bg.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor],
+            // 注意贴 cell 而不是 contentView：contentView 不含右侧附件区，
+            // 贴它卡片会变窄，✓ 就露到卡片外面去了
+            [bg.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor],
             [bg.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor],
             [bg.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor],
         ]];
@@ -376,85 +430,62 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 /// 给这一行套上样式；找不到滑动容器返回 NO（外观与原来完全一致，只是把
 /// 「找容器」这件事做得更彻底：cell / cell 的父视图 / 表格 / 整个窗口都试一遍）
++ (void)tb_installSwipeStyle {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    Class pull = NSClassFromString(@"UISwipeActionPullView");
+    if (!pull) return;
+    Method m = class_getInstanceMethod(pull, @selector(layoutSubviews));
+    if (m) {
+        o_swipePullLayout = (void (*)(id, SEL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)tb_swipePullLayout);
+    }
+}
+
 - (BOOL)styleSwipeForRowAtIndexPath:(NSIndexPath *)indexPath tableView:(UITableView *)tableView {
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
     UIView *root = cell ? (cell.superview ?: cell) : tableView;
     UIView *pull = nil;
-    if (root) pull = [self findSwipePullView:root depth:0];
-    if (!pull && cell) pull = [self findSwipePullView:cell depth:0];
-    if (!pull) pull = [self findSwipePullView:tableView depth:0];
+    if (root) pull = TBFindSwipePullView(root, 0);
+    if (!pull && cell) pull = TBFindSwipePullView(cell, 0);
+    if (!pull) pull = TBFindSwipePullView(tableView, 0);
     if (!pull) {
         for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            pull = [self findSwipePullView:w depth:0];
+            pull = TBFindSwipePullView(w, 0);
             if (pull) break;
         }
     }
     if (!pull) return NO;
-    [self styleSwipePullView:pull];
+    TBStyleSwipePullView(pull);
     return YES;
 }
 
-/// 原来只在 0.05 秒找一次，那一次没抓到容器就回落成系统默认灰底 —— 这就是
-/// 「有时候变灰」。没抓到才补试几次，抓到了就什么都不额外做。
-- (void)retryStyleSwipeForRowAtIndexPath:(NSIndexPath *)indexPath
-                               tableView:(UITableView *)tableView
-                                 attempt:(NSInteger)attempt {
-    if (attempt >= 4) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if ([self styleSwipeForRowAtIndexPath:indexPath tableView:tableView]) return;
-        [self retryStyleSwipeForRowAtIndexPath:indexPath tableView:tableView attempt:attempt + 1];
-    });
-}
-
 - (void)tableView:(UITableView *)tableView willBeginEditingRowAtIndexPath:(NSIndexPath *)indexPath {
-    // 只在这一次滑动的那一行里做样式，绝不碰表格其它部分
+    // 右侧 ✓ 是 cell 的附件，不跟着 contentView 一起平移 → 滑开时会露在卡片外面，
+    // 先收起来，滑完再恢复
+    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+    if (cell) {
+        static char kAccKey;
+        objc_setAssociatedObject(cell, &kAccKey, @(cell.accessoryType),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        cell.accessoryType = UITableViewCellAccessoryNone;
+    }
+    // 原版：0.05 秒后给这一行套样式（现在 swizzle 也会套，这里保留做兜底）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        if ([self styleSwipeForRowAtIndexPath:indexPath tableView:tableView]) return;
-        [self retryStyleSwipeForRowAtIndexPath:indexPath tableView:tableView attempt:0];
+        [self styleSwipeForRowAtIndexPath:indexPath tableView:tableView];
     });
 }
 
-- (UIView *)findSwipePullView:(UIView *)root depth:(NSInteger)depth {
-    if (depth > 4) return nil;
-    for (UIView *v in root.subviews) {
-        if ([NSStringFromClass(v.class) containsString:@"UISwipeActionPullView"]) return v;
-        UIView *r = [self findSwipePullView:v depth:depth + 1];
-        if (r) return r;
-    }
-    return nil;
-}
-
-- (void)styleSwipePullView:(UIView *)pull {
-    CGFloat scale = [UIScreen mainScreen].scale;
-    pull.backgroundColor = [UIColor clearColor];
-    pull.layer.cornerRadius = 20;
-    pull.layer.cornerCurve = kCACornerCurveContinuous;
-    pull.clipsToBounds = YES;
-
-    for (UIView *btn in pull.subviews) {
-        btn.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
-                                             [UIColor colorWithWhite:1 alpha:0.14]);
-        btn.layer.cornerRadius = 20;
-        btn.layer.cornerCurve = kCACornerCurveContinuous;
-        btn.clipsToBounds = YES;
-        btn.layer.borderWidth = 1.0 / scale;
-        btn.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                               [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
-        [self paintRedLabels:btn depth:0];
-    }
-}
-
-/// 只把删除按钮里的文字染红；不设 tintColor（会向下继承，染红整张表）
-- (void)paintRedLabels:(UIView *)v depth:(NSInteger)depth {
-    if (depth > 3) return;
-    for (UIView *sub in v.subviews) {
-        if ([sub isKindOfClass:[UILabel class]]) {
-            ((UILabel *)sub).textColor = [UIColor systemRedColor];
-        } else {
-            [self paintRedLabels:sub depth:depth + 1];
-        }
+- (void)tableView:(UITableView *)tableView didEndEditingRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+    if (!cell) return;
+    static char kAccKey;
+    NSNumber *acc = objc_getAssociatedObject(cell, &kAccKey);
+    if (acc) {
+        cell.accessoryType = (UITableViewCellAccessoryType)acc.integerValue;
+        objc_setAssociatedObject(cell, &kAccKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
 

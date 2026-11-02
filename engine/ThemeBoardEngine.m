@@ -616,6 +616,54 @@ static UIImage *TBDynamicIcon(UIImage *base, NSString *bid) {
 static BOOL TBIsDynamicBID(NSString *bid);
 static NSString *TBDynamicResourcePath(NSString *bid);
 
+/// 图标中央偏下区域是否已经有内容（主题自己画好了日期/数字）
+static BOOL TBImageHasContentInDateArea(UIImage *img) {
+    if (!img) return NO;
+    const size_t W = 64, H = 64;
+    unsigned char *buf = calloc(W * H * 4, 1);
+    if (!buf) return NO;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs,
+                                             kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return NO; }
+    UIGraphicsPushContext(ctx);
+    [img drawInRect:CGRectMake(0, 0, W, H)];
+    UIGraphicsPopContext();
+    CGContextRelease(ctx);
+
+    NSInteger dark = 0, total = 0;
+    for (size_t y = (size_t)(H * 0.30); y < (size_t)(H * 0.85); y++) {
+        for (size_t x = (size_t)(W * 0.25); x < (size_t)(W * 0.75); x++) {
+            unsigned char *p = buf + (y * W + x) * 4;
+            if (p[3] < 40) continue;
+            CGFloat luma = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+            total++;
+            if (luma < 110) dark++;
+        }
+    }
+    free(buf);
+    if (total < 10) return NO;
+    return (dark * 100 / total) > 3;
+}
+
+/// 主题只给了 IconBundles 静态图标（Bundles 里没有整套动态素材）→
+/// 图标自己就画了日期/指针，我们不该再叠一层
+static BOOL TBThemeHasClockMaterial(void) {
+    return TBResourceImage(@"ClockIconBackgroundSquare") != nil;
+}
+
+static BOOL TBClockShouldHideHands(void) {
+    if (!TBEnabled() || TBSafeMode()) return NO;
+    if (!TBActiveTheme().length) return NO;        // 没主题：系统表盘 + 系统指针
+    if (TBThemeHasClockMaterial()) return NO;      // 有整套素材：用系统指针
+    [gLock lock];
+    TBLoadIndex();
+    BOOL hasStatic = gIndex[@"com.apple.mobiletimer"] != nil;
+    [gLock unlock];
+    return hasStatic;                              // 静态图标 → 隐藏指针
+}
+
 /// 日历合成（SnowBoard 同款）：主题底图 + 红色星期 + 黑色日期
 /// 主题给的 com.apple.mobilecal.png 是空白日历底图，日期必须自己画上去
 static UIImage *TBCalendarCompositeImage(UIImage *bg) {
@@ -717,10 +765,12 @@ static UIImage *TBImageForBundle(NSString *bid) {
     TBLoadIndex();
     NSString *path = gIndex[bid];
     [gLock unlock];
+    BOOL cameFromMaterial = NO;
     if (!path) {
         // 时钟/日历是动态图标，主题作者通常放在 Bundles/ 下的
         // ClockIcon*.png / CalendarIcon*.png，而不是 IconBundles/<包名>.png
         path = TBDynamicResourcePath(bid);
+        if (path) cameFromMaterial = YES;
         if (!path) return nil;
         TBLogOnce([@"dynsrc|" stringByAppendingString:bid],
                   @"dynamic 图来自 Bundles: %@ → %@", bid, path.lastPathComponent);
@@ -738,7 +788,14 @@ static UIImage *TBImageForBundle(NSString *bid) {
     if (cached) return cached;
 
     UIImage *img = [[UIImage alloc] initWithContentsOfFile:path];   // 不用被 hook 的类方法
+    BOOL calDynamic = (cameFromMaterial || !TBImageHasContentInDateArea(img));
     if (img && isCalendar) {
+        if (!calDynamic) {
+            // 主题图标自己已经画了日期/星期 → 直接用，不叠加（否则会重影）
+            TBLogOnce(@"calc|static", @"日历：主题图标已自带日期，跳过叠加");
+            [gImageCache setObject:img forKey:cacheKey];
+            return img;
+        }
         UIImage *composed = TBCalendarCompositeImage(img);
         if (composed) {
             TBLogOnce(@"calc|ok", @"日历合成：底图 + 红星期 + 黑日期");
@@ -2198,6 +2255,16 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
     }
 }
 
+// ---- 静态图标模式：隐藏系统指针（图标自己画了指针，否则会重影）----
+static void (*o_updateClockImages)(id, SEL);
+static void tb_updateClockImages(id self, SEL _cmd) {
+    if (o_updateClockImages) o_updateClockImages(self, _cmd);
+    if (![self isKindOfClass:[UIView class]]) return;
+    BOOL hide = TBClockShouldHideHands();
+    for (CALayer *l in ((UIView *)self).layer.sublayers) l.hidden = hide;
+    if (hide) TBLogOnce(@"clockhands|hidden", @"时钟：主题只给了静态图标 → 隐藏系统指针");
+}
+
 static BOOL gDoneClock = NO;
 
 // ---- 时钟表盘：SBHClockApplicationIconImageView 把整块表盘合成进自己的 contents，
@@ -2397,6 +2464,23 @@ static void TBInstall(void) {
         // 指针一律用系统自己的（黑时针 + 黑分针 + 橙秒针），不注入主题指针。
         // 表盘：hook contentsImage，始终返回当前主题的表盘（换主题后自然就是新表盘）
         TBInstallClockContentsHooks();
+        // 指针：主题只给静态图标时隐藏系统指针
+        {
+            Class cv = NSClassFromString(@"SBHClockApplicationIconImageView");
+            if (!cv) cv = NSClassFromString(@"SBLiveIconImageView");
+            SEL usel = NSSelectorFromString(@"updateClockImages");
+            Class owner = nil;
+            for (Class c = cv; c && c != [NSObject class]; c = class_getSuperclass(c)) {
+                unsigned int n = 0;
+                Method *ms = class_copyMethodList(c, &n);
+                BOOL found = NO;
+                for (unsigned int i = 0; i < n; i++) if (method_getName(ms[i]) == usel) { found = YES; break; }
+                free(ms);
+                if (found) { owner = c; break; }
+            }
+            if (owner) o_updateClockImages = (void (*)(id, SEL))TBHook(owner, @"updateClockImages",
+                                                                      (IMP)tb_updateClockImages, "时钟指针开关");
+        }
         // 左滑删除：装一次观测，把滑动容器的层级结构打进日志
         {
             Class pull = NSClassFromString(@"UISwipeActionPullView");
