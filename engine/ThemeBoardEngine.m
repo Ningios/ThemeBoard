@@ -1564,6 +1564,11 @@ static BOOL TBIsThemedResourceName(NSString *name) {
     if (name.length < 6 || name.length > 48) return NO;
     unichar c0 = [name characterAtIndex:0];
     if (c0 != 'C' && c0 != 'A' && c0 != 'S' && c0 != 'K') return NO;
+    // 指针/轴心素材绝不替换：它们的画布尺寸与表盘不是同一坐标系，
+    // 交给系统会导致指针错位甚至跑到看不见的地方（只剩纯白表盘）。
+    // 指针一律由系统自己画（黑时针 + 黑分针 + 橙秒针），与官方效果一致。
+    if ([name rangeOfString:@"Hand"].location != NSNotFound) return NO;
+    if ([name rangeOfString:@"Dot"].location != NSNotFound) return NO;
     static NSArray<NSString *> *prefixes = nil;
     if (!prefixes) prefixes = @[@"ClockIcon", @"ANEM", @"SBClock", @"CalendarIcon", @"Keypad"];
     for (NSString *p in prefixes) {
