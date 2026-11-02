@@ -1641,9 +1641,11 @@ static BOOL TBIsThemedResourceName(NSString *name) {
     // 指针一律由系统自己画（黑时针 + 黑分针 + 橙秒针），与官方效果一致。
     if ([name rangeOfString:@"Hand"].location != NSNotFound) return NO;
     if ([name rangeOfString:@"Dot"].location != NSNotFound) return NO;
-    // 注意：ClockIcon / SBClock 不再做资源重定向。
-    // 时钟改走 SnowBoard 的方案：表盘当图标图交给系统，指针/轴心通过
-    // makeImageSetForMetrics: 注入（见 tb_makeImageSet）。
+    // 分工（对齐 SnowBoard）：
+    //  · 表盘（ClockIconBackground*）→ 资源重定向，替换系统表盘图
+    //  · 指针/轴心（ClockIcon*Hand / *Dot）→ 不在这里，改由
+    //    SBHClockHandsImageSet 注入（见 tb_makeImageSet）
+    if ([name hasPrefix:@"ClockIconBackground"]) return YES;
     static NSArray<NSString *> *prefixes = nil;
     if (!prefixes) prefixes = @[@"ANEM", @"CalendarIcon", @"Keypad"];
     for (NSString *p in prefixes) {
