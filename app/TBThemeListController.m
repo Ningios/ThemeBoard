@@ -4,6 +4,7 @@
 #import "TBPrefs.h"
 #import "TBGlass.h"
 #import "TBTableViewController.h"
+#import <objc/runtime.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 // 统一的文件夹选择器：iOS14+ 走 UTType，老系统回退；任何异常都不让它崩
 static UIDocumentPickerViewController *TBNewFolderPicker(void) {
