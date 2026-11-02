@@ -32,6 +32,7 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
 @implementation TBThemeListController
 
 - (void)viewDidLoad {
+    [[self class] tb_installSwipeStyle];
     [super viewDidLoad];
     self.title = @"主题";
     self.tableView.rowHeight = 76;
@@ -423,6 +424,60 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     }
 }
 
+#pragma mark - 左滑删除样式（swizzle：每次滑动都套上，不看时间点脸色）
+
+static void TBSwipeRedLabels(UIView *v, NSInteger depth) {
+    if (!v || depth > 3) return;
+    for (UIView *sub in v.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            ((UILabel *)sub).textColor = [UIColor systemRedColor];
+        } else {
+            TBSwipeRedLabels(sub, depth + 1);
+        }
+    }
+}
+
+static void TBSwipeApplyToPullView(UIView *pull) {
+    if (!pull) return;
+    CGFloat scale = [UIScreen mainScreen].scale;
+    pull.backgroundColor = [UIColor clearColor];
+    pull.layer.cornerRadius = 20;
+    pull.layer.cornerCurve = kCACornerCurveContinuous;
+    pull.clipsToBounds = YES;
+    for (UIView *btn in pull.subviews) {
+        // 底色由 action 自己铺（见 trailingSwipeActions… 里的 del.backgroundColor），
+        // 这里不要再叠一层白，否则两层半透明白叠起来会显得发白发实。
+        btn.backgroundColor = [UIColor clearColor];
+        btn.layer.cornerRadius = 20;
+        btn.layer.cornerCurve = kCACornerCurveContinuous;
+        btn.layer.borderWidth = 1.0 / scale;
+        btn.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                               [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
+        TBSwipeRedLabels(btn, 0);
+    }
+}
+
+static void (*o_swipePullLayout)(id, SEL);
+static void tb_swipePullLayout(id self, SEL _cmd) {
+    if (o_swipePullLayout) o_swipePullLayout(self, _cmd);
+    TBSwipeApplyToPullView((UIView *)self);
+}
+
+/// 只装一次：滑动容器每次布局都重新套样式 —— 这样不管滑动发生在什么时候、
+/// 容器被系统重建几次，样式都在，不会回落成系统默认灰底。
++ (void)tb_installSwipeStyle {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    Class pull = NSClassFromString(@"UISwipeActionPullView");
+    if (!pull) return;
+    Method m = class_getInstanceMethod(pull, @selector(layoutSubviews));
+    if (m) {
+        o_swipePullLayout = (void (*)(id, SEL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)tb_swipePullLayout);
+    }
+}
+
 /// 只把删除按钮里的文字染红；不设 tintColor（会向下继承，染红整张表）
 - (void)paintRedLabels:(UIView *)v depth:(NSInteger)depth {
     if (depth > 3) return;
@@ -458,6 +513,10 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         }]];
         [self presentViewController:ac animated:YES completion:nil];
     }];
+    // action 自己必须给底色：系统默认是灰底，只靠外面套样式一旦时机不对就会露灰。
+    // 用和滑动容器同一套玻璃色，保证任何情况下都是「玻璃 + 红字」。
+    del.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                         [UIColor colorWithWhite:1 alpha:0.14]);
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 

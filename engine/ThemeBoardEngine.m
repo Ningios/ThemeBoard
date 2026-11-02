@@ -2142,12 +2142,14 @@ static void TBInstallClockContentsHooks(void) {
     Class live = NSClassFromString(@"SBLiveIconImageView");
     if (!live) live = NSClassFromString(@"SBIconImageView");
     if (!live) { TBLog(@"contentsImage：找不到图标图片视图类"); return; }
+    // 注意：contentsImage / squareContentsImage 都是【实例方法】，必须用 TBHook
+    // （TBHookClass 挂的是类方法，用错了会静默失败：日志「类方法不存在」）
     Class c1 = TBClassDeclaring(live, NSSelectorFromString(@"contentsImage"));
-    if (c1) o_contentsImageLive = (ContentsImgFn)TBHookClass(c1, @"contentsImage",
-                                                             (IMP)tb_clockContentsImage, "时钟contents");
+    if (c1) o_contentsImageLive = (ContentsImgFn)TBHook(c1, @"contentsImage",
+                                                        (IMP)tb_clockContentsImage, "时钟contents");
     Class c2 = TBClassDeclaring(live, NSSelectorFromString(@"squareContentsImage"));
-    if (c2) o_squareContentsImageLive = (ContentsImgFn)TBHookClass(c2, @"squareContentsImage",
-                                                                   (IMP)tb_clockSquareContentsImage, "时钟squareContents");
+    if (c2) o_squareContentsImageLive = (ContentsImgFn)TBHook(c2, @"squareContentsImage",
+                                                              (IMP)tb_clockSquareContentsImage, "时钟squareContents");
 }
 static BOOL gDoneSpecifier = NO;
 static BOOL gDoneGen = NO;
