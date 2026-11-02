@@ -1286,30 +1286,13 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                     [(UIView *)v setNeedsDisplay];
                     TBLog(@"时钟表盘：已强制写入 %.0fx%.0f", face.size.width, face.size.height);
                 } else {
-                    // 主题没有表盘素材 / 已恢复系统默认。
-                    // 【不能写系统那张合成图】—— 它是系统缓存过的静态图，里面已经烤进了一套
-                    // 缓存时刻的针，写进 layer.contents 会和活动的指针层叠成两套（角度还不同）。
-                    // 【也不能只清空】—— 系统只在图标图变化时才写 → 空白。
-                    // 做法：先把那张图导出一次供确认，然后清掉映射并逼系统自己重算。
-                    // 【无素材 / 恢复默认】= 显示系统自己的时钟（SB 也是这个行为）。
-                    // 做法：把我们写过的东西全部去掉 —— 表盘清空、指针层整组移除、指针成员
-                    // 已还原成系统原图 —— 然后让系统整套重建（它只会用系统自己的表盘和指针）。
-                    // 不能写系统那张 contentsImage（缓存静态图 → 两套针），也不能留着我们的图
-                    //（会残留主题时钟），更不能只清空不重建（系统不重画 → 空白）。
-                    ((UIView *)v).layer.contents = nil;
-                    @try { [v setValue:nil forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
-                    for (CALayer *l in [((UIView *)v).layer.sublayers copy]) {
-                        [l removeFromSuperlayer];
-                    }
-                    if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
-                        ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
-                    }
-                    if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
-                        ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
-                    }
-                    [v setNeedsLayout];
-                    [v setNeedsDisplay];
-                    TBLog(@"时钟表盘：无素材 → 清空表盘并移除指针层，交回系统重建");
+                    // 主题没有表盘素材 / 已恢复系统默认：
+                    // 什么都不做 —— 完全照 SnowBoard：它的 contentsImage 取不到主题素材时
+                    // 直接调原实现返回系统自己的表盘，不写、不清、不碰图层。
+                    //（我自创的"写回系统图 / 清空 / 隐藏或移除指针层"都试过了，只会弄出
+                    //  两套针、空白、或残留 —— 全部撤掉。）
+                    TBLogOnce([@"clockface|sys|" stringByAppendingString:(TBActiveTheme() ?: @"")],
+                              @"时钟表盘：主题无素材 → 交回系统（不写不碰）");
                 }
             }
         } @catch (NSException *e) { }
