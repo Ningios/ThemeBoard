@@ -1069,6 +1069,70 @@ static BOOL TBApplyThemeToIconView(id self) {
 
 static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
 
+static NSString *TBViewTreeDesc(UIView *v, NSInteger depth) {
+    NSMutableString *s = [NSMutableString string];
+    for (NSInteger i = 0; i < depth; i++) [s appendString:@"  "];
+    [s appendFormat:@"%@ f=%@", NSStringFromClass([v class]), NSStringFromCGRect(v.frame)];
+    if ([v isKindOfClass:[UIImageView class]]) {
+        UIImage *im = ((UIImageView *)v).image;
+        [s appendFormat:@" img=%@", im ? [NSString stringWithFormat:@"%.0fx%.0f", im.size.width, im.size.height] : @"nil"];
+    }
+    if (v.layer.contents) [s appendString:@" [contents]"];
+    if (v.isHidden) [s appendString:@" hidden"];
+    [s appendString:@"\n"];
+    if (depth < 6) for (UIView *sv in v.subviews) [s appendString:TBViewTreeDesc(sv, depth + 1)];
+    return s;
+}
+
+/// 一次性探针：时钟视图的类链 / ivar / 相关方法 / 子视图树，用来确定表盘图存在哪
+static void TBClockDumpNow(id v);
+static void TBClockDumpOnce(id v) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    // 延后一点：等这次布局跑完，视图树里才有真正的表盘节点
+    __weak id wv = v;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        id v = wv; if (!v) return;
+        TBClockDumpNow(v);
+    });
+}
+
+static void TBClockDumpNow(id v) {
+    @try {
+        NSMutableString *chain = [NSMutableString string];
+        for (Class c = [v class]; c && c != [NSObject class]; c = class_getSuperclass(c))
+            [chain appendFormat:@"%@ ", NSStringFromClass(c)];
+        TBLog(@"时钟类链: %@", chain);
+
+        NSMutableString *ivs = [NSMutableString string];
+        for (Class c = [v class]; c && c != [NSObject class]; c = class_getSuperclass(c)) {
+            unsigned int n = 0; Ivar *list = class_copyIvarList(c, &n);
+            for (unsigned int i = 0; i < n; i++) { const char *nm = ivar_getName(list[i]); if (nm) [ivs appendFormat:@"%s ", nm]; }
+            free(list);
+        }
+        TBLog(@"时钟 ivar: %@", ivs);
+
+        NSMutableString *ms = [NSMutableString string];
+        for (Class c = [v class]; c && c != [NSObject class]; c = class_getSuperclass(c)) {
+            unsigned int n = 0; Method *list = class_copyMethodList(c, &n);
+            for (unsigned int i = 0; i < n; i++) {
+                NSString *sn = NSStringFromSelector(method_getName(list[i]));
+                if ([sn rangeOfString:@"mage"].location != NSNotFound ||
+                    [sn rangeOfString:@"lock"].location != NSNotFound ||
+                    [sn rangeOfString:@"ackground"].location != NSNotFound ||
+                    [sn rangeOfString:@"pdate"].location != NSNotFound ||
+                    [sn rangeOfString:@"efresh"].location != NSNotFound)
+                    [ms appendFormat:@"%@ ", sn];
+            }
+            free(list);
+        }
+        TBLog(@"时钟方法: %@", ms);
+        TBLog(@"时钟视图树:\n%@", TBViewTreeDesc((UIView *)v, 0));
+    } @catch (NSException *e) { TBLog(@"时钟探针异常: %@", e.reason); }
+}
+
 static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *iconsOut) {
     if (!v || depth > 12) return 0;
     NSInteger fixed = 0;
@@ -1077,10 +1141,30 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
     if ([vcls rangeOfString:@"Clock"].location != NSNotFound) {
         @try {
             TBLogOnce([@"clockrefresh|" stringByAppendingString:vcls], @"时钟视图重画 %@", vcls);
+            TBClockDumpOnce(v);
             [v setNeedsLayout];
             [v setNeedsDisplay];
             if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
+            }
+            // 表盘会被时钟视图攥住（换主题后系统根本不再请求资源）→ 只针对时钟这一个
+            // 图标清一次图片缓存并通知观察者，让它重新取图。单图标，不是整屏。
+            id cicon = nil;
+            SEL ciconSel = NSSelectorFromString(@"icon");
+            if ([v respondsToSelector:ciconSel]) cicon = ((id (*)(id, SEL))objc_msgSend)(v, ciconSel);
+            if (cicon) {
+                [gLock lock]; NSArray *cs = gCaches.allObjects; [gLock unlock];
+                for (NSValue *cv in cs) TBPurgeIcons(cv, @[cicon]);
+                TBLog(@"时钟：已清 %lu 个图片缓存中该图标", (unsigned long)cs.count);
+                SEL n1 = NSSelectorFromString(@"notifyObserversOfUpdateForIcon:");
+                SEL n2 = NSSelectorFromString(@"notifyObserversOfUnmaskedUpdateForIcon:");
+                for (NSValue *cv in cs) {
+                    id c = (__bridge id)cv.pointerValue;
+                    @try {
+                        if ([c respondsToSelector:n1]) ((void (*)(id, SEL, id))objc_msgSend)(c, n1, cicon);
+                        if ([c respondsToSelector:n2]) ((void (*)(id, SEL, id))objc_msgSend)(c, n2, cicon);
+                    } @catch (NSException *e) { }
+                }
             }
         } @catch (NSException *e) { }
     }
