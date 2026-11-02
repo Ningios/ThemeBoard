@@ -727,6 +727,9 @@ static UIImage *TBCalendarCompositeImage(UIImage *bg) {
 static UIImage *gSystemMaskTemplate;                 // 系统遮罩形状（学到后全用它）
 static UIImage *TBMaskWithSystemShape(UIImage *art);
 
+typedef id (*ContentsImgFn)(id, SEL);
+static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
+
 static UIImage *TBIconRoundedImage(UIImage *img) {
     if (!img) return img;
     // 一律用【系统自己的遮罩形状】（learned template）；还没学到就先不遮，
@@ -1266,6 +1269,13 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             // 保证下次系统重绘也用我们的新表盘。
             {
                 UIImage *face = TBClockMaterialFace((UIView *)v);
+                if (!face) {
+                    // 主题没有表盘素材 / 已恢复系统默认 → 取系统原实现那张写回去，
+                    // 否则上一个主题的表盘会一直留着
+                    SEL cs = NSSelectorFromString(@"contentsImage");
+                    if (o_contentsImageLive) face = o_contentsImageLive(v, cs);
+                    if (face) TBLog(@"时钟表盘：无素材 → 写回系统表盘 %.0fx%.0f", face.size.width, face.size.height);
+                }
                 if (face && face.CGImage) {
                     ((UIView *)v).layer.contents = (__bridge id)face.CGImage;
                     @try { [v setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
@@ -2101,10 +2111,26 @@ static void TBApplyClockImagesToSet(id set) {
         {@"hourMinuteDot", @"ClockIconBlackDot"},
         {@"secondDot",     @"ClockIconRedDot"},
     };
-    NSInteger applied = 0;
+    NSInteger applied = 0, restored = 0;
+    static NSMutableDictionary *gOriginalMembers = nil;
+    static dispatch_once_t onceMembers;
+    dispatch_once(&onceMembers, ^{ gOriginalMembers = [NSMutableDictionary dictionary]; });
     for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        SEL setter0 = NSSelectorFromString([NSString stringWithFormat:@"set%@%@:",
+                                           [[map[i].key substringToIndex:1] uppercaseString],
+                                           [map[i].key substringFromIndex:1]]);
         UIImage *img = TBResourceImage(map[i].res);
-        if (!img) continue;
+        if (!img) {
+            // 主题没这一项 → 还原系统原样（系统的针集是缓存复用的，不还原会残留上一个主题的针）
+            UIImage *keep = gOriginalMembers[map[i].key];
+            if (keep && [set respondsToSelector:setter0]) {
+                @try {
+                    ((void (*)(id, SEL, id))objc_msgSend)(set, setter0, keep);
+                    restored++;
+                } @catch (NSException *e) { }
+            }
+            continue;
+        }
         img = TBKeyOutCornerColor(img);   // 作者导出忘去白底时兜底
 
         // 关键：系统图像集里每根针都是按图标尺寸算好的，
@@ -2124,6 +2150,9 @@ static void TBApplyClockImagesToSet(id set) {
         dispatch_once(&onceTok, ^{ gMemberSize = [NSMutableDictionary dictionary]; });
         CGSize target = orig ? orig.size : CGSizeZero;
         NSValue *cachedSize = gMemberSize[map[i].key];
+        if ((target.width >= 4 && target.height >= 4) && !gOriginalMembers[map[i].key] && orig) {
+            gOriginalMembers[map[i].key] = orig;      // 记住系统原样，供以后还原
+        }
         if (target.width < 4 || target.height < 4) {
             if (cachedSize) {
                 target = cachedSize.CGSizeValue;
@@ -2178,8 +2207,8 @@ static void TBApplyClockImagesToSet(id set) {
             applied++;
         } @catch (NSException *e) { }
     }
-    if (applied > 0) {
-        TBLogOnce(@"clockset", @"时钟图像集注入 %ld 项（指针/轴心来自主题素材）", (long)applied);
+    if (applied > 0 || restored > 0) {
+        TBLog(@"时钟图像集：注入 %ld 项，还原系统 %ld 项", (long)applied, (long)restored);
     }
 }
 
@@ -2276,7 +2305,6 @@ typedef BOOL (*HandBoolFn)(id, SEL);
 static HandColorFn o_hmHandColor, o_secHandColor;
 static HandBoolFn o_hidesSeconds;
 
-typedef id (*ContentsImgFn)(id, SEL);
 static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
 static BOOL sInClockContents = NO;   // 防自调用（hook 装错层会无限递归）
 
