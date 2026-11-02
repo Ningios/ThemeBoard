@@ -1039,8 +1039,19 @@ static id tb_unmaskedForIconOpt(id self, SEL _cmd, id icon, unsigned long long o
 
 /// 缓存落盘的那一刻换掉图 —— 这样所有后续消费者（含变体缓存）拿到的都是主题图
 static id tb_cacheImageForIcon(id self, SEL _cmd, id image, id icon) {
-    // 直通：系统自己会把从 SBIcon 层拿到的素材缓存起来（SnowBoard 不在写入端接管）
+    // 缓存写入端接管（这是唯一在本机实测有效的手段：系统写入缓存时把非主题图换成主题图）。
+    // 系统在这台 iOS 17.2 上不会因为 purge/clear/update 就丢掉旧合成图，必须在这里拦截。
     TBRemember(self);
+    @try {
+        NSString *bid = TBBIDFromIcon(icon);
+        if (bid.length && TBApplyIconForDesktop() && !TBSafeMode()) {
+            UIImage *mine = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self)) ?: TBImageForBundle(bid);
+            if (mine) {
+                TBLogOnce([@"cachewrite|" stringByAppendingString:bid], @"cachewrite %@", bid);
+                return o_cacheImageForIcon ? o_cacheImageForIcon(self, _cmd, mine, icon) : nil;
+            }
+        }
+    } @catch (NSException *e) { }
     return o_cacheImageForIcon ? o_cacheImageForIcon(self, _cmd, image, icon) : nil;
 }
 
