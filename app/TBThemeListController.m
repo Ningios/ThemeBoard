@@ -47,8 +47,7 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
                                                            target:self action:@selector(sortTapped)];
     self.navigationItem.rightBarButtonItems = @[sort];
 
-    // 顶部工具条：导入 / 重新扫描 / 清除当前主题（原来在设置页）
-    [self buildToolbar];
+    // 三个操作按钮放在「当前使用」下面（见 tableView:cellForRowAtIndexPath: 第 1 段）
 
     UIRefreshControl *rc = [[UIRefreshControl alloc] init];
     [rc addTarget:self action:@selector(reload) forControlEvents:UIControlEventValueChanged];
@@ -65,17 +64,6 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
     [self.tableView reloadData];
 }
 
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    UIView *head = self.tableView.tableHeaderView;
-    CGFloat w = self.tableView.bounds.size.width;
-    if (head && fabs(head.frame.size.width - w) > 0.5) {
-        CGRect f = head.frame;
-        f.size.width = w;
-        head.frame = f;
-        self.tableView.tableHeaderView = head;   // 触发重新布局
-    }
-}
 
 #pragma mark - 数据
 
@@ -160,9 +148,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 #pragma mark - 顶部工具条
 
-- (void)buildToolbar {
+- (UIView *)buildToolbarBar {
     CGFloat w = MAX(320.0, self.tableView.bounds.size.width);
-    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 60)];
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 56)];
     head.backgroundColor = [UIColor clearColor];
     head.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
@@ -217,14 +205,14 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         [clr.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor],
         [clr.widthAnchor constraintEqualToAnchor:imp.widthAnchor],
     ]];
-    self.tableView.tableHeaderView = head;
+    return head;
 }
 
 - (void)toolbarTapped:(UIButton *)b {
     switch (b.tag) {
-        case 0: [self importTapped]; break;
-        case 1: [self rescanTapped]; break;
-        default: [self clearTapped]; break;
+        case 0: [self rescanTapped]; break;   // 重新扫描
+        case 1: [self importTapped]; break;   // 导入主题
+        default: [self clearTapped]; break;   // 清除主题
     }
 }
 
@@ -259,28 +247,54 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     return [TBPrefs stringForKey:TBKeyActiveTheme];
 }
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 3; }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    return section == 0 ? @"当前使用" : @"已安装主题";
+    if (section == 0) return @"当前使用";
+    if (section == 1) return nil;
+    return @"已安装主题";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    if (section != 1) return nil;
+    if (section != 2) return nil;
     if (self.themes.count == 0) {
         NSArray *roots = [TBThemeScanner themeRoots];
         NSString *where = roots.count ? [roots componentsJoinedByString:@"\n"] : @"（没有可用的主题目录）";
-        return [NSString stringWithFormat:@"还没有主题。点右上角 + 导入，或把包含 IconBundles 的文件夹放到：\n%@", where];
+        return [NSString stringWithFormat:@"还没有主题。点上面的「导入主题」，或把包含 IconBundles 的文件夹放到：\n%@", where];
     }
     return [NSString stringWithFormat:@"共 %lu 个 · 兼容 SnowBoard / Anemone 的 IconBundles 结构",
             (unsigned long)self.filtered.count];
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (section == 1) return 1;
     return section == 0 ? 1 : self.filtered.count;
 }
 
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return indexPath.section == 1 ? 62 : 76;
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    // 第 1 段：三个操作按钮（在「当前使用」下面）
+    if (indexPath.section == 1) {
+        UITableViewCell *bc = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                                     reuseIdentifier:nil];
+        bc.backgroundColor = [UIColor clearColor];
+        bc.contentView.backgroundColor = [UIColor clearColor];
+        bc.selectionStyle = UITableViewCellSelectionStyleNone;
+        UIView *bar = [self buildToolbarBar];
+        bar.translatesAutoresizingMaskIntoConstraints = NO;
+        [bc.contentView addSubview:bar];
+        [NSLayoutConstraint activateConstraints:@[
+            [bar.leadingAnchor constraintEqualToAnchor:bc.contentView.leadingAnchor],
+            [bar.trailingAnchor constraintEqualToAnchor:bc.contentView.trailingAnchor],
+            [bar.topAnchor constraintEqualToAnchor:bc.contentView.topAnchor constant:4],
+            [bar.heightAnchor constraintEqualToConstant:56],
+        ]];
+        return bc;
+    }
+
     static NSString *cid = @"theme";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cid];
     if (!cell) {
@@ -307,7 +321,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         cell.imageView.image = t ? [self thumbFor:t] : [UIImage systemImageNamed:@"circle.dashed"];
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    } else {
+    } else if (indexPath.section == 2) {
         TBTheme *t = self.filtered[indexPath.row];
         [t loadIndex];
         cell.textLabel.text = t.name;
@@ -336,6 +350,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 1) return;   // 按钮行
     TBTheme *t = nil;
     if (indexPath.section == 0) {
         NSString *active = [self activeThemeName];
@@ -349,11 +364,58 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 #pragma mark - 删除
 
+- (void)tableView:(UITableView *)tableView willBeginEditingRowAtIndexPath:(NSIndexPath *)indexPath {
+    // 系统的左滑红色块是直角的，跟玻璃卡片不搭；等它布局完再套圆角
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self roundSwipeActionsInView:tableView];
+    });
+}
+
+- (void)roundSwipeActionsInView:(UIView *)root {
+    CGFloat scale = [UIScreen mainScreen].scale;
+    for (UIView *v in root.subviews) {
+        NSString *cls = NSStringFromClass(v.class);
+
+        if ([cls containsString:@"UISwipeActionPullView"]) {
+            // 系统那层是实心红：清掉，改成玻璃底 + 红字
+            v.backgroundColor = [UIColor clearColor];
+            v.layer.cornerRadius = 20;
+            v.layer.cornerCurve = kCACornerCurveContinuous;
+            v.clipsToBounds = YES;
+        } else if ([cls containsString:@"UISwipeActionButton"] || [v isKindOfClass:[UIButton class]]) {
+            v.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                               [UIColor colorWithWhite:1 alpha:0.14]);
+            v.layer.cornerRadius = 20;
+            v.layer.cornerCurve = kCACornerCurveContinuous;
+            v.clipsToBounds = YES;
+            v.layer.borderWidth = 1.0 / scale;
+            v.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                                 [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
+            [self tintSwipeLabelsRed:v];
+        }
+        [self roundSwipeActionsInView:v];
+    }
+}
+
+- (void)tintSwipeLabelsRed:(UIView *)v {
+    for (UIView *sub in v.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            ((UILabel *)sub).textColor = [UIColor systemRedColor];
+        } else if ([sub isKindOfClass:[UIImageView class]] || [sub isKindOfClass:[UIButton class]]) {
+            sub.tintColor = [UIColor systemRedColor];
+            [self tintSwipeLabelsRed:sub];
+        } else {
+            [self tintSwipeLabelsRed:sub];
+        }
+    }
+}
+
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
 trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section != 1) return nil;
+    if (indexPath.section != 2) return nil;
     TBTheme *t = self.filtered[indexPath.row];
-    UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+    UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                                      title:@"删除"
                                                                    handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
         UIAlertController *ac = [UIAlertController alertControllerWithTitle:

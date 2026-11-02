@@ -223,31 +223,13 @@ static NSString *TBReadLogLossy(NSString *path) {
             dot.layer.cornerRadius = 5;
             cell.accessoryView = dot;
 
-            UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(58, 46, t.bounds.size.width - 170, 18)];
+            UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(58, 46, t.bounds.size.width - 120, 18)];
             sub.text = self.engineDetail;
             sub.font = [UIFont systemFontOfSize:13];
             sub.textColor = [UIColor secondaryLabelColor];
             sub.tag = 900;
             [cell.contentView addSubview:sub];
 
-            // 副标题右边：一键跳到日志目录
-            UIButton *logBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-            logBtn.translatesAutoresizingMaskIntoConstraints = NO;
-            [logBtn setImage:[UIImage systemImageNamed:@"folder"] forState:UIControlStateNormal];
-            logBtn.tintColor = [UIColor secondaryLabelColor];
-            logBtn.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                                    [UIColor colorWithWhite:1 alpha:0.12]);
-            logBtn.layer.cornerRadius = 8;
-            logBtn.layer.cornerCurve = kCACornerCurveContinuous;
-            TBApplyRim(logBtn, 0.45);
-            [logBtn addTarget:self action:@selector(openLogFolder) forControlEvents:UIControlEventTouchUpInside];
-            [cell.contentView addSubview:logBtn];
-            [NSLayoutConstraint activateConstraints:@[
-                [logBtn.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-14],
-                [logBtn.centerYAnchor constraintEqualToAnchor:sub.centerYAnchor],
-                [logBtn.widthAnchor constraintEqualToConstant:36],
-                [logBtn.heightAnchor constraintEqualToConstant:26],
-            ]];
         } else if (ip.row == 1) {
             cell.textLabel.text = @"当前主题";
             cell.detailTextLabel.text = [self activeTheme];
