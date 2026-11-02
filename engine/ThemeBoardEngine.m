@@ -1297,8 +1297,45 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
     if (!special &&
         ([v respondsToSelector:NSSelectorFromString(@"icon")] ||
          [v respondsToSelector:NSSelectorFromString(@"_iconImageView")])) {
-        // （不再重贴图标图：素材由 SBIcon 层提供给系统，系统会自己合成）
-        (void)0;
+        // 完全照 SnowBoard 的 refreshIconView:fully:，对【每个图标视图】跑一遍：
+        //   [icon purgeCachedImages / reloadIconImage] → [imageView clearCachedImages /
+        //   _clearCachedImages] → updateClockImages → updateImageAnimated:NO → _updateOverlayImage
+        // （素材已由 SBIcon 层给出，这几步负责让系统把缓存里的旧图丢掉、重新合成）
+        {
+            @try {
+                SEL iconSel = NSSelectorFromString(@"icon");
+                id ic = [v respondsToSelector:iconSel]
+                      ? ((id (*)(id, SEL))objc_msgSend)(v, iconSel) : nil;
+                if (ic) {
+                    if ([ic respondsToSelector:NSSelectorFromString(@"purgeCachedImages")]) {
+                        ((void (*)(id, SEL))objc_msgSend)(ic, NSSelectorFromString(@"purgeCachedImages"));
+                    } else if ([ic respondsToSelector:NSSelectorFromString(@"reloadIconImage")]) {
+                        ((void (*)(id, SEL))objc_msgSend)(ic, NSSelectorFromString(@"reloadIconImage"));
+                    }
+                }
+                id iv = nil;
+                @try { iv = [v valueForKey:@"_iconImageView"]; } @catch (NSException *e) { }
+                if (!iv) iv = v;
+                if ([iv respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
+                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"clearCachedImages"));
+                } else if ([iv respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
+                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"_clearCachedImages"));
+                }
+                if ([iv respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
+                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"updateClockImages"));
+                }
+                if ([iv respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
+                    ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, NSSelectorFromString(@"updateImageAnimated:"), NO);
+                }
+                if ([iv respondsToSelector:NSSelectorFromString(@"_updateOverlayImage")]) {
+                    ((void (*)(id, SEL))objc_msgSend)(iv, NSSelectorFromString(@"_updateOverlayImage"));
+                }
+                if ([v respondsToSelector:NSSelectorFromString(@"setIcon:animated:")]) {
+                    ((void (*)(id, SEL, id, BOOL))objc_msgSend)(v, NSSelectorFromString(@"setIcon:animated:"), ic, NO);
+                }
+                fixed++;
+            } @catch (NSException *e) { }
+        }
         if (iconsOut && iconsOut.count < 250) {
             @try {
                 SEL iconSel = NSSelectorFromString(@"icon");
