@@ -1355,6 +1355,22 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                     [st appendString:@"cacheDidUpdate "];
                 }
             }
+            // 最后三个候选（方法表里有、我们还没试过）
+            if (!TBClockMaterialFace((UIView *)v)) {
+                // 无素材/恢复默认：试着让系统把"已显示的图"清掉、自己重画
+                if ([v respondsToSelector:NSSelectorFromString(@"setDisplayedImage:")]) {
+                    @try {
+                        ((void (*)(id, SEL, id))objc_msgSend)(v, NSSelectorFromString(@"setDisplayedImage:"), nil);
+                        [st appendString:@"setDisplayedImage(nil) "];
+                    } @catch (NSException *e) { }
+                }
+            }
+            if ([v respondsToSelector:NSSelectorFromString(@"updateUnanimated")]) {
+                @try {
+                    ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateUnanimated"));
+                    [st appendString:@"updateUnanimated "];
+                } @catch (NSException *e) { }
+            }
             TBLog(@"时钟刷新：%@", st);
         } @catch (NSException *e) { }
     }
