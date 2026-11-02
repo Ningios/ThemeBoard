@@ -1299,6 +1299,18 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                     [st appendString:@"setIcon.none "];
                 }
             }
+            // 只给时钟这一个视图硬贴一次表盘（其他图标不动）。
+            // 系统缓存不会自己重算，这是本机唯一能让表盘立刻跟着主题变的手段。
+            {
+                UIImage *face = TBClockMaterialFace((UIView *)v);
+                if (face && face.CGImage) {
+                    ((UIView *)v).layer.contents = (__bridge id)face.CGImage;
+                    @try { [v setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
+                    ((UIView *)v).layer.contentsGravity = kCAGravityResize;
+                    [(UIView *)v setNeedsDisplay];
+                    [st appendString:@"faceWrite "];
+                }
+            }
             TBLog(@"时钟刷新：%@", st);
         } @catch (NSException *e) { }
     }
