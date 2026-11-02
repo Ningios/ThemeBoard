@@ -504,6 +504,13 @@ static UIImage *TBResourceImage(NSString *name) {
 
     NSString *key = name.lastPathComponent.lowercaseString;
     NSString *path = res[key];
+    if ([key hasPrefix:@"clockicon"]) {
+        // 诊断：这根针到底来自哪里、原始画布多大（对照 SB 会不会用它）
+        TBLogOnce([@"clocksrc|" stringByAppendingString:key],
+                  @"时钟素材来源 %@ → %@",
+                  key, path ? [NSString stringWithFormat:@"%@",
+                               [path stringByReplacingOccurrencesOfString:dir ?: @"" withString:@""]] : @"(无)");
+    }
     if (!path) {
         NSString *base = [key stringByDeletingPathExtension];
         if ([base hasSuffix:@"@2x"] || [base hasSuffix:@"@3x"])
@@ -2111,6 +2118,10 @@ static void TBApplyClockImagesToSet(id set) {
         }
 
         CGSize target = orig ? orig.size : CGSizeZero;
+        TBLogOnce([@"clocksize|" stringByAppendingString:map[i].key],
+                  @"时钟素材尺寸 %@：主题原图 %.0fx%.0f pt scale=%.0f → 目标 %.0fx%.0f pt",
+                  map[i].key, img.size.width, img.size.height, img.scale,
+                  target.width, target.height);
         if (target.width < 1 || target.height < 1) continue;   // 系统没有这项就别乱塞
 
         // 与 SnowBoard 完全一致：只做一步 —— 把主题这张图缩放到「系统原本那根针」的尺寸。
