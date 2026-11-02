@@ -1277,29 +1277,50 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                     [(UIView *)v setNeedsDisplay];
                     TBLog(@"时钟表盘：已强制写入 %.0fx%.0f", face.size.width, face.size.height);
                 } else {
-                    // 主题没有表盘素材 / 已恢复系统默认：写回【系统原实现那张合成图】。
-                    // 注意：清空交回系统是不行的——系统只会在图标图变化时才写，会一直空白。
-                    // 指针成员此时也已经被还原成系统原图，所以合成图上的针和指针图层
-                    // 是同一套系统的针，重叠起来不会出现两套（之前多针是因为图层还留着主题针）。
+                    // 主题没有表盘素材 / 已恢复系统默认。
+                    // 【不能写系统那张合成图】—— 它是系统缓存过的静态图，里面已经烤进了一套
+                    // 缓存时刻的针，写进 layer.contents 会和活动的指针层叠成两套（角度还不同）。
+                    // 【也不能只清空】—— 系统只在图标图变化时才写 → 空白。
+                    // 做法：先把那张图导出一次供确认，然后清掉映射并逼系统自己重算。
                     SEL cs = NSSelectorFromString(@"contentsImage");
-                    UIImage *sysFace = nil;
-                    if (o_contentsImageLive) sysFace = o_contentsImageLive(v, cs);
-                    if (sysFace && sysFace.CGImage) {
-                        ((UIView *)v).layer.contents = (__bridge id)sysFace.CGImage;
-                        @try { [v setValue:sysFace forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
-                        ((UIView *)v).layer.contentsGravity = kCAGravityResize;
+                    UIImage *sysFace = (o_contentsImageLive ? o_contentsImageLive(v, cs) : nil);
+                    static BOOL dumpedFace = NO;
+                    if (!dumpedFace && sysFace && sysFace.CGImage) {
+                        dumpedFace = YES;
+                        NSString *dir = @"/var/mobile/Library/ThemeBoard";
+                        [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                                  withIntermediateDirectories:YES attributes:nil error:NULL];
+                        NSData *png = UIImagePNGRepresentation(sysFace);
+                        if (png) {
+                            [png writeToFile:[dir stringByAppendingPathComponent:@"clockface-restore.png"]
+                                  atomically:YES];
+                            TBLog(@"时钟表盘：已导出系统contentsImage → clockface-restore.png（%.0fx%.0f）",
+                                  sysFace.size.width, sysFace.size.height);
+                        }
                     }
-                    // 让系统的指针层按还原后的成员重建
-                    if ([v respondsToSelector:NSSelectorFromString(@"updateUnanimated")]) {
-                        ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateUnanimated"));
+                    ((UIView *)v).layer.contents = nil;
+                    @try { [v setValue:nil forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
+                    // 逼系统重建：把 icon 重新设一遍
+                    BOOL resetIcon = NO;
+                    if ([v respondsToSelector:NSSelectorFromString(@"icon")] &&
+                        [v respondsToSelector:NSSelectorFromString(@"setIcon:")]) {
+                        @try {
+                            id ic = ((id (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"icon"));
+                            if (ic) {
+                                ((void (*)(id, SEL, id))objc_msgSend)(v, NSSelectorFromString(@"setIcon:"), ic);
+                                resetIcon = YES;
+                            }
+                        } @catch (NSException *e) { }
                     }
                     if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
                         ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
                     }
+                    if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
+                        ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
+                    }
                     [v setNeedsLayout];
                     [v setNeedsDisplay];
-                    TBLog(@"时钟表盘：无素材 → 写回系统合成图 %.0fx%.0f 并重建指针",
-                          sysFace.size.width, sysFace.size.height);
+                    TBLog(@"时钟表盘：无素材 → 清映射并逼系统重建（setIcon %@）", resetIcon ? @"已调用" : @"不可用");
                 }
             }
         } @catch (NSException *e) { }
