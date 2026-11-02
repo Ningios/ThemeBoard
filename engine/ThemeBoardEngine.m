@@ -1250,6 +1250,25 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_updateOverlayImage"));
                 [st appendString:@"overlay "];
             }
+            // 系统自己的"图标图已更新"回调 —— 用它逼系统重算合成图（表盘就会跟着变）
+            {
+                id ic = nil;
+                if ([v respondsToSelector:NSSelectorFromString(@"icon")]) {
+                    ic = ((id (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"icon"));
+                }
+                id cache = nil;
+                @try { cache = [v valueForKey:@"_iconImageCache"]; } @catch (NSException *e) { }
+                if (ic && [v respondsToSelector:NSSelectorFromString(@"iconImageDidUpdate:")]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(v, NSSelectorFromString(@"iconImageDidUpdate:"), ic);
+                    [st appendString:@"imgDidUpdate "];
+                }
+                if (ic && cache &&
+                    [v respondsToSelector:NSSelectorFromString(@"iconImageCache:didUpdateImageForIcon:")]) {
+                    ((void (*)(id, SEL, id, id))objc_msgSend)(
+                        v, NSSelectorFromString(@"iconImageCache:didUpdateImageForIcon:"), cache, ic);
+                    [st appendString:@"cacheDidUpdate "];
+                }
+            }
             if ([v respondsToSelector:NSSelectorFromString(@"_iconImageView")]) {
                 id iv = ((id (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_iconImageView"));
                 if (iv && iv != v && [iv respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
