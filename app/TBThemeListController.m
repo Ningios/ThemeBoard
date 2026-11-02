@@ -1,4 +1,3 @@
-#import <objc/runtime.h>
 #import "TBThemeListController.h"
 #import "TBThemeDetailController.h"
 #import "TBThemeScanner.h"
@@ -23,35 +22,12 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
 
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-@interface TBThemeListController () <UISearchResultsUpdating, UIDocumentPickerDelegate,
-                                   UIGestureRecognizerDelegate>
+@interface TBThemeListController () <UISearchResultsUpdating, UIDocumentPickerDelegate>
 @property (nonatomic, strong) NSArray<TBTheme *> *themes;
 @property (nonatomic, strong) NSArray<TBTheme *> *filtered;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, assign) NSInteger sortMode;   // 0 名称 1 图标数
 @end
-
-static char kTBSwipeKey;
-
-@interface TBSwipeState : NSObject
-@property (nonatomic, weak) UITableViewCell *cell;
-@property (nonatomic, weak) UIView *pill;
-@property (nonatomic, copy) NSString *themeName;
-@property (nonatomic, assign) CGFloat offset;
-@end
-@implementation TBSwipeState
-@end
-
-/// 把卡片（背景视图）和内容一起平移；删除块固定在 cell 上，不跟着走
-static void TBApplySwipeOffset(TBSwipeState *st, CGFloat x) {
-    if (!st.cell) return;
-    st.offset = x;
-    st.pill.hidden = (x > -6);
-    CGAffineTransform tr = CGAffineTransformMakeTranslation(x, 0);
-    st.cell.contentView.transform = tr;
-    st.cell.backgroundView.transform = tr;
-}
-
 
 @implementation TBThemeListController
 
@@ -356,9 +332,6 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         cell.accessoryType = [[self activeThemeName] isEqualToString:t.name]
             ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        [self tb_swipeAttachToCell:cell theme:t];
-    } else {
-        [self tb_swipeDetachFromCell:cell];
     }
     return cell;
 }
@@ -378,13 +351,6 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section == 1) return;   // 按钮行
-    // 滑开状态下的点击 = 收起，不跳详情
-    UITableViewCell *sc = [tableView cellForRowAtIndexPath:indexPath];
-    TBSwipeState *sst = sc ? objc_getAssociatedObject(sc, &kTBSwipeKey) : nil;
-    if (sst && sst.offset < -1) {
-        [UIView animateWithDuration:0.25 animations:^{ TBApplySwipeOffset(sst, 0); }];
-        return;
-    }
     TBTheme *t = nil;
     if (indexPath.section == 0) {
         NSString *active = [self activeThemeName];
@@ -396,148 +362,116 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     [self.navigationController pushViewController:[[TBThemeDetailController alloc] initWithTheme:t] animated:YES];
 }
 
-#pragma mark - 玻璃左滑删除（参考 MarkFont：自己做平移手势 + 圆角玻璃块，不碰系统滑动）
+#pragma mark - 删除
 
-- (void)tb_swipeAttachToCell:(UITableViewCell *)cell theme:(TBTheme *)theme {
-    TBSwipeState *st = objc_getAssociatedObject(cell, &kTBSwipeKey);
-    if (!st) {
-        st = [[TBSwipeState alloc] init];
-        st.cell = cell;
-        objc_setAssociatedObject(cell, &kTBSwipeKey, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-        // 删除块：尺寸/圆角/位置都跟左边卡片一致 —— 高 = 行高 - 4（卡片上下各缩 2pt）、
-        // 右边缩 12pt、圆角 20（TBGlassCellBG 的规格），玻璃底 + 真模糊 + 红字
-        UIView *pill = [[UIView alloc] initWithFrame:CGRectZero];
-        pill.translatesAutoresizingMaskIntoConstraints = NO;
-        pill.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
-                                              [UIColor colorWithWhite:1 alpha:0.14]);
-        pill.layer.cornerRadius = 20;
-        pill.layer.cornerCurve = kCACornerCurveContinuous;
-        pill.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
-        pill.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                                [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
-        [cell addSubview:pill];
-
-        UIVisualEffectView *blur = [[UIVisualEffectView alloc]
-            initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
-        blur.translatesAutoresizingMaskIntoConstraints = NO;
-        blur.layer.cornerRadius = 20;
-        blur.layer.cornerCurve = kCACornerCurveContinuous;
-        blur.clipsToBounds = YES;
-        blur.userInteractionEnabled = NO;
-        [pill addSubview:blur];
-
-        UILabel *lab = [[UILabel alloc] initWithFrame:CGRectZero];
-        lab.translatesAutoresizingMaskIntoConstraints = NO;
-        lab.text = @"删除";
-        lab.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-        lab.textColor = [UIColor systemRedColor];
-        [pill addSubview:lab];
-
-        [NSLayoutConstraint activateConstraints:@[
-            [blur.leadingAnchor constraintEqualToAnchor:pill.leadingAnchor],
-            [blur.trailingAnchor constraintEqualToAnchor:pill.trailingAnchor],
-            [blur.topAnchor constraintEqualToAnchor:pill.topAnchor],
-            [blur.bottomAnchor constraintEqualToAnchor:pill.bottomAnchor],
-            [lab.centerXAnchor constraintEqualToAnchor:pill.centerXAnchor],
-            [lab.centerYAnchor constraintEqualToAnchor:pill.centerYAnchor],
-            [pill.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [pill.heightAnchor constraintEqualToAnchor:cell.contentView.heightAnchor constant:-4],
-            [pill.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-12],
-            [pill.widthAnchor constraintEqualToConstant:92],
-        ]];
-        pill.hidden = YES;
-        st.pill = pill;
-
-        UITapGestureRecognizer *tap =
-            [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tb_pillTapped:)];
-        [pill addGestureRecognizer:tap];
-
-        UIPanGestureRecognizer *pan =
-            [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(tb_cardPan:)];
-        pan.delegate = self;
-        [cell.contentView addGestureRecognizer:pan];
+/// 给这一行套上样式；找不到滑动容器返回 NO（外观与原来完全一致，只是把
+/// 「找容器」这件事做得更彻底：cell / cell 的父视图 / 表格 / 整个窗口都试一遍）
+- (BOOL)styleSwipeForRowAtIndexPath:(NSIndexPath *)indexPath tableView:(UITableView *)tableView {
+    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+    UIView *root = cell ? (cell.superview ?: cell) : tableView;
+    UIView *pull = nil;
+    if (root) pull = [self findSwipePullView:root depth:0];
+    if (!pull && cell) pull = [self findSwipePullView:cell depth:0];
+    if (!pull) pull = [self findSwipePullView:tableView depth:0];
+    if (!pull) {
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            pull = [self findSwipePullView:w depth:0];
+            if (pull) break;
+        }
     }
-    st.themeName = theme.name;
-    TBApplySwipeOffset(st, 0);   // 复用的 cell 先归位
-}
-
-- (void)tb_swipeDetachFromCell:(UITableViewCell *)cell {
-    TBSwipeState *st = objc_getAssociatedObject(cell, &kTBSwipeKey);
-    if (!st) return;
-    st.themeName = nil;
-    TBApplySwipeOffset(st, 0);
-    st.pill.hidden = YES;
-}
-
-#pragma mark - 手势
-
-- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g {
-    if ([g isKindOfClass:[UIPanGestureRecognizer class]]) {
-        CGPoint v = [(UIPanGestureRecognizer *)g velocityInView:g.view];
-        return fabs(v.x) > fabs(v.y);   // 只接横向滑动，纵向留给表格滚动
-    }
+    if (!pull) return NO;
+    [self styleSwipePullView:pull];
     return YES;
 }
 
-- (void)tb_cardPan:(UIPanGestureRecognizer *)pan {
-    UIView *cv = pan.view;
-    UITableViewCell *cell = (UITableViewCell *)cv.superview;
-    if (![cell isKindOfClass:[UITableViewCell class]]) return;
-    TBSwipeState *st = objc_getAssociatedObject(cell, &kTBSwipeKey);
-    if (!st) return;
+/// 原来只在 0.05 秒找一次，那一次没抓到容器就回落成系统默认灰底 —— 这就是
+/// 「有时候变灰」。没抓到才补试几次，抓到了就什么都不额外做。
+- (void)retryStyleSwipeForRowAtIndexPath:(NSIndexPath *)indexPath
+                               tableView:(UITableView *)tableView
+                                 attempt:(NSInteger)attempt {
+    if (attempt >= 4) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if ([self styleSwipeForRowAtIndexPath:indexPath tableView:tableView]) return;
+        [self retryStyleSwipeForRowAtIndexPath:indexPath tableView:tableView attempt:attempt + 1];
+    });
+}
 
-    CGPoint t = [pan translationInView:cv];
-    [pan setTranslation:CGPointZero inView:cv];
-    CGFloat x = st.offset + t.x;
-    if (x > 0) x = 0;
-    if (x < -110) x = -110;
+- (void)tableView:(UITableView *)tableView willBeginEditingRowAtIndexPath:(NSIndexPath *)indexPath {
+    // 只在这一次滑动的那一行里做样式，绝不碰表格其它部分
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if ([self styleSwipeForRowAtIndexPath:indexPath tableView:tableView]) return;
+        [self retryStyleSwipeForRowAtIndexPath:indexPath tableView:tableView attempt:0];
+    });
+}
 
-    if (pan.state == UIGestureRecognizerStateChanged) {
-        TBApplySwipeOffset(st, x);
-    } else if (pan.state == UIGestureRecognizerStateEnded ||
-               pan.state == UIGestureRecognizerStateCancelled) {
-        CGFloat target = (x < -46) ? -104.0 : 0.0;
-        [UIView animateWithDuration:0.28 delay:0
-             usingSpringWithDamping:0.85 initialSpringVelocity:0.3
-                            options:UIViewAnimationOptionBeginFromCurrentState
-                         animations:^{ TBApplySwipeOffset(st, target); }
-                         completion:nil];
+- (UIView *)findSwipePullView:(UIView *)root depth:(NSInteger)depth {
+    if (depth > 4) return nil;
+    for (UIView *v in root.subviews) {
+        if ([NSStringFromClass(v.class) containsString:@"UISwipeActionPullView"]) return v;
+        UIView *r = [self findSwipePullView:v depth:depth + 1];
+        if (r) return r;
+    }
+    return nil;
+}
+
+- (void)styleSwipePullView:(UIView *)pull {
+    CGFloat scale = [UIScreen mainScreen].scale;
+    pull.backgroundColor = [UIColor clearColor];
+    pull.layer.cornerRadius = 20;
+    pull.layer.cornerCurve = kCACornerCurveContinuous;
+    pull.clipsToBounds = YES;
+
+    for (UIView *btn in pull.subviews) {
+        btn.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                             [UIColor colorWithWhite:1 alpha:0.14]);
+        btn.layer.cornerRadius = 20;
+        btn.layer.cornerCurve = kCACornerCurveContinuous;
+        btn.clipsToBounds = YES;
+        btn.layer.borderWidth = 1.0 / scale;
+        btn.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                               [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
+        [self paintRedLabels:btn depth:0];
     }
 }
 
-- (void)tb_pillTapped:(UITapGestureRecognizer *)g {
-    UIView *pill = g.view;
-    UITableViewCell *cell = (UITableViewCell *)pill.superview;
-    TBSwipeState *st = cell ? objc_getAssociatedObject(cell, &kTBSwipeKey) : nil;
-    if (!st.themeName.length) return;
-    TBTheme *t = [TBThemeScanner themeNamed:st.themeName];
-    if (!t) return;
-
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:
-                             [NSString stringWithFormat:@"删除「%@」？", t.name]
-        message:@"主题文件夹会被直接删除，不可恢复" preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
-        NSError *err = nil;
-        BOOL ok = [TBThemeScanner deleteTheme:t error:&err];
-        if (ok) {
-            NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
-            if ([active isEqualToString:t.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
-            [self reload];
+/// 只把删除按钮里的文字染红；不设 tintColor（会向下继承，染红整张表）
+- (void)paintRedLabels:(UIView *)v depth:(NSInteger)depth {
+    if (depth > 3) return;
+    for (UIView *sub in v.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            ((UILabel *)sub).textColor = [UIColor systemRedColor];
+        } else {
+            [self paintRedLabels:sub depth:depth + 1];
         }
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
-}
-
-/// 系统自带的滑动删除整个关掉（灰底/方角/时机问题都来自它）
-- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    return NO;
+    }
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
 trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    return nil;
+    if (indexPath.section != 2) return nil;
+    TBTheme *t = self.filtered[indexPath.row];
+    UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                     title:@"删除"
+                                                                   handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+        UIAlertController *ac = [UIAlertController alertControllerWithTitle:
+                                 [NSString stringWithFormat:@"删除「%@」？", t.name]
+            message:@"主题文件夹会被直接删除，不可恢复" preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:^(UIAlertAction *x) { done(NO); }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+            NSError *err = nil;
+            BOOL ok = [TBThemeScanner deleteTheme:t error:&err];
+            if (ok) {
+                NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
+                if ([active isEqualToString:t.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
+                [self reload];
+            }
+            done(ok);
+        }]];
+        [self presentViewController:ac animated:YES completion:nil];
+    }];
+    return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 
 
