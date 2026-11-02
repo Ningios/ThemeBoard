@@ -310,9 +310,35 @@ static void TBLoadBundleResources(NSString *themeDir) {
 
 /// 时钟底图这类素材自带「透明圆角」，直接交给系统会在四角透出壁纸。
 /// 这里把透明像素用表盘底色填满（圆角交给图标遮罩去切）。
+/// 判断素材是否「主体不透明」（只有圆角透明）还是「半透明玻璃层」。
+/// 玻璃类素材绝不能填白，否则玻璃感会被抹成白板。
+static BOOL TBImageIsMostlyOpaque(CGImageRef cg) {
+    if (!cg) return NO;
+    size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
+    if (w < 4 || h < 4) return NO;
+    enum { N = 32 };
+    unsigned char buf[N * N * 4];
+    memset(buf, 0, sizeof(buf));
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef c = CGBitmapContextCreate(buf, N, N, 8, N * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!c) return NO;
+    CGContextSetInterpolationQuality(c, kCGInterpolationNone);
+    CGContextDrawImage(c, CGRectMake(0, 0, N, N), cg);
+    CGContextRelease(c);
+    long sum = 0;
+    for (int i = 0; i < N * N; i++) sum += buf[i * 4 + 3];
+    double mean = (double)sum / (double)(N * N) / 255.0;
+    return mean > 0.70;   // 主体基本不透明才算「不透明素材」
+}
+
 static UIImage *TBMakeOpaqueOnBodyColor(UIImage *img) {
     if (!img || !img.CGImage) return img;
     CGImageRef cg = img.CGImage;
+    if (!TBImageIsMostlyOpaque(cg)) {
+        TBLogOnce(@"clockglass", @"时钟底图是半透明玻璃层：保持透明，不做填白");
+        return img;
+    }
     size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
     if (w < 2 || h < 2) return img;
 
