@@ -754,8 +754,31 @@ typedef struct { double w, h, scale, ratio; } TBClockInfo;   // SBIconImageInfo 
 typedef TBClockInfo (*TBInfoGetFn)(id, SEL);
 typedef void (*TBInfoSetFn)(id, SEL, TBClockInfo);
 
+static BOOL TBIconArtAlreadyRounded(UIImage *img) {
+    if (!img || !img.CGImage) return NO;
+    const size_t W = 16, H = 16;
+    unsigned char *buf = calloc(W * H * 4, 1);
+    if (!buf) return NO;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return NO; }
+    UIGraphicsPushContext(ctx);
+    [img drawInRect:CGRectMake(0, 0, W, H)];
+    UIGraphicsPopContext();
+    CGContextRelease(ctx);
+    // 四个角都是透明 → 素材自己已经做过圆角
+    unsigned char *c[4] = { buf, buf + (W - 1) * 4,
+                            buf + (H - 1) * W * 4, buf + ((H - 1) * W + W - 1) * 4 };
+    BOOL rounded = YES;
+    for (int k = 0; k < 4; k++) if (c[k][3] > 24) { rounded = NO; break; }
+    free(buf);
+    return rounded;
+}
+
 static UIImage *TBIconRoundedImage(UIImage *img) {
     if (!img) return img;
+    if (TBIconArtAlreadyRounded(img)) return img;   // 已经是圆角素材，不再裁（否则会"裁多了"）
     // SnowBoard 在把素材交给系统前会做 roundedRectImageFromImage:withRadius:withCrop:YES
     // （圆角裁剪）。这里等价实现：优先用【系统自己的遮罩形状】，学不到时按系统图标
     // 圆角比例（22.37%）兜底。
@@ -1285,29 +1308,6 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                     [st appendString:@"setIcon "];
                 } else {
                     [st appendString:@"setIcon.none "];
-                }
-            }
-            // 通知观察者"这个图标图变了，去重取" —— SB 重载主题时会 notifyObservers，
-            // 我们之前因为图标列表取不到而整段跳过，从没对时钟发过。
-            {
-                id ic2 = nil;
-                if ([v respondsToSelector:NSSelectorFromString(@"icon")]) {
-                    ic2 = ((id (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"icon"));
-                }
-                [gLock lock]; NSArray *cs2 = gCaches.allObjects; [gLock unlock];
-                SEL n1 = NSSelectorFromString(@"notifyObserversOfUpdateForIcon:");
-                SEL n2 = NSSelectorFromString(@"notifyObserversOfUnmaskedUpdateForIcon:");
-                for (NSValue *cv in cs2) {
-                    id c = (__bridge id)cv.pointerValue;
-                    @try {
-                        if (ic2 && [c respondsToSelector:n1]) {
-                            ((void (*)(id, SEL, id))objc_msgSend)(c, n1, ic2);
-                            [st appendString:@"notify "];
-                        }
-                        if (ic2 && [c respondsToSelector:n2]) {
-                            ((void (*)(id, SEL, id))objc_msgSend)(c, n2, ic2);
-                        }
-                    } @catch (NSException *e) { }
                 }
             }
             TBLog(@"时钟刷新：%@", st);
