@@ -750,8 +750,6 @@ static UIImage *TBMaskWithSystemShape(UIImage *art);
 typedef id (*ContentsImgFn)(id, SEL);
 static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
 
-static __weak UIView *gClockViewForFaceSync;   // 最近的时钟视图（针集重建时同步写表盘）
-
 typedef struct { double w, h, scale, ratio; } TBClockInfo;   // SBIconImageInfo 的等价布局
 typedef TBClockInfo (*TBInfoGetFn)(id, SEL);
 typedef void (*TBInfoSetFn)(id, SEL, TBClockInfo);
@@ -1245,7 +1243,6 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
     // 只在【这一个时钟视图】上做，对整棵视图树调用会崩。
     if ([vcls rangeOfString:@"Clock"].location != NSNotFound) {
         @try {
-            gClockViewForFaceSync = v;
             TBLogOnce([@"clockrefresh|" stringByAppendingString:vcls], @"时钟视图重画 %@", vcls);
             NSMutableString *st = [NSMutableString string];
             SEL iconSel = NSSelectorFromString(@"icon");
@@ -1291,50 +1288,6 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                 }
             }
             TBLog(@"时钟刷新：%@", st);
-            // 确定性刷新：直接把当前主题的表盘写进这个视图（系统缓存不会自己重算，
-            // 这就是"表盘要注销才更新"的原因）。写到 layer.contents 与 _mappedContentsImage，
-            // 保证下次系统重绘也用我们的新表盘。
-            {
-                UIImage *face = TBClockMaterialFaceCached((UIView *)v);
-                if (face && face.CGImage) {
-                    // 有素材 → 写主题表盘，并把指针层恢复显示
-                    //（无素材那一步会把指针层隐藏，不恢复的话切回来就"只有表盘没有指针"）
-                    for (CALayer *l in ((UIView *)v).layer.sublayers) {
-                        l.hidden = NO;
-                        l.opacity = 1.0f;
-                    }
-                    ((UIView *)v).layer.contents = (__bridge id)face.CGImage;
-                    @try { [v setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
-                    ((UIView *)v).layer.contentsGravity = kCAGravityResize;
-                    [(UIView *)v setNeedsDisplay];
-                    TBLog(@"时钟表盘：已强制写入 %.0fx%.0f", face.size.width, face.size.height);
-                } else {
-                    // 主题没有表盘素材 / 已恢复系统默认：
-                    // 什么都不做 —— 完全照 SnowBoard：它的 contentsImage 取不到主题素材时
-                    // 直接调原实现返回系统自己的表盘，不写、不清、不碰图层。
-                    //（我自创的"写回系统图 / 清空 / 隐藏或移除指针层"都试过了，只会弄出
-                    //  两套针、空白、或残留 —— 全部撤掉。）
-                    // 触发系统重算它自己的组件：把当前 iconImageInfo 原值再设一遍
-                    //（这是系统自己更新图标时走的路径）。不写、不清、不碰图层。
-                    // 不做这一步的话，系统会一直拿它缓存里的旧表盘 → 表现为"恢复默认仍有主题残留"。
-                    SEL gSel = NSSelectorFromString(@"iconImageInfo");
-                    SEL sSel = NSSelectorFromString(@"setIconImageInfo:");
-                    BOOL forced = NO;
-                    if ([v respondsToSelector:gSel] && [v respondsToSelector:sSel]) {
-                        @try {
-                            TBClockInfo info = ((TBInfoGetFn)objc_msgSend)(v, gSel);
-                            ((TBInfoSetFn)objc_msgSend)(v, sSel, info);
-                            forced = YES;
-                        } @catch (NSException *e) { }
-                    }
-                    if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
-                        ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
-                    }
-                    TBLogOnce([@"clockface|sys|" stringByAppendingString:(TBActiveTheme() ?: @"")],
-                              @"时钟表盘：主题无素材 → 交回系统并触发重算（iconImageInfo %@）",
-                              forced ? @"已重设" : @"不可用");
-                }
-            }
         } @catch (NSException *e) { }
     }
     BOOL special = ([vcls rangeOfString:@"Folder"].location != NSNotFound) ||
@@ -2266,20 +2219,6 @@ static void TBApplyClockImagesToSet(id set) {
             ((void (*)(id, SEL, id))objc_msgSend)(set, setter, img);
             applied++;
         } @catch (NSException *e) { }
-    }
-    // 系统每次重建针集时都会先按自己的方式渲染一遍表盘 → 表现为"偶尔闪成系统时钟"。
-    // 这里同步把当前主题的表盘再写一次，和系统保持同一步调。
-    {
-        UIView *cv = gClockViewForFaceSync;
-        if (cv) {
-            UIImage *face = TBClockMaterialFaceCached(cv);
-            if (face && face.CGImage) {
-                cv.layer.contents = (__bridge id)face.CGImage;
-                @try { [cv setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
-                cv.layer.contentsGravity = kCAGravityResize;
-                [cv setNeedsDisplay];
-            }
-        }
     }
     if (applied > 0 || restored > 0) {
         TBLog(@"时钟图像集：注入 %ld 项，还原系统 %ld 项", (long)applied, (long)restored);
