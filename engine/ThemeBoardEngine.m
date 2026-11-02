@@ -647,6 +647,57 @@ static BOOL TBImageHasContentInDateArea(UIImage *img) {
     return (dark * 100 / total) > 3;
 }
 
+/// 表盘素材中心区域是否已经有指针（个别主题直接把指针画进表盘素材里，
+/// 再叠系统指针就重影）。做法：取全图亮度中位数当背景，看中心圆盘内
+/// 与背景差异明显的像素占比。
+static BOOL TBImageCenterHasInk(UIImage *img) {
+    if (!img) return NO;
+    const size_t W = 96, H = 96;
+    unsigned char *buf = calloc(W * H * 4, 1);
+    if (!buf) return NO;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs,
+                                             kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return NO; }
+    UIGraphicsPushContext(ctx);
+    [img drawInRect:CGRectMake(0, 0, W, H)];
+    UIGraphicsPopContext();
+    CGContextRelease(ctx);
+
+    // 亮度中位数 = 背景
+    int hist[256] = {0};
+    NSInteger np = 0;
+    for (size_t i = 0; i < W * H; i++) {
+        unsigned char *px = buf + i * 4;
+        if (px[3] < 40) continue;
+        int l = (int)(0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2]);
+        if (l > 255) l = 255;
+        hist[l]++;
+        np++;
+    }
+    int median = 0, acc = 0;
+    for (int i = 0; i < 256; i++) { acc += hist[i]; if (acc * 2 >= np) { median = i; break; } }
+
+    // 中心圆盘（半径 0.30）内偏离背景的像素
+    CGFloat cx = W / 2.0, cy = H / 2.0, r = W * 0.30;
+    NSInteger ink = 0, total = 0;
+    for (size_t y = 0; y < H; y++) {
+        for (size_t x = 0; x < W; x++) {
+            CGFloat dx = x - cx, dy = y - cy;
+            if (sqrt(dx * dx + dy * dy) > r) continue;
+            unsigned char *px = buf + (y * W + x) * 4;
+            if (px[3] < 40) continue;
+            int l = (int)(0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2]);
+            total++;
+            if (abs(l - median) > 60) ink++;
+        }
+    }
+    free(buf);
+    if (total < 50) return NO;
+    return (ink * 100 / total) > 2;   // 中心盘里 2% 以上是"墨"= 画了指针
+}
+
 /// 主题只给了 IconBundles 静态图标（Bundles 里没有整套动态素材）→
 /// 图标自己就画了日期/指针，我们不该再叠一层
 static BOOL TBThemeHasClockMaterial(void) {
@@ -655,13 +706,38 @@ static BOOL TBThemeHasClockMaterial(void) {
 
 static BOOL TBClockShouldHideHands(void) {
     if (!TBEnabled() || TBSafeMode()) return NO;
-    if (!TBActiveTheme().length) return NO;        // 没主题：系统表盘 + 系统指针
-    if (TBThemeHasClockMaterial()) return NO;      // 有整套素材：用系统指针
+    NSString *theme = TBActiveTheme();
+    if (!theme.length) return NO;                  // 没主题：系统表盘 + 系统指针
+
+    // 按主题缓存一次结论（这个判断每分钟左右都会问到）
+    static NSString *cachedTheme = nil;
+    static BOOL cachedHide = NO;
     [gLock lock];
-    TBLoadIndex();
-    BOOL hasStatic = gIndex[@"com.apple.mobiletimer"] != nil;
+    BOOL same = [cachedTheme isEqualToString:theme];
     [gLock unlock];
-    return hasStatic;                              // 静态图标 → 隐藏指针
+    if (same) return cachedHide;
+
+    BOOL hide = NO;
+    if (!TBThemeHasClockMaterial()) {
+        // 主题只有 IconBundles 静态图标 → 图标自己画了针，隐藏系统指针
+        [gLock lock];
+        TBLoadIndex();
+        BOOL hasStatic = gIndex[@"com.apple.mobiletimer"] != nil;
+        [gLock unlock];
+        hide = hasStatic;
+    } else {
+        // 有表盘素材，但素材本身已经把指针画进去了 → 也隐藏，否则重影
+        UIImage *face = TBResourceImage(@"ClockIconBackgroundSquare");
+        hide = TBImageCenterHasInk(face);
+    }
+    [gLock lock];
+    cachedTheme = [theme copy];
+    cachedHide = hide;
+    [gLock unlock];
+    TBLogOnce([@"clockhands|" stringByAppendingString:theme],
+              @"时钟指针判定：%@（中心有针/只有静态图标）",
+              hide ? @"隐藏" : @"用系统指针");
+    return hide;
 }
 
 /// 日历合成（SnowBoard 同款）：主题底图 + 红色星期 + 黑色日期
@@ -793,12 +869,16 @@ static UIImage *TBImageForBundle(NSString *bid) {
         if (!calDynamic) {
             // 主题图标自己已经画了日期/星期 → 直接用，不叠加（否则会重影）
             TBLogOnce(@"calc|static", @"日历：主题图标已自带日期，跳过叠加");
+            UIImage *masked = TBIconRoundedImage(img);      // 圆角遮罩不能漏
+            if (masked) img = masked;
             [gImageCache setObject:img forKey:cacheKey];
             return img;
         }
         UIImage *composed = TBCalendarCompositeImage(img);
         if (composed) {
             TBLogOnce(@"calc|ok", @"日历合成：底图 + 红星期 + 黑日期");
+            UIImage *masked = TBIconRoundedImage(composed);   // 合成后同样要裁圆角
+            if (masked) composed = masked;
             [gImageCache setObject:composed forKey:cacheKey];
             return composed;
         }
