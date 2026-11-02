@@ -758,12 +758,37 @@ typedef void (*TBInfoSetFn)(id, SEL, TBClockInfo);
 // 完全照 SnowBoard：roundedRectImageFromImage:withRadius:withCrop:YES
 //   radius = (CustomCornerRadius / 60.0) * 图片宽度；上限 = 宽度的一半
 //   SB 的 CustomCornerRadius 默认值 = 60 × 22.37% ≈ 13.42
+// 我们自己那套（SB 的固定半径公式会"裁多了"）：
+//   ① 已学到系统遮罩形状 → 按系统形状裁（最准）
+//   ② 素材四角本来就透明（作者已做圆角）→ 跳过裁剪
+//   ③ 兜底：按 22.37% 圆角裁
+static BOOL TBIconArtAlreadyRounded(UIImage *img) {
+    if (!img || !img.CGImage) return NO;
+    const size_t W = 16, H = 16;
+    unsigned char *buf = calloc(W * H * 4, 1);
+    if (!buf) return NO;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return NO; }
+    UIGraphicsPushContext(ctx);
+    [img drawInRect:CGRectMake(0, 0, W, H)];
+    UIGraphicsPopContext();
+    CGContextRelease(ctx);
+    BOOL rounded = (buf[3] <= 24) && (buf[(W - 1) * 4 + 3] <= 24) &&
+                   (buf[(H - 1) * W * 4 + 3] <= 24) &&
+                   (buf[((H - 1) * W + W - 1) * 4 + 3] <= 24);
+    free(buf);
+    return rounded;
+}
+
 static UIImage *TBIconRoundedImage(UIImage *img) {
     if (!img) return img;
+    if (TBIconArtAlreadyRounded(img)) return img;      // 已是圆角素材 → 不裁
+    if (gSystemMaskTemplate) return TBMaskWithSystemShape(img);   // 按系统形状裁
     CGSize pt = img.size;
     if (pt.width < 16 || pt.height < 16) return img;
-    CGFloat radius = (13.42 / 60.0) * pt.width;
-    if (radius > pt.width * 0.5) radius = pt.width * 0.5;
+    CGFloat radius = MIN(pt.width, pt.height) * 0.2237;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
     fmt.scale = img.scale;
     fmt.opaque = NO;
@@ -1309,6 +1334,25 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                     ((UIView *)v).layer.contentsGravity = kCAGravityResize;
                     [(UIView *)v setNeedsDisplay];
                     [st appendString:@"faceWrite "];
+                }
+            }
+            // 方案 D：用系统自己的"图标图已更新"回调逼它重算合成图
+            {
+                id ic = nil;
+                if ([v respondsToSelector:NSSelectorFromString(@"icon")]) {
+                    ic = ((id (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"icon"));
+                }
+                id cache = nil;
+                @try { cache = [v valueForKey:@"_iconImageCache"]; } @catch (NSException *e) { }
+                if (ic && [v respondsToSelector:NSSelectorFromString(@"iconImageDidUpdate:")]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(v, NSSelectorFromString(@"iconImageDidUpdate:"), ic);
+                    [st appendString:@"imgDidUpdate "];
+                }
+                if (ic && cache &&
+                    [v respondsToSelector:NSSelectorFromString(@"iconImageCache:didUpdateImageForIcon:")]) {
+                    ((void (*)(id, SEL, id, id))objc_msgSend)(
+                        v, NSSelectorFromString(@"iconImageCache:didUpdateImageForIcon:"), cache, ic);
+                    [st appendString:@"cacheDidUpdate "];
                 }
             }
             TBLog(@"时钟刷新：%@", st);
