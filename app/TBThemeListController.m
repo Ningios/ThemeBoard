@@ -365,48 +365,55 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 #pragma mark - 删除
 
 - (void)tableView:(UITableView *)tableView willBeginEditingRowAtIndexPath:(NSIndexPath *)indexPath {
-    // 系统的左滑红色块是直角的，跟玻璃卡片不搭；等它布局完再套圆角
+    // 只在这一次滑动的那一行里做样式，绝不碰表格其它部分
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [self roundSwipeActionsInView:tableView];
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        UIView *root = cell ? (cell.superview ?: cell) : tableView;
+        if (!root) return;
+        UIView *pull = [self findSwipePullView:root depth:0];
+        if (pull) [self styleSwipePullView:pull];
     });
 }
 
-- (void)roundSwipeActionsInView:(UIView *)root {
-    CGFloat scale = [UIScreen mainScreen].scale;
+- (UIView *)findSwipePullView:(UIView *)root depth:(NSInteger)depth {
+    if (depth > 4) return nil;
     for (UIView *v in root.subviews) {
-        NSString *cls = NSStringFromClass(v.class);
+        if ([NSStringFromClass(v.class) containsString:@"UISwipeActionPullView"]) return v;
+        UIView *r = [self findSwipePullView:v depth:depth + 1];
+        if (r) return r;
+    }
+    return nil;
+}
 
-        if ([cls containsString:@"UISwipeActionPullView"]) {
-            // 系统那层是实心红：清掉，改成玻璃底 + 红字
-            v.backgroundColor = [UIColor clearColor];
-            v.layer.cornerRadius = 20;
-            v.layer.cornerCurve = kCACornerCurveContinuous;
-            v.clipsToBounds = YES;
-        } else if ([cls containsString:@"UISwipeActionButton"] || [v isKindOfClass:[UIButton class]]) {
-            v.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
-                                               [UIColor colorWithWhite:1 alpha:0.14]);
-            v.layer.cornerRadius = 20;
-            v.layer.cornerCurve = kCACornerCurveContinuous;
-            v.clipsToBounds = YES;
-            v.layer.borderWidth = 1.0 / scale;
-            v.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                                 [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
-            [self tintSwipeLabelsRed:v];
-        }
-        [self roundSwipeActionsInView:v];
+- (void)styleSwipePullView:(UIView *)pull {
+    CGFloat scale = [UIScreen mainScreen].scale;
+    pull.backgroundColor = [UIColor clearColor];
+    pull.layer.cornerRadius = 20;
+    pull.layer.cornerCurve = kCACornerCurveContinuous;
+    pull.clipsToBounds = YES;
+
+    for (UIView *btn in pull.subviews) {
+        btn.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                             [UIColor colorWithWhite:1 alpha:0.14]);
+        btn.layer.cornerRadius = 20;
+        btn.layer.cornerCurve = kCACornerCurveContinuous;
+        btn.clipsToBounds = YES;
+        btn.layer.borderWidth = 1.0 / scale;
+        btn.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                               [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
+        [self paintRedLabels:btn depth:0];
     }
 }
 
-- (void)tintSwipeLabelsRed:(UIView *)v {
+/// 只把删除按钮里的文字染红；不设 tintColor（会向下继承，染红整张表）
+- (void)paintRedLabels:(UIView *)v depth:(NSInteger)depth {
+    if (depth > 3) return;
     for (UIView *sub in v.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
             ((UILabel *)sub).textColor = [UIColor systemRedColor];
-        } else if ([sub isKindOfClass:[UIImageView class]] || [sub isKindOfClass:[UIButton class]]) {
-            sub.tintColor = [UIColor systemRedColor];
-            [self tintSwipeLabelsRed:sub];
         } else {
-            [self tintSwipeLabelsRed:sub];
+            [self paintRedLabels:sub depth:depth + 1];
         }
     }
 }
