@@ -316,6 +316,7 @@ static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys);
 static UIImage *TBImageForBundle(NSString *bid);      // 前置：时钟判定要用
 static UIImage *TBClockRoundedFace(UIImage *img);
 static UIImage *TBClockMaterialFace(UIView *v);
+static UIImage *TBClockMaterialFaceCached(UIView *v);
 static BOOL TBThemeHasClockMaterial(void);
 static UIImage *TBKeyOutCornerColor(UIImage *img);
 
