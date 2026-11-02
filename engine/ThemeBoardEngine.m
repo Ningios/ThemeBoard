@@ -590,9 +590,8 @@ static UIImage *TBCalendarCompositeImage(UIImage *bg) {
 static UIImage *TBImageForBundle(NSString *bid) {
     if (!bid.length || !TBEnabled()) return nil;
     if (TBSafeMode()) return nil;   // 安全模式：只记日志，绝不改图
-    // 动态时钟图标由 SBHClockApplicationIconImageView 实时合成（表盘素材 + 系统指针），
-    // 不能再用 IconBundles 里的静态时钟图，否则会和表盘叠成一张（表现为黑钟/双底图）。
-    if ([bid isEqualToString:@"com.apple.mobiletimer"]) return nil;
+    // 时钟：表盘当普通图标图交给系统（IconBundles 优先，没有则用 Bundles 的表盘素材），
+    // 指针/轴心由 imageSet 注入 —— 与 SnowBoard 一致。
 
     [gLock lock];
     TBLoadIndex();
@@ -1642,8 +1641,11 @@ static BOOL TBIsThemedResourceName(NSString *name) {
     // 指针一律由系统自己画（黑时针 + 黑分针 + 橙秒针），与官方效果一致。
     if ([name rangeOfString:@"Hand"].location != NSNotFound) return NO;
     if ([name rangeOfString:@"Dot"].location != NSNotFound) return NO;
+    // 注意：ClockIcon / SBClock 不再做资源重定向。
+    // 时钟改走 SnowBoard 的方案：表盘当图标图交给系统，指针/轴心通过
+    // makeImageSetForMetrics: 注入（见 tb_makeImageSet）。
     static NSArray<NSString *> *prefixes = nil;
-    if (!prefixes) prefixes = @[@"ClockIcon", @"ANEM", @"SBClock", @"CalendarIcon", @"Keypad"];
+    if (!prefixes) prefixes = @[@"ANEM", @"CalendarIcon", @"Keypad"];
     for (NSString *p in prefixes) {
         if ([name hasPrefix:p]) return YES;
     }
@@ -1759,6 +1761,51 @@ static void tb_setupIconWithBundle(id self, SEL _cmd, id bundle) {
 // + makeSecondsHandLayerWithImageSet:）。我们接管背景图后必须同时把这些层置空，
 // 否则会出现"主题图自带一根秒针 + 系统又叠一根"的双指针。
 
+#pragma mark - 时钟图像集注入（SnowBoard 同款：makeImageSetForMetrics:）
+
+typedef id (*ClockImageSetFn)(id, SEL, void *);
+static ClockImageSetFn o_makeImageSet, o_imageSet;
+
+static void TBApplyClockImagesToSet(id set) {
+    if (!set || !TBEnabled() || TBSafeMode()) return;
+    // 主题素材 → 图像集成员（名字与 SnowBoard 反编译里一致）
+    struct { NSString *key; NSString *res; } map[] = {
+        {@"hours",         @"ClockIconHourHand"},
+        {@"minutes",       @"ClockIconMinuteHand"},
+        {@"seconds",       @"ClockIconSecondHand"},
+        {@"hourMinuteDot", @"ClockIconBlackDot"},
+        {@"secondDot",     @"ClockIconRedDot"},
+    };
+    NSInteger applied = 0;
+    for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        UIImage *img = TBResourceImage(map[i].res);
+        if (!img) continue;
+        SEL setter = NSSelectorFromString([NSString stringWithFormat:@"set%@%@:",
+                                          [[map[i].key substringToIndex:1] uppercaseString],
+                                          [map[i].key substringFromIndex:1]]);
+        if (![set respondsToSelector:setter]) continue;
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(set, setter, img);
+            applied++;
+        } @catch (NSException *e) { }
+    }
+    if (applied > 0) {
+        TBLogOnce(@"clockset", @"时钟图像集注入 %ld 项（指针/轴心来自主题素材）", (long)applied);
+    }
+}
+
+static id tb_makeImageSet(id self, SEL _cmd, void *metrics) {
+    id set = o_makeImageSet ? o_makeImageSet(self, _cmd, metrics) : nil;
+    TBApplyClockImagesToSet(set);
+    return set;
+}
+
+static id tb_imageSet(id self, SEL _cmd, void *metrics) {
+    id set = o_imageSet ? o_imageSet(self, _cmd, metrics) : nil;
+    TBApplyClockImagesToSet(set);
+    return set;
+}
+
 #pragma mark - 安装
 
 static BOOL gDoneImageHooks = NO;      // UIImage / NSBundle 那组
@@ -1837,6 +1884,15 @@ static void TBInstall(void) {
     // 桌面时钟图标（运行时检测）
     if (clockView && !gDoneClock) {
         gDoneClock = YES;
+        // SnowBoard 同款：接管图像集构建，把主题的指针/轴心注入进去
+        if (TBHasMethod(clockView, @"makeImageSetForMetrics:")) {
+            o_makeImageSet = (ClockImageSetFn)TBHookClass(clockView, @"makeImageSetForMetrics:",
+                                                          (IMP)tb_makeImageSet, "时钟图像集1");
+        }
+        if (TBHasMethod(clockView, @"imageSetForMetrics:")) {
+            o_imageSet = (ClockImageSetFn)TBHookClass(clockView, @"imageSetForMetrics:",
+                                                      (IMP)tb_imageSet, "时钟图像集2");
+        }
         // 不接管 iconImageWithImageInfo:includingMask:
         // 那一层返回的是「表盘+指针」的合成图，接管后系统画的指针会变形
         //（三根一样粗、橙秒针消失）。改由资源重定向提供 ClockIconBackgroundSquare，
