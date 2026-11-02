@@ -722,26 +722,30 @@ static BOOL TBClockShouldHideHands(void) {
     if (!TBEnabled() || TBSafeMode()) return NO;
     NSString *theme = TBActiveTheme();
     if (!theme.length) return NO;                  // 没主题：系统表盘 + 系统指针
-    // 用户手动指定优先（设置 → 隐藏时钟指针）
-    id hv = TBPref(@"HideClockHands");
-    if (hv) return [hv boolValue];
 
-    // 规则（按素材来源判断，不再靠图片内容去猜）：
-    //  · 主题 Bundles 里有表盘素材 ClockIconBackgroundSquare.png → 用素材 + 系统指针
-    //  · 只有 IconBundles/com.apple.mobiletimer.png（普通静态图标，一般自带静态指针）
-    //    → 隐藏系统指针
-    BOOL hide = NO;
-    if (!TBThemeHasClockMaterial()) {
+    // 手动开关只用于「强制隐藏」（打开才生效，关掉 = 自动）
+    id hv = TBPref(@"HideClockHands");
+    BOOL forced = (hv && [hv boolValue]);
+
+    // 自动规则（按表盘实际来源）：
+    //  · 有 Bundles 表盘素材 ClockIconBackgroundSquare.png → 用素材，指针显示系统指针
+    //    （即使同时也有 IconBundles 静态图标，也优先用 Bundles 素材）
+    //  · 没有 Bundles 素材，只有 IconBundles 静态图标 → 用静态图标，隐藏系统指针
+    //  · 都没有 → 系统原样，指针照常
+    BOOL hasMaterial = TBThemeHasClockMaterial();
+    BOOL hasStatic = NO;
+    if (!hasMaterial) {
         [gLock lock];
         TBLoadIndex();
-        BOOL hasStatic = gIndex[@"com.apple.mobiletimer"] != nil;
+        hasStatic = gIndex[@"com.apple.mobiletimer"] != nil;
         [gLock unlock];
-        hide = hasStatic;
     }
+    BOOL hide = forced || (!hasMaterial && hasStatic);
     TBLogOnce([@"clockhands|" stringByAppendingFormat:@"%@|%d", theme, (int)hide],
-              @"时钟指针判定：%@（素材来自 %@）",
-              hide ? @"隐藏" : @"用系统指针",
-              TBThemeHasClockMaterial() ? @"Bundles" : @"IconBundles");
+              @"时钟指针判定：%@（表盘=%@%@）",
+              hide ? @"隐藏指针" : @"显示系统指针",
+              hasMaterial ? @"Bundles 素材" : (hasStatic ? @"IconBundles 静态图标" : @"无，系统原样"),
+              forced ? @"，手动强制隐藏" : @"");
     return hide;
 }
 
