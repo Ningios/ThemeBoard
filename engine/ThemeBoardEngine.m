@@ -1613,16 +1613,6 @@ static void tb_setupIconWithBundle(id self, SEL _cmd, id bundle) {
 // + makeHoursHandLayerWithImageSet: / makeMinutesHandLayerWithImageSet: /
 // + makeSecondsHandLayerWithImageSet:）。我们接管背景图后必须同时把这些层置空，
 // 否则会出现"主题图自带一根秒针 + 系统又叠一根"的双指针。
-typedef id (*ClockLayerFn)(id, SEL, id);
-static ClockLayerFn o_clockHandLayer[3];
-
-static id tb_clockHandLayer(id self, SEL _cmd, id imageSet) {
-    // 保留系统指针层：直接调用原实现，让系统正常生成指针
-    for (int i = 0; i < 3; i++) {
-        if (o_clockHandLayer[i]) return o_clockHandLayer[i](self, _cmd, imageSet);
-    }
-    return nil;
-}
 
 #pragma mark - 安装
 
@@ -1706,18 +1696,6 @@ static void TBInstall(void) {
         // 那一层返回的是「表盘+指针」的合成图，接管后系统画的指针会变形
         //（三根一样粗、橙秒针消失）。改由资源重定向提供 ClockIconBackgroundSquare，
         // 让系统自己合成底图与指针 —— 与 SnowBoard 一致。
-        if (TBHasMethod(clockView, @"makeHoursHandLayerWithImageSet:")) {
-            o_clockHandLayer[0] = (ClockLayerFn)TBHookClass(clockView, @"makeHoursHandLayerWithImageSet:",
-                                                            (IMP)tb_clockHandLayer, "时钟时针层");
-        }
-        if (TBHasMethod(clockView, @"makeMinutesHandLayerWithImageSet:")) {
-            o_clockHandLayer[1] = (ClockLayerFn)TBHookClass(clockView, @"makeMinutesHandLayerWithImageSet:",
-                                                            (IMP)tb_clockHandLayer, "时钟分针层");
-        }
-        if (TBHasMethod(clockView, @"makeSecondsHandLayerWithImageSet:")) {
-            o_clockHandLayer[2] = (ClockLayerFn)TBHookClass(clockView, @"makeSecondsHandLayerWithImageSet:",
-                                                            (IMP)tb_clockHandLayer, "时钟秒针层");
-        }
     }
 
     // PSSpecifier 设置页图标（iOS 17.2+ 使用此通道）
