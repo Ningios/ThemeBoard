@@ -1291,42 +1291,25 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                     // 缓存时刻的针，写进 layer.contents 会和活动的指针层叠成两套（角度还不同）。
                     // 【也不能只清空】—— 系统只在图标图变化时才写 → 空白。
                     // 做法：先把那张图导出一次供确认，然后清掉映射并逼系统自己重算。
-                    // 【无素材 / 恢复默认】的做法：
-                    //  用【系统自己生成的那张时钟图标图】当表盘（它本身就是动态生成的、会走时），
-                    //  并把指针层隐藏 —— 图里已经画好指针，所以既不会重影，也不会空白。
-                    //  （之前试过写 contentsImage：那张是缓存过的静态合成图 → 两套针；
-                    //    也试过清空：系统不会自己重画 → 空白。）
-                    UIImage *sysIcon = nil;
-                    @try {
-                        id cache = [v valueForKey:@"_iconImageCache"];
-                        id ic = [v valueForKey:@"icon"];
-                        if (cache && ic && o_imageForIcon) {
-                            sysIcon = o_imageForIcon(cache, NSSelectorFromString(@"imageForIcon:"), ic);
-                        }
-                    } @catch (NSException *e) { }
-                    if (sysIcon && sysIcon.CGImage) {
-                        ((UIView *)v).layer.contents = (__bridge id)sysIcon.CGImage;
-                        @try { [v setValue:sysIcon forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
-                        ((UIView *)v).layer.contentsGravity = kCAGravityResize;
-                        for (CALayer *l in ((UIView *)v).layer.sublayers) {
-                            l.hidden = YES;          // 图里已有指针 → 图层隐藏，避免两套
-                            l.opacity = 0.0f;
-                        }
-                        TBLog(@"时钟表盘：无素材 → 用系统动态图标图当表盘并隐藏指针层 %.0fx%.0f",
-                              sysIcon.size.width, sysIcon.size.height);
-                    } else {
-                        ((UIView *)v).layer.contents = nil;
-                        for (CALayer *l in ((UIView *)v).layer.sublayers) {
-                            l.hidden = NO;
-                            l.opacity = 1.0f;
-                        }
-                        if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
-                            ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
-                        }
-                        TBLog(@"时钟表盘：无素材且取不到系统图标图 → 清空");
+                    // 【无素材 / 恢复默认】= 显示系统自己的时钟（SB 也是这个行为）。
+                    // 做法：把我们写过的东西全部去掉 —— 表盘清空、指针层整组移除、指针成员
+                    // 已还原成系统原图 —— 然后让系统整套重建（它只会用系统自己的表盘和指针）。
+                    // 不能写系统那张 contentsImage（缓存静态图 → 两套针），也不能留着我们的图
+                    //（会残留主题时钟），更不能只清空不重建（系统不重画 → 空白）。
+                    ((UIView *)v).layer.contents = nil;
+                    @try { [v setValue:nil forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
+                    for (CALayer *l in [((UIView *)v).layer.sublayers copy]) {
+                        [l removeFromSuperlayer];
+                    }
+                    if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
+                        ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
+                    }
+                    if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
+                        ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
                     }
                     [v setNeedsLayout];
                     [v setNeedsDisplay];
+                    TBLog(@"时钟表盘：无素材 → 清空表盘并移除指针层，交回系统重建");
                 }
             }
         } @catch (NSException *e) { }
