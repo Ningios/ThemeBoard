@@ -2366,17 +2366,23 @@ static id tb_makeImageSet(id self, SEL _cmd, void *metrics) {
     if (TBClockShouldHideHands()) {
         TBClearClockHandsInSet(set);          // 判定隐藏 → 全部置透明，没针可画
     } else {
-        // 否则：主题有时针/分针素材就用主题的（缩放到系统同尺寸），
-        // 主题基本都没有秒针素材，秒针保持系统自己的
-        TBApplyClockImagesToSet(set);
+        id uv = TBPref(@"UseThemeClockHands");
+        if (uv && [uv boolValue]) {
+            // 开关打开才用主题的针（主题针的锚点/朝向和系统的未必一致，默认不用）
+            TBApplyClockImagesToSet(set);
+        }
     }
     return set;
 }
 
 static id tb_imageSet(id self, SEL _cmd, void *metrics) {
     id set = o_imageSet ? o_imageSet(self, _cmd, metrics) : nil;
-    if (TBClockShouldHideHands()) TBClearClockHandsInSet(set);
-    else TBApplyClockImagesToSet(set);
+    if (TBClockShouldHideHands()) {
+        TBClearClockHandsInSet(set);
+    } else {
+        id uv = TBPref(@"UseThemeClockHands");
+        if (uv && [uv boolValue]) TBApplyClockImagesToSet(set);
+    }
     return set;
 }
 
