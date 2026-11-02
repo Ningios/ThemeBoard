@@ -445,8 +445,19 @@ static void TBSwipeApplyToPullView(UIView *pull) {
     // 不内缩就会比卡片高、盖住上下两行。这里按父视图高度算，重复布局也不会越缩越小。
     UIView *sup = pull.superview;
     if (sup && sup.bounds.size.height > 8) {
-        pull.frame = CGRectMake(pull.frame.origin.x, 2,
-                                pull.frame.size.width, sup.bounds.size.height - 4);
+        // 和左边的卡片完全对齐：卡片是 TBGlassCellBG(12) + card 上下各内缩 2pt，
+        // 即 左边距 12、右边距 12、上边距 2、下边距 2、圆角 20。
+        CGFloat w = sup.bounds.size.width;
+        CGFloat h = sup.bounds.size.height;
+        CGFloat x = pull.frame.origin.x;
+        CGFloat maxRight = w - 12;                 // 卡片右边
+        if (CGRectGetMaxX(pull.frame) > maxRight) { // 块右边超出卡片右边 → 收回来
+            x = MIN(x, MAX(0, maxRight - 1));
+        }
+        CGFloat newW = MAX(0, maxRight - x);
+        if (newW > 1) {
+            pull.frame = CGRectMake(x, 2, newW, h - 4);
+        }
     }
     // 圆角玻璃由【容器自己】画：系统的 action 底色是一块方图，罩不住圆角，
     // 所以底色改成透明，整块玻璃 + 圆角 + 边框都在这里做。
