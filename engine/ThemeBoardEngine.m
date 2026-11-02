@@ -279,6 +279,23 @@ static NSString *TBStripName(NSString *file) {
 static void TBLoadIndex(void);          // 前置声明：TBResourceImage 会用到
 
 static NSString *gBundleResTheme;
+static void TBLoadBundleResources(NSString *themeDir);
+
+/// 取当前主题的 Bundles 资源表。
+/// 关键：**没有主题时必须清空** —— 之前只在有主题时重建，切回默认后表里还留着
+/// 上一个主题的素材，于是"主题没有 ClockIconBackgroundSquare"永远判成有 → 时钟残留。
+static NSMutableDictionary *TBThemeBundleRes(void) {
+    NSString *theme = TBActiveTheme();
+    NSString *dir = theme.length ? TBThemeDir(theme) : nil;
+    if (!dir) {
+        gBundleRes = nil;
+        gBundleResTheme = nil;
+        return nil;
+    }
+    TBLoadBundleResources(dir);
+    return gBundleRes;
+}
+
 static void TBLoadBundleResources(NSString *themeDir) {
     // 之前只要建过一次就永不重建 —— 换主题后会一直用旧主题的资源表，
     // 导致「主题无此图」的假阴性（时钟底图就是这么丢的）。改为按主题目录缓存。
@@ -498,10 +515,12 @@ static UIImage *TBResourceImage(NSString *name) {
     if (!name.length || TBSafeMode() || !TBEnabled()) return nil;
     [gLock lock];
     TBLoadIndex();
-    NSString *theme = TBActiveTheme();
-    NSString *dir = theme.length ? TBThemeDir(theme) : nil;
-    if (dir) TBLoadBundleResources(dir);
-    NSMutableDictionary *res = gBundleRes;
+    NSString *dir = nil;
+    {
+        NSString *theme = TBActiveTheme();
+        dir = theme.length ? TBThemeDir(theme) : nil;
+    }
+    NSMutableDictionary *res = TBThemeBundleRes();   // 无主题 → 清空并返回 nil
     [gLock unlock];
     if (!res.count) return nil;
 
@@ -1760,10 +1779,7 @@ static NSString *TBDynamicResourcePath(NSString *bid) {
     NSString *prefix = [bid isEqualToString:@"com.apple.mobiletimer"] ? @"clockicon" : @"calendaricon";
     [gLock lock];
     TBLoadIndex();
-    NSString *theme = TBActiveTheme();
-    NSString *dir = theme.length ? TBThemeDir(theme) : nil;
-    if (dir) TBLoadBundleResources(dir);
-    NSMutableDictionary *res = gBundleRes;
+    NSMutableDictionary *res = TBThemeBundleRes();   // 无主题 → 清空
     [gLock unlock];
     if (!res.count) return nil;
 
