@@ -871,35 +871,52 @@ static BOOL TBApplyThemeToIconView(id self) {
     return NO;
 }
 
-static NSInteger TBHealViewTree(UIView *v, NSInteger depth) {
+static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
+
+static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *iconsOut) {
     if (!v || depth > 12) return 0;
     NSInteger fixed = 0;
-    // SnowBoard 的刷新流程：先丢掉视图自己缓存的图，再让系统重新合成。
-    // 缺了「丢缓存」这一步，换回系统主题时时钟底图/指针会赖着不走。
-    if ([v respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
-        @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"clearCachedImages")); }
-        @catch (NSException *e) { }
-    } else if ([v respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
-        @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_clearCachedImages")); }
-        @catch (NSException *e) { }
-    }
-    if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
-        @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages")); }
-        @catch (NSException *e) { }
-    }
-    if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
-        @try { ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO); }
-        @catch (NSException *e) { }
-    }
-    if ([v respondsToSelector:NSSelectorFromString(@"_updateOverlayImage")]) {
-        @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_updateOverlayImage")); }
-        @catch (NSException *e) { }
+    // SnowBoard 的刷新流程（丢缓存 → 重新取图）。注意范围必须严格限制在
+    // 「承载图标图片的视图」上：对任意视图乱调这些私有方法会直接搞崩 SpringBoard
+    //（0.13.45 就是这么注销的）。
+    NSString *cls = NSStringFromClass([v class]);
+    BOOL isIconImage = ([cls rangeOfString:@"IconImageView"].location != NSNotFound) ||
+                       ([cls rangeOfString:@"Clock"].location != NSNotFound);
+    if (isIconImage) {
+        if ([v respondsToSelector:NSSelectorFromString(@"clearCachedImages")]) {
+            @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"clearCachedImages")); }
+            @catch (NSException *e) { }
+        } else if ([v respondsToSelector:NSSelectorFromString(@"_clearCachedImages")]) {
+            @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_clearCachedImages")); }
+            @catch (NSException *e) { }
+        }
+        if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
+            @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages")); }
+            @catch (NSException *e) { }
+        }
+        if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
+            @try { ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO); }
+            @catch (NSException *e) { }
+        }
+        if ([v respondsToSelector:NSSelectorFromString(@"_updateOverlayImage")]) {
+            @try { ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_updateOverlayImage")); }
+            @catch (NSException *e) { }
+        }
     }
     if ([v respondsToSelector:NSSelectorFromString(@"icon")] ||
         [v respondsToSelector:NSSelectorFromString(@"_iconImageView")]) {
         if (TBApplyThemeToIconView(v)) fixed++;
+        if (iconsOut && iconsOut.count < 250) {
+            @try {
+                SEL iconSel = NSSelectorFromString(@"icon");
+                if ([v respondsToSelector:iconSel]) {
+                    id icon = ((id (*)(id, SEL))objc_msgSend)(v, iconSel);
+                    if (icon && ![iconsOut containsObject:icon]) [iconsOut addObject:icon];
+                }
+            } @catch (NSException *e) { }
+        }
     }
-    for (UIView *sub in v.subviews) fixed += TBHealViewTree(sub, depth + 1);
+    for (UIView *sub in v.subviews) fixed += TBHealViewTree(sub, depth + 1, iconsOut);
     return fixed;
 }
 
@@ -909,11 +926,21 @@ static void TBHealAllIconViews(void) {
     gHealDepth++;
     @try {
         NSInteger fixed = 0;
+        NSMutableArray *seen = [NSMutableArray array];
         for (UIView *w in [[UIApplication sharedApplication] windows]) {
-            fixed += TBHealViewTree(w, 0);
+            fixed += TBHealViewTree(w, 0, seen);
             if (fixed > 400) break;   // 上限保护
         }
-        if (fixed > 0) TBLog(@"换主题后重贴 %ld 个图标视图", (long)fixed);
+        if (fixed > 0) TBLog(@"换主题后重贴 %ld 个图标视图（%lu 个图标）", (long)fixed, (unsigned long)seen.count);
+
+        // 只清「屏幕上真正碰到」的这些图标，避免 purgeAllCachedImages 一次清掉
+        // 上千张图、紧接着全量重绘造成尖峰（曾被系统看门狗杀掉）。
+        if (seen.count > 0) {
+            [gLock lock];
+            NSArray *cacheList = gCaches.allObjects;
+            [gLock unlock];
+            for (NSValue *cv in cacheList) { TBPurgeIcons(cv, seen); }
+        }
     } @catch (NSException *e) { }
     gHealDepth--;
 }
@@ -2018,8 +2045,9 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
         //（时钟底图赖着不走就是这个原因）。开关只用来限制「全量清」的规模，
         // 不再一票否决；这里始终按上限分批清。
         if (icons.count == 0) {
-                for (NSValue *v in cacheList) { TBPurgeIcons(v, nil); }
-                TBLog(@"清缓存（无图标列表）");
+                // 拿不到图标列表时不做全量清缓存：一次性清掉上千张图会引发重绘尖峰，
+                // 交给下面的窗口遍历按需清理（只碰屏幕上的几十个图标）。
+                TBLog(@"拿不到图标列表：跳过全量清缓存，改由窗口遍历按需清理");
             } else {
                 const NSUInteger chunk = 30;
                 NSUInteger i = 0;
