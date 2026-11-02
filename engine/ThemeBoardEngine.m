@@ -1277,17 +1277,29 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                     [(UIView *)v setNeedsDisplay];
                     TBLog(@"时钟表盘：已强制写入 %.0fx%.0f", face.size.width, face.size.height);
                 } else {
-                    // 主题没有表盘素材 / 已恢复系统默认：什么都不写！
-                    // 系统原实现返回的那张可能自带指针，写进 layer.contents 会和指针图层
-                    // 叠成两套针（这就是"恢复默认多一套指针"）。只清掉我们写过的，让系统重建。
-                    ((UIView *)v).layer.contents = nil;
-                    @try { [v setValue:nil forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
+                    // 主题没有表盘素材 / 已恢复系统默认：写回【系统原实现那张合成图】。
+                    // 注意：清空交回系统是不行的——系统只会在图标图变化时才写，会一直空白。
+                    // 指针成员此时也已经被还原成系统原图，所以合成图上的针和指针图层
+                    // 是同一套系统的针，重叠起来不会出现两套（之前多针是因为图层还留着主题针）。
+                    SEL cs = NSSelectorFromString(@"contentsImage");
+                    UIImage *sysFace = nil;
+                    if (o_contentsImageLive) sysFace = o_contentsImageLive(v, cs);
+                    if (sysFace && sysFace.CGImage) {
+                        ((UIView *)v).layer.contents = (__bridge id)sysFace.CGImage;
+                        @try { [v setValue:sysFace forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
+                        ((UIView *)v).layer.contentsGravity = kCAGravityResize;
+                    }
+                    // 让系统的指针层按还原后的成员重建
                     if ([v respondsToSelector:NSSelectorFromString(@"updateUnanimated")]) {
                         ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateUnanimated"));
                     }
+                    if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
+                        ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
+                    }
                     [v setNeedsLayout];
                     [v setNeedsDisplay];
-                    TBLog(@"时钟表盘：无素材 → 清除自写表盘，交回系统");
+                    TBLog(@"时钟表盘：无素材 → 写回系统合成图 %.0fx%.0f 并重建指针",
+                          sysFace.size.width, sysFace.size.height);
                 }
             }
         } @catch (NSException *e) { }
