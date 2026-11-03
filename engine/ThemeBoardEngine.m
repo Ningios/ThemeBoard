@@ -1308,12 +1308,8 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             } else {
                 [st appendString:@"clear.none "];
             }
-            // ③ updateClockImages：现在系统真的有了（TBInstallSelfClockUpdateMethod 自造的那个）
             if ([v respondsToSelector:NSSelectorFromString(@"updateClockImages")]) {
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateClockImages"));
-                [st appendString:@"clockUpdate "];
-            } else {
-                [st appendString:@"clockUpdate.none "];
             }
             if ([v respondsToSelector:NSSelectorFromString(@"updateImageAnimated:")]) {
                 ((void (*)(id, SEL, BOOL))objc_msgSend)(v, NSSelectorFromString(@"updateImageAnimated:"), NO);
@@ -1323,35 +1319,71 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
                 ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"_updateOverlayImage"));
                 [st appendString:@"overlay "];
             }
-            // 序列末尾（照 SnowBoard refreshIconView:fully:YES 的最后两步）：
-            //   ① prepareForReuse
-            //   ② 重设图标：优先 _setIcon:animated:（icon, BOOL），
-            //      否则 setIcon:location:animated:（icon, 位置, BOOL），都没有就什么都不做。
-            // 表盘不再由我们写进 layer.contents（faceWrite 已删除）：
-            // 完全交给系统 —— 它重画时会重新问 -contentsImage，我们的钩子有主题就返回
-            // 主题表盘、否则返回原实现（天然还原、零残留）。
-            if ([v respondsToSelector:NSSelectorFromString(@"prepareForReuse")]) {
-                ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"prepareForReuse"));
-                [st appendString:@"prepareForReuse "];
-            }
+            // SnowBoard refreshIconView:fully:YES 的最后一步：把 icon 重新设一遍。
+            // 这一下才会让系统重建时钟的组件（表盘才会跟着主题变）。
             {
                 id ic = nil;
-                if ([v respondsToSelector:iconSel]) {
-                    ic = ((id (*)(id, SEL))objc_msgSend)(v, iconSel);
+                if ([v respondsToSelector:NSSelectorFromString(@"icon")]) {
+                    ic = ((id (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"icon"));
                 }
                 SEL a = NSSelectorFromString(@"_setIcon:animated:");
-                SEL b = NSSelectorFromString(@"setIcon:location:animated:");
+                SEL b = NSSelectorFromString(@"setIcon:animated:");
                 if (ic && [v respondsToSelector:a]) {
                     ((void (*)(id, SEL, id, BOOL))objc_msgSend)(v, a, ic, NO);
-                    [st appendString:@"_setIcon:animated: "];
+                    [st appendString:@"setIcon(priv) "];
                 } else if (ic && [v respondsToSelector:b]) {
-                    id loc = [v respondsToSelector:NSSelectorFromString(@"location")]
-                            ? ((id (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"location")) : nil;
-                    ((void (*)(id, SEL, id, id, BOOL))objc_msgSend)(v, b, ic, loc, NO);
-                    [st appendString:@"setIcon:location:animated: "];
+                    ((void (*)(id, SEL, id, BOOL))objc_msgSend)(v, b, ic, NO);
+                    [st appendString:@"setIcon "];
                 } else {
                     [st appendString:@"setIcon.none "];
                 }
+            }
+            // 只给时钟这一个视图硬贴一次表盘（其他图标不动）。
+            // 系统缓存不会自己重算，这是本机唯一能让表盘立刻跟着主题变的手段。
+            {
+                UIImage *face = TBClockMaterialFace((UIView *)v);
+                if (face && face.CGImage) {
+                    ((UIView *)v).layer.contents = (__bridge id)face.CGImage;
+                    @try { [v setValue:face forKey:@"mappedContentsImage"]; } @catch (NSException *e) { }
+                    ((UIView *)v).layer.contentsGravity = kCAGravityResize;
+                    [(UIView *)v setNeedsDisplay];
+                    [st appendString:@"faceWrite "];
+                }
+            }
+            // 方案 D：用系统自己的"图标图已更新"回调逼它重算合成图
+            {
+                id ic = nil;
+                if ([v respondsToSelector:NSSelectorFromString(@"icon")]) {
+                    ic = ((id (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"icon"));
+                }
+                id cache = nil;
+                @try { cache = [v valueForKey:@"_iconImageCache"]; } @catch (NSException *e) { }
+                if (ic && [v respondsToSelector:NSSelectorFromString(@"iconImageDidUpdate:")]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(v, NSSelectorFromString(@"iconImageDidUpdate:"), ic);
+                    [st appendString:@"imgDidUpdate "];
+                }
+                if (ic && cache &&
+                    [v respondsToSelector:NSSelectorFromString(@"iconImageCache:didUpdateImageForIcon:")]) {
+                    ((void (*)(id, SEL, id, id))objc_msgSend)(
+                        v, NSSelectorFromString(@"iconImageCache:didUpdateImageForIcon:"), cache, ic);
+                    [st appendString:@"cacheDidUpdate "];
+                }
+            }
+            // 最后三个候选（方法表里有、我们还没试过）
+            if (!TBClockMaterialFace((UIView *)v)) {
+                // 无素材/恢复默认：试着让系统把"已显示的图"清掉、自己重画
+                if ([v respondsToSelector:NSSelectorFromString(@"setDisplayedImage:")]) {
+                    @try {
+                        ((void (*)(id, SEL, id))objc_msgSend)(v, NSSelectorFromString(@"setDisplayedImage:"), nil);
+                        [st appendString:@"setDisplayedImage(nil) "];
+                    } @catch (NSException *e) { }
+                }
+            }
+            if ([v respondsToSelector:NSSelectorFromString(@"updateUnanimated")]) {
+                @try {
+                    ((void (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"updateUnanimated"));
+                    [st appendString:@"updateUnanimated "];
+                } @catch (NSException *e) { }
             }
             TBLog(@"时钟刷新：%@", st);
         } @catch (NSException *e) { }
@@ -2530,37 +2562,6 @@ static Class TBClassDeclaring(Class cls, SEL sel) {
 }
 
 
-// ---- 自造 updateClockImages（照 SnowBoard：iOS 17.2 的
-//      SBHClockApplicationIconImageView 本身【没有】这个方法，所以之前所有
-//      respondsToSelector(@"updateClockImages") 都是 NO、静默空操作。
-//      SnowBoard 的做法是自己 class_addMethod 补上它，方法体重跑原生的
-//      getMetrics: / applyMetrics:（几何 + 表盘重建）。整个过程不写 layer.contents。
-//      结构体布局未知，给足缓冲（SnowBoard 的反编译里是 224B 栈对象，这里给 512B）。
-static void tb_selfUpdateClockImages(id self, SEL _cmd) {
-    unsigned char buf[512];
-    memset(buf, 0, sizeof(buf));
-    SEL gm = NSSelectorFromString(@"getMetrics:");
-    SEL am = NSSelectorFromString(@"applyMetrics:");
-    if ([self respondsToSelector:gm]) ((void (*)(id, SEL, void *))objc_msgSend)(self, gm, buf);
-    if ([self respondsToSelector:am]) ((void (*)(id, SEL, void *))objc_msgSend)(self, am, buf);
-    TBLogOnce(@"clockselfupdate", @"时钟：自造 updateClockImages 已调用");
-}
-
-/// 只在类自己【没有】这个方法时才添加，避免覆盖系统实现
-static void TBInstallSelfClockUpdateMethod(Class clock) {
-    if (!clock) return;
-    SEL sel = NSSelectorFromString(@"updateClockImages");
-    if ([clock instancesRespondToSelector:sel]) {
-        TBLog(@"时钟：系统已自带 updateClockImages，不覆盖");
-        return;
-    }
-    if (class_addMethod(clock, sel, (IMP)tb_selfUpdateClockImages, "v@:")) {
-        TBLog(@"时钟：已用 class_addMethod 新增 updateClockImages");
-    } else {
-        TBLog(@"时钟：class_addMethod updateClockImages 失败");
-    }
-}
-
 /// 安装：优先挂 SBLiveIconImageView（时钟视图的父类，SnowBoard 也是挂这里），
 /// 再兜底挂 SBIconImageView 的同名实现。
 static void TBInstallClockContentsHooks(void) {
@@ -2577,8 +2578,6 @@ static void TBInstallClockContentsHooks(void) {
     // 指针：SnowBoard 同款 makeImageSetForMetrics: 注入（主题有的才替换）
     Class clock = NSClassFromString(@"SBHClockApplicationIconImageView");
     if (clock) {
-        // 先补上系统缺失的 updateClockImages（SnowBoard 同款自造方法）
-        TBInstallSelfClockUpdateMethod(clock);
         if (TBHasMethod(clock, @"makeImageSetForMetrics:")) {
             o_makeImageSet = (ClockImageSetFn)TBHookClass(clock, @"makeImageSetForMetrics:",
                                                           (IMP)tb_makeImageSet, "时钟图像集");
