@@ -30,6 +30,7 @@ static NSMutableDictionary<NSString *, NSString *> *gIndex;
 static NSString *gIndexTheme;
 static NSMutableSet<NSValue *> *gCaches;
 static NSCache *gImageCache;      // 已生成的图标缓存
+static NSMutableDictionary *gFitCache;   // 已按尺寸适配过的图（避免每次调用都重画）
 static NSMutableDictionary<NSString *, NSString *> *gBundleRes;   // 文件名 -> Bundles 里的路径
 static NSLock *gLock;
 static int gProbeCount = 0;      // 探针日志计数（每进程上限）
@@ -836,6 +837,19 @@ static void TBLearnSystemMask(UIImage *sysMasked) {
               sysMasked.size.width, sysMasked.size.height);
 }
 
+/// 带缓存的"按尺寸适配"：同一 bid + 同一尺寸只渲染一次（原来每次调用都重画一张）
+static UIImage *TBFitCached(UIImage *img, TBInfo info, NSString *bid) {
+    if (!img) return nil;
+    if (!bid.length) return TBFitImage(img, info);
+    NSString *k = [NSString stringWithFormat:@"%@|%.0fx%.0f|%.1f", bid, info.size.width, info.size.height, info.scale];
+    if (!gFitCache) gFitCache = [NSMutableDictionary dictionary];
+    UIImage *c = gFitCache[k];
+    if (c) return c;
+    UIImage *out = TBFitImage(img, info);
+    if (out) gFitCache[k] = out;
+    return out;
+}
+
 static UIImage *TBImageForBundle(NSString *bid) {
     if (!bid.length || !TBEnabled()) return nil;
     if (TBSafeMode()) return nil;   // 安全模式：只记日志，绝不改图
@@ -1070,7 +1084,7 @@ static id tb_cacheImageForIcon(id self, SEL _cmd, id image, id icon) {
     @try {
         NSString *bid = TBBIDFromIcon(icon);
         if (bid.length && TBApplyIconForDesktop() && !TBSafeMode()) {
-            UIImage *mine = TBFitImage(TBImageForBundle(bid), TBInfoOfCache(self)) ?: TBImageForBundle(bid);
+            UIImage *mine = TBFitCached(TBImageForBundle(bid), TBInfoOfCache(self), bid) ?: TBImageForBundle(bid);
             if (mine) {
                 TBLogOnce([@"cachewrite|" stringByAppendingString:bid], @"cachewrite %@", bid);
                 return o_cacheImageForIcon ? o_cacheImageForIcon(self, _cmd, mine, icon) : nil;
@@ -2979,6 +2993,7 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
     if (!allowPurge) TBLog(@"清缓存开关关闭：跳过逐个清缓存，仍执行图标重取");
 
     [gImageCache removeAllObjects];
+    [gFitCache removeAllObjects];
 
     // 主线程：先（可选）分批清缓存，再通知图标视图重取，最后让 SpringBoard 重排
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -3019,12 +3034,6 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (mySeq != sReloadSeq) return;   // 期间又切了主题，交给最新那次处理
-            TBHealAllIconViews();
-        });
-        // 再补一次：时钟视图有时要等布局完成后才会重新取表盘
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.10 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (mySeq != sReloadSeq) return;
             TBHealAllIconViews();
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
