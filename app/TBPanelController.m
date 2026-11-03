@@ -25,15 +25,20 @@ void TBLog2(NSString *fmt, ...) {
 
 - (instancetype)initWithNibName:(NSString *)nibNameOrNil bundle:(NSBundle *)nibBundleOrNil {
     if ((self = [super initWithNibName:nibNameOrNil bundle:nibBundleOrNil])) {
-        [self tb_setupBase];
+        self.modalPresentationStyle = UIModalPresentationOverFullScreen;   // 不用系统 sheet
+        self.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     }
     return self;
 }
 
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    [self tb_setupBase];      // 必须在这里建 dimView / cardView，早于子类 viewDidLoad 的 addSubview
+}
+
 - (void)tb_setupBase {
-    self.modalPresentationStyle = UIModalPresentationOverFullScreen;   // 不用系统 sheet
-    self.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     self.view.backgroundColor = [UIColor clearColor];
+    if (self.cardView) return;      // 幂等
 
     _dimView = [[UIView alloc] initWithFrame:CGRectZero];
     _dimView.backgroundColor = [UIColor blackColor];
