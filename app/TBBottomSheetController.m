@@ -131,7 +131,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 @property (nonatomic, assign) CGFloat dragStartOffset;
 @property (nonatomic, assign) CGFloat sheetHeight;      // 展开态高度（= 内容高度）
 @property (nonatomic, assign) CGFloat contentHeight;    // 内容实际需要的高度
-@property (nonatomic, assign) NSArray<NSNumber *> *anchors;  // 位移锚点（升序：展开/中间/收起）
+@property (nonatomic, strong) NSArray<NSNumber *> *anchors;  // 位移锚点（升序：展开/中间/收起）
 @property (nonatomic, assign) NSInteger anchorIndex;
 @property (nonatomic, assign) BOOL appeared;
 @property (nonatomic, assign) BOOL closing;
