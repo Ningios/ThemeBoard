@@ -857,6 +857,7 @@ static UIImage *TBFitCached(UIImage *img, TBInfo info, NSString *bid) {
 // 由 SBHIconImageAppearanceStore -imageForIcon:appearance: 记录（iOS 18 才有该类，
 // 17.x 上永远保持 0，行为与旧版完全一致）
 static long gTBAppearanceType = 0;
+static BOOL gTBReloading = NO;   // 全量重载进行中
 static NSMutableDictionary<NSString *, UIImage *> *gDeriveCache = nil;
 static NSObject *TBDeriveLock(void) {
     static NSObject *lock; static dispatch_once_t once;
@@ -947,9 +948,19 @@ static void TBApplyDarkRules(uint8_t *buf, size_t w, size_t h) {
                 subjCount++;
             }
             float t = TBSS(0.68f, 0.93f, L);
-            q[0] = (uint8_t)lrintf(r * (1 - t) + 28 * t);
-            q[1] = (uint8_t)lrintf(g * (1 - t) + 28 * t);
-            q[2] = (uint8_t)lrintf(b * (1 - t) + 30 * t);
+            // 饱和度越高越保留色相：彩色底只压暗，中性白才压成深色
+            float mx = fmaxf(r, fmaxf(g, b)), mn = fminf(r, fminf(g, b));
+            float sat = (mx > 1.f) ? (mx - mn) / mx : 0.f;
+            float w = TBSS(0.08f, 0.30f, sat);
+            float neu_r = r * (1 - t) + 30 * t;
+            float neu_g = g * (1 - t) + 30 * t;
+            float neu_b = b * (1 - t) + 32 * t;
+            float sat_r = r * (1 - 0.45f * t);
+            float sat_g = g * (1 - 0.45f * t);
+            float sat_b = b * (1 - 0.45f * t);
+            q[0] = (uint8_t)lrintf(neu_r * (1 - w) + sat_r * w);
+            q[1] = (uint8_t)lrintf(neu_g * (1 - w) + sat_g * w);
+            q[2] = (uint8_t)lrintf(neu_b * (1 - w) + sat_b * w);
         }
     }
 
@@ -1308,18 +1319,25 @@ static FnStoreImage o_storeImage;
 
 static void TBSetAppearanceType(long t, NSString *why) {
     if (t == gTBAppearanceType) return;
-    // 防抖：任何外观切换至少间隔 1.5s，杜绝和刷新互相触发形成死循环
+    if (gTBReloading) return;                 // 重载中，忽略
     static CFAbsoluteTime sLast = 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - sLast < 1.5) return;
+    if (now - sLast < 1.5) return;            // 防抖
     sLast = now;
 
     gTBAppearanceType = t;
-    // 只清我们自己的三本缓存，绝不发 kNotify（那条会触发全量重载 → 又回到这里）
     @synchronized (TBDeriveLock()) { [gDeriveCache removeAllObjects]; }
     [gImageCache removeAllObjects];
     [gFitCache removeAllObjects];
     TBLog(@"图标外观：%ld（%@）", t, why);
+
+    // 必须清系统那份缓存，否则只有部分图标会变（一半深一半浅）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gTBReloading) return;
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             (__bridge CFStringRef)kNotify, NULL, NULL, true);
+    });
 }
 
 static id tb_storeImageForIcon(id self, SEL _cmd, id icon, id appearance) {
@@ -3365,6 +3383,9 @@ static NSInteger TBInvalidateIconViews(NSArray *icons) {
 
 static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, const void *obj, CFDictionaryRef info) {
     static NSUInteger sReloadSeq = 0;
+    gTBReloading = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ gTBReloading = NO; });
     const NSUInteger mySeq = ++sReloadSeq;
     [gLock lock];
     gIndex = nil;
