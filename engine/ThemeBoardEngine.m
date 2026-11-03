@@ -2596,6 +2596,104 @@ static BOOL gDoneIconImageView = NO;
 static BOOL gDoneSetIcon = NO;
 static BOOL gDoneLayout = NO;
 static BOOL gDoneIFImage = NO;
+static BOOL gDoneNC = NO;
+static int gNCRetries = 0;
+
+#pragma mark - 通知中心图标（NCNotificationContent -icons）
+
+typedef id (*NCContentFn)(id, SEL);
+typedef id (*NCIconsFn)(id, SEL);
+static NCContentFn o_ncContent = NULL;
+static NCIconsFn o_ncIcons = NULL;
+
+/// 超椭圆（squircle）路径，近似系统图标遮罩
+static UIBezierPath *TBSquirclePath(CGRect rect) {
+    CGFloat w = rect.size.width, h = rect.size.height;
+    CGFloat cx = CGRectGetMidX(rect), cy = CGRectGetMidY(rect);
+    CGFloat a = w / 2.0, b = h / 2.0;
+    const CGFloat n = 5.0;
+    const int seg = 96;
+    const CGFloat twoPi = 6.283185307179586;
+    UIBezierPath *p = [UIBezierPath bezierPath];
+    for (int i = 0; i < seg; i++) {
+        CGFloat t = (CGFloat)i / (CGFloat)seg * twoPi;
+        CGFloat ct = cos(t), st = sin(t);
+        CGFloat x = cx + a * (ct < 0 ? -1 : 1) * pow(fabs(ct), 2.0 / n);
+        CGFloat y = cy + b * (st < 0 ? -1 : 1) * pow(fabs(st), 2.0 / n);
+        if (i == 0) [p moveToPoint:CGPointMake(x, y)];
+        else [p addLineToPoint:CGPointMake(x, y)];
+    }
+    [p closePath];
+    return p;
+}
+
+static UIImage *TBMaskIconSquircle(UIImage *img, CGSize size, CGFloat scale) {
+    if (!img || size.width < 1 || size.height < 1) return nil;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = scale > 0.5 ? scale : 3.0;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        UIBezierPath *path = TBSquirclePath(CGRectMake(0, 0, size.width, size.height));
+        [path addClip];
+        [img drawInRect:CGRectMake(0, 0, size.width, size.height)];
+    }];
+}
+
+/// NCNotificationRequest -content：把 sectionIdentifier 抄给 content（icons 里要用）
+static id tb_ncContent(id self, SEL _cmd) {
+    id content = o_ncContent ? o_ncContent(self, _cmd) : nil;
+    @try {
+        if (content) {
+            NSString *sid = nil;
+            if ([self respondsToSelector:NSSelectorFromString(@"sectionIdentifier")]) {
+                sid = [self valueForKey:@"sectionIdentifier"];
+            }
+            if ([sid isKindOfClass:[NSString class]] && sid.length) {
+                BOOL missing = YES;
+                @try {
+                    id cur = [content valueForKey:@"sectionIdentifier"];
+                    missing = !(cur && [cur length] > 0);
+                } @catch (NSException *e) { missing = YES; }
+                if (missing) [content setValue:sid forKey:@"sectionIdentifier"];
+            }
+        }
+    } @catch (NSException *e) {}
+    return content;
+}
+
+/// NCNotificationContent -icons：返回主题图（遮罩 + 同尺寸）
+static id tb_ncIcons(id self, SEL _cmd) {
+    id arr = o_ncIcons ? o_ncIcons(self, _cmd) : nil;
+    if (!TBApplyEnabled(@"ApplyNotification")) return arr;
+    @try {
+        NSString *bid = nil;
+        if ([self respondsToSelector:NSSelectorFromString(@"sectionIdentifier")]) {
+            bid = [self valueForKey:@"sectionIdentifier"];
+        }
+        if (![bid isKindOfClass:[NSString class]] || bid.length == 0) return arr;
+
+        UIImage *first = [arr isKindOfClass:[NSArray class]] ? [(NSArray *)arr firstObject] : nil;
+        CGFloat scale = [first isKindOfClass:[UIImage class]] ? first.scale : 3.0;
+        CGSize size = [first isKindOfClass:[UIImage class]] ? first.size : CGSizeMake(36, 36);
+
+        NSString *key = [NSString stringWithFormat:@"nc|%@|%.0fx%.0f@%.0f", bid, size.width, size.height, scale];
+        UIImage *cached = [gImageCache objectForKey:key];
+        if (cached) return @[cached];
+
+        UIImage *themed = TBImageForBundle(bid);
+        if (!themed) return arr;
+        UIImage *out = TBMaskIconSquircle(themed, size, scale);
+        if (!out) return arr;
+        [gImageCache setObject:out forKey:key];
+        gServe++;
+        TBLog(@"serve NC 图标 %@ %.0fx%.0f", bid, size.width, size.height);
+        return @[out];
+    } @catch (NSException *e) {
+        TBLog(@"NC 图标异常: %@", e.reason);
+    }
+    return arr;
+}
 
 static void TBInstall(void) {
     // 检测 iOS 主版本
@@ -2638,6 +2736,21 @@ static void TBInstall(void) {
         o_appIconScale = (AppIconScaleFn)TBHookClass([UIImage class], @"_applicationIconImageForBundleIdentifier:format:scale:",
                                                      (IMP)tb_appIconImageForBIDScale, "应用图标(scale)");
         gDoneImageHooks = YES;
+    }
+
+    // 通知中心：NC 的图标来自 NCNotificationContent -icons 的预生成数组，不走 UIImage API
+    if (!gDoneNC) {
+        Class ncReq = NSClassFromString(@"NCNotificationRequest");
+        Class ncContent = NSClassFromString(@"NCNotificationContent");
+        if (ncReq && ncContent) {
+            gDoneNC = YES;
+            o_ncContent = (NCContentFn)TBHook(ncReq, @"content", (IMP)tb_ncContent, "NC.content");
+            o_ncIcons = (NCIconsFn)TBHook(ncContent, @"icons", (IMP)tb_ncIcons, "NC.icons");
+        } else if (gNCRetries < 40) {
+            gNCRetries++;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ TBInstall(); });
+        }
     }
 
     // ISIcon（运行时检测）
