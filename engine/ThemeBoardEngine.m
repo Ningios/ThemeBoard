@@ -1322,10 +1322,13 @@ static UIImage *TBThemeFxImage(int slot, NSString *base) {
 static UIImage *TBThemeOverlayImage(void) { return TBThemeFxImage(0, @"iPhoneOverlay"); }
 static UIImage *TBThemeShadowImage(void)  { return TBThemeFxImage(1, @"iPhoneShadow"); }
 
-/// 玻璃叠加层（iPhoneOverlay）强度：0 = 完全不画，1 = 原样叠加。默认 0.35。
+/// 玻璃叠加层（iPhoneOverlay / 淡玻璃遮罩）强度：0 = 完全不画，1 = 原样叠加。
+/// 0.15.48 默认 0.35 → 用户反馈「立体玻璃-遮罩B」「透明玻璃遮罩」都不明显了
+/// （0.15.47 及以前是按 alpha 1.0 整张叠上去的）。0.15.49 默认回到 0.6，
+/// 观感接近以前，同时保留 0~100% 可调（0 才是关闭）。
 static double TBGlassOverlayStrength(void) {
     id v = TBPref(@"GlassOverlayStrength");
-    double s = v ? [v doubleValue] : 0.35;
+    double s = v ? [v doubleValue] : 0.6;
     if (!(s >= 0.0)) s = 0.0;
     if (s > 1.0) s = 1.0;
     return s;
@@ -1383,11 +1386,35 @@ static BOOL TBImageContentBBox(UIImage *img, CGRect *out) {
     return YES;
 }
 
-// 有阴影时图标在合成画布里的占比 / 阴影可见云团相对图标的倍数
-static const CGFloat kTBShadowIconScale   = 0.80;   // 图标缩到画布的 80% 居中（图标在格子里略小一点）
-static const CGFloat kTBShadowCloudToIcon = 1.22;   // 阴影可见云团 = 图标的 1.22 倍 → 柔边露在图标外
+// ---- 阴影 ----
+// 0.15.48 把图标缩到 0.80 居中让阴影露出来 —— 用户不接受（"一开阴影图标就变小"）。
+// 0.15.49 起：**图标尺寸完全不变**（kTBShadowIconScale = 1.00），阴影改走【视图层】
+// （见 TBApplyIconLayerShadow：给图标视图的 layer 设 shadowColor/Opacity/Radius/Offset
+//  + shadowPath 圆角矩形）。图内合成只保留很轻的一圈（云团 1.06 倍 + 整体下移），
+// 保证纯图内通道（系统图标缓存里的那张图）也能看到阴影的边。
+static const CGFloat kTBShadowIconScale   = 1.00;   // 图标不缩小（1.00 = 与画布同尺寸）
+static const CGFloat kTBShadowCloudToIcon = 1.06;   // 阴影可见云团 = 图标的 1.06 倍 → 只在边缘露一圈
+static const CGFloat kTBShadowOffsetYFrac = 0.035;  // 云团整体下移（阴影偏下更自然）
 
-/// 阴影素材在画布里的绘制 rect：把"可见云团"铺到 图标的 kTBShadowCloudToIcon 倍并居中。
+/// 阴影素材"可见区域"的 bbox 只量一次。
+/// TBApplyIconEffects 每次出图都要用，而 TBImageContentBBox 会跑一遍 64×64 重绘 + 扫描；
+/// 以前一次出图要算两遍（画一次、打日志一次），属于刷新/布局回调里的纯浪费。
+static BOOL TBShadowArtBBox(UIImage *shadow, CGRect *out) {
+    if (!shadow) return NO;
+    static __weak UIImage *sImg = nil;
+    static CGRect sBB = {{0, 0}, {0, 0}};
+    static BOOL sHas = NO, sValid = NO;
+    if (sValid && sImg == shadow) {
+        if (out) *out = sBB;
+        return sHas;
+    }
+    BOOL has = TBImageContentBBox(shadow, &sBB);
+    sImg = shadow; sHas = has; sValid = YES;
+    if (out) *out = sBB;
+    return has;
+}
+
+/// 阴影素材在画布里的绘制 rect：把"可见云团"铺到 图标的 kTBShadowCloudToIcon 倍并居中（再整体下移）。
 /// 量不出可见区域时退化成"整张素材放大到 2 倍画布居中"（按素材有一半是边距处理）。
 static CGRect TBShadowArtRect(UIImage *shadow, CGRect canvas, CGRect iconRect) {
     CGSize art = shadow.size;
@@ -1395,25 +1422,27 @@ static CGRect TBShadowArtRect(UIImage *shadow, CGRect canvas, CGRect iconRect) {
     CGSize cloud = CGSizeMake(iconRect.size.width * kTBShadowCloudToIcon,
                               iconRect.size.height * kTBShadowCloudToIcon);
     CGRect bb;
-    if (!TBImageContentBBox(shadow, &bb) || bb.size.width < 0.02 || bb.size.height < 0.02) {
+    if (!TBShadowArtBBox(shadow, &bb) || bb.size.width < 0.02 || bb.size.height < 0.02) {
         CGRect r = canvas;
         r.origin.x -= r.size.width * 0.5;
         r.origin.y -= r.size.height * 0.5;
         r.size.width *= 2.0; r.size.height *= 2.0;
+        r.origin.y += canvas.size.height * kTBShadowOffsetYFrac;
         return r;
     }
     CGRect r;
     r.size.width  = cloud.width  / bb.size.width;
     r.size.height = cloud.height / bb.size.height;
     r.origin.x = canvas.size.width  / 2.0 - r.size.width  / 2.0;
-    r.origin.y = canvas.size.height / 2.0 - r.size.height / 2.0;
+    r.origin.y = canvas.size.height / 2.0 - r.size.height / 2.0
+                 + canvas.size.height * kTBShadowOffsetYFrac;   // 阴影偏下
     return r;
 }
 
 /// 特效合成：阴影垫在图标下方 → 图标 → 叠加层盖在图标之上。
-/// 画布尺寸保持 = 图标尺寸（不改尺寸 → 下游 TBFitCached / 系统缓存不会把阴影又缩回图标格）；
-/// 有阴影时把图标缩到 kTBShadowIconScale 居中、阴影云团放到图标的 1.22 倍，
-/// 这样阴影柔边落在图标之外，真的看得见（图标在格子里会略小一点，Anemone 经典观感）。
+/// 画布尺寸保持 = 图标尺寸（不改尺寸 → 下游 TBFitCached / 系统缓存不会把阴影又缩回图标格）。
+/// 0.15.49：**图标不缩小**（iconRect = 整块画布）；阴影只在图标边缘/底部露一圈，
+/// 真正的投影交给视图层的 TBApplyIconLayerShadow。
 static UIImage *TBApplyIconEffects(UIImage *img) {
     if (!img) return img;
     CGSize pt = img.size;
@@ -1426,34 +1455,35 @@ static UIImage *TBApplyIconEffects(UIImage *img) {
     if (!overlay && !shadow) return img;      // 没开 / 主题里没素材 → 原样返回
 
     CGRect canvas = CGRectMake(0, 0, pt.width, pt.height);
-    CGFloat iconScale = shadow ? kTBShadowIconScale : 1.0;
+    const CGFloat iconScale = kTBShadowIconScale;          // = 1.00，图标保持原尺寸
     CGRect iconRect = CGRectInset(canvas, pt.width * (1.0 - iconScale) / 2.0,
                                           pt.height * (1.0 - iconScale) / 2.0);
-    if (overlay) overlay = TBMaskOverlayToIconAlpha(overlay, img, iconRect);   // 按图标形状裁，别出边
+    // overlay 按最终形状裁那一刀只用在这里：DestinationIn 取的是【图标自己的 alpha】，
+    // 图标是满尺寸的，所以裁完 overlay 仍是整块（不会被裁掉、也不会出边）。
+    if (overlay) overlay = TBMaskOverlayToIconAlpha(overlay, img, iconRect);
+
+    CGRect sr = CGRectZero;
+    if (shadow) sr = TBShadowArtRect(shadow, canvas, iconRect);
 
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
     fmt.scale = img.scale > 0.5 ? img.scale : 3.0;
     fmt.opaque = NO;
     UIImage *out = [[[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt]
         imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        if (shadow) {
-            CGRect sr = TBShadowArtRect(shadow, canvas, iconRect);
-            [shadow drawInRect:sr blendMode:kCGBlendModeNormal alpha:strength];
-        }
+        if (shadow) [shadow drawInRect:sr blendMode:kCGBlendModeNormal alpha:strength];
         [img drawInRect:iconRect];
         if (overlay) [overlay drawInRect:iconRect blendMode:kCGBlendModeNormal alpha:strength];
     }];
     if (shadow) {
-        CGRect sr = TBShadowArtRect(shadow, canvas, iconRect);
         TBLogOnce([@"shadowfx|" stringByAppendingFormat:@"%.0fx%.0f", pt.width, pt.height],
-                  @"阴影：素材 %.0fx%.0f · 画布 %.0fx%.0f · K(图标占比)=%.2f · 云团=图标×%.2f → 绘制 rect %.0fx%.0f "
-                  @"@(%.0f,%.0f) · 强度 %.2f（画布尺寸不变，图标略小）",
+                  @"阴影：素材 %.0fx%.0f · 画布 %.0fx%.0f · K(图标占比)=%.2f（图标不缩小）· 云团=图标×%.2f "
+                  @"→ 图内 rect %.0fx%.0f @(%.0f,%.0f) · 强度 %.2f · 投影走视图层",
                   shadow.size.width, shadow.size.height, pt.width, pt.height, iconScale,
                   kTBShadowCloudToIcon, sr.size.width, sr.size.height, sr.origin.x, sr.origin.y, strength);
     }
     if (overlay) {
         TBLogOnce([@"glassstrength|" stringByAppendingFormat:@"%.2f", strength],
-                  @"玻璃层：强度 %.2f（0=不画）· 已按图标形状裁过 · 源=%@", strength,
+                  @"玻璃层：强度 %.2f（0=不画）· 已按图标形状裁过（图标满尺寸，未被裁掉）· 源=%@", strength,
                   TBUseThemeIconOverlay() ? @"AnemoneEffects/iPhoneOverlay" : @"淡玻璃遮罩");
     }
     return out;
@@ -1462,6 +1492,83 @@ static UIImage *TBApplyIconEffects(UIImage *img) {
 /// 图标最终出图：① 按形状裁（主题遮罩 / 自定义圆角 / 系统形状）② 再叠特效（阴影在下、叠加层在上）
 static UIImage *TBIconFinalImage(UIImage *img) {
     return TBApplyIconEffects(TBIconRoundedImage(img));
+}
+
+#pragma mark - 阴影（视图层，0.15.49）
+
+/// 特效相关偏好的 1 秒 TTL 缓存：layoutSubviews 里别每次都去问 cfprefsd / 读素材
+static void TBShadowLayerParams(BOOL *enabledOut, double *strengthOut) {
+    static BOOL sOn = NO;
+    static double sStrength = 0;
+    static NSTimeInterval sAt = 0;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (sAt <= 0 || now - sAt > 1.0) {
+        sAt = now;
+        sStrength = TBGlassOverlayStrength();
+        sOn = TBUseThemeIconShadow() && (TBThemeShadowImage() != nil) &&
+              !TBSafeMode() && TBEnabled();
+    }
+    if (enabledOut) *enabledOut = sOn;
+    if (strengthOut) *strengthOut = sStrength;
+}
+
+static char kTBLayerShadowKey;   // 记录已应用的阴影参数（layout 会被反复调用）
+
+/// 阴影走【视图层】：给图标视图的 layer 设 shadowColor/Opacity/Radius/Offset + shadowPath。
+///   · 图标尺寸完全不变（图内把图标缩到 0.80 的方案被用户否决）
+///   · shadowPath 用圆角矩形 → UIKit 不用为了算阴影去栅格化整棵子树（滚动卡顿的主因）
+///   · 强度仍然受 GlassOverlayStrength 控制（0 = 不画，同时把之前设过的清掉）
+static void TBApplyIconLayerShadow(id iconView, UIView *imgView) {
+    if (!iconView || ![iconView isKindOfClass:[UIView class]]) return;
+    @try {
+        UIView *v = (UIView *)iconView;
+        CALayer *layer = v.layer;
+        if (!layer) return;
+        BOOL on = NO;
+        double strength = 0;
+        TBShadowLayerParams(&on, &strength);
+        if (!on || strength <= 0.001) {
+            if (layer.shadowOpacity > 0.0) {
+                layer.shadowOpacity = 0.0;
+                layer.shadowPath = NULL;
+                objc_setAssociatedObject(v, &kTBLayerShadowKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            return;
+        }
+        CGRect b = ((CGRect (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"bounds"));
+        CGFloat w = b.size.width, h = b.size.height;
+        if (w < 4 || h < 4) return;
+        CGFloat radius;
+        if (TBMaskCornerRadiusOn()) radius = (CGFloat)(TBMaskCornerRadius() / 60.0) * w;
+        else radius = MIN(w, h) * 0.2237;      // 和「形状兜底」同一口径（系统超椭圆近似）
+        if (radius > MIN(w, h) * 0.5) radius = MIN(w, h) * 0.5;
+        CGFloat opacity = (CGFloat)(strength * 0.45);     // 强度 0.6 → opacity 0.27
+        CGFloat blur = MAX(3.0, MIN(w, h) * 0.18);
+        CGFloat dy = h * 0.05;
+        NSString *sig = [NSString stringWithFormat:@"%.1f|%.1f|%.2f|%.2f|%.1f", w, h, opacity, blur, dy];
+        NSString *old = objc_getAssociatedObject(v, &kTBLayerShadowKey);
+        if ([old isEqualToString:sig]) return;   // 参数没变 → 不动 layer（layout 每次都进来）
+        objc_setAssociatedObject(v, &kTBLayerShadowKey, sig, OBJC_ASSOCIATION_COPY_NONATOMIC);
+
+        CGRect r = CGRectMake(0, 0, w, h);
+        if (imgView && imgView != v) {
+            CGRect f = [imgView convertRect:imgView.bounds toView:v];
+            if (f.size.width > 4 && f.size.height > 4) r = f;
+        }
+        if (layer.masksToBounds) {
+            layer.masksToBounds = NO;   // 阴影必须画到 bounds 之外
+            TBLogOnce(@"layershadow|unclip", @"阴影（视图层）：图标视图原本会裁剪，已关掉以让阴影露出来");
+        }
+        layer.shadowColor = [UIColor blackColor].CGColor;
+        layer.shadowOpacity = opacity;
+        layer.shadowRadius = blur;
+        layer.shadowOffset = CGSizeMake(0, dy);
+        layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:radius].CGPath;
+        TBLogOnce([@"layershadow|" stringByAppendingFormat:@"%.0fx%.0f|%.2f", w, h, strength],
+                  @"阴影（视图层）：图标 %.0fx%.0f 保持不变 · shadowPath %.0fx%.0f 圆角 %.1f · "
+                  @"opacity %.2f（强度 %.2f）· blur %.1f · offset %.1f",
+                  w, h, r.size.width, r.size.height, radius, opacity, strength, blur, dy);
+    } @catch (NSException *e) { }
 }
 
 static UIImage *gSystemClockFace;   // 系统自己的时钟表盘（主题取消后还原用）
@@ -1782,9 +1889,18 @@ static UIImage *TBGlobalEffectImage(UIImage *src, NSString *bid) {
     if (!anyFx) return src;
     if (src.size.width < 16 || src.size.height < 16) return src;
     NSString *theme = TBActiveTheme() ?: @"";
-    if (!gGlobalImgCache || ![gGlobalCacheTheme isEqualToString:theme]) {
+    // 缓存键带「主题 + 特效参数指纹」：参数没变就一直命中，不必每次刷新都重算所有图标
+    // （0.15.48 的日志里 TBReload 一晚上跑了 256 次，每次 gGlobalImgCache = nil，
+    //  于是几十个图标全部重新套形状+特效 → 主线程被拖死。现在只在参数真的变了才失效。）
+    NSString *fp = [NSString stringWithFormat:@"%@|%d%d%d%d|%.2f", theme,
+                    TBUseThemeIconMask() ? 1 : 0, TBMaskCornerRadiusOn() ? 1 : 0,
+                    TBUseThemeIconOverlay() ? 1 : 0, TBUseThemeIconShadow() ? 1 : 0,
+                    TBGlassOverlayStrength()];
+    if (!gGlobalImgCache || ![gGlobalCacheTheme isEqualToString:fp]) {
         gGlobalImgCache = [NSMutableDictionary dictionary];
-        gGlobalCacheTheme = [theme copy];
+        gGlobalCacheTheme = [fp copy];
+    } else if (gGlobalImgCache.count > 4000) {
+        [gGlobalImgCache removeAllObjects];      // 上限保护（图标尺寸变体会堆很多）
     }
     NSString *key = [NSString stringWithFormat:@"%@|%.0fx%.0f", bid, src.size.width, src.size.height];
     UIImage *hit = gGlobalImgCache[key];
@@ -1844,6 +1960,8 @@ static SetImgFn o_setImageOnIconView;
 static void tb_setImageOnIconView(id self, SEL _cmd, id image) {
     if (TBEnabled() && !TBSafeMode()) {
         @try {
+            // 阴影（视图层）：图标图像视图自己也挂一份，覆盖"走 setImage: 贴图"的图标
+            if ([self isKindOfClass:[UIView class]]) TBApplyIconLayerShadow(self, nil);
             id icon = nil;
             if ([self respondsToSelector:NSSelectorFromString(@"icon")]) {
                 icon = ((id (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"icon"));
@@ -1946,6 +2064,9 @@ static BOOL TBApplyThemeToIconView(id self) {
                       @"skip-iv cls=%@", NSStringFromClass([self class]));
             return NO;
         }
+        // 阴影（视图层）：不受"主题有没有这张图"影响 —— 全局效果的图标也要有阴影。
+        // 图标尺寸不变；参数没变时这个调用是空操作（内部有去重）。
+        TBApplyIconLayerShadow(self, (UIView *)iv);
         SEL iconSel = NSSelectorFromString(@"icon");
         id icon = [self respondsToSelector:iconSel] ?
             ((id (*)(id, SEL))objc_msgSend)(self, iconSel) : nil;
@@ -3270,144 +3391,357 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 // ---- 静态图标模式：隐藏系统指针（图标自己画了指针，否则会重影）----
 static void (*o_updateClockImages)(id, SEL);
 // ---- 替换角标底板（SBBadgeBG）：系统取角标图不走 imageNamed:，只能从视图层换 ----
+//
+// 0.15.49 重写。用户实测症状：换主题之后角标「看起来像有两个 / 一直变不回来」，
+// 检查发现旧角标会一直赖在图标上，注销（刷新桌面）之后才消失 —— 根因是**没有还原路径**。
+// 这一版：
+//   ① 【还原】：换主题 / 关角标开关 / 取消应用 / 设置变更（TBReload）时，把之前换上的
+//      底板写回系统原图（下面 gBadgeRestores 还原表），日志打「角标：还原 N 处」。
+//   ② 只在「真有素材（SBBadgeBG*）或 CustomBadgePath」时才替换；没有素材一律不动。
+//   ③ 只换【底板那一层】：整棵角标子树里面积最大的那个 UIImageView（系统底板）；
+//      有 UILabel 的层绝不碰 layer.contents —— 数字必须留着。
+//   ④ 幂等：同一个角标一次布局只处理一次（还原表里查"还是不是我们换的图"），
+//      绝不既改 image 又改 layer.contents（那会画两层 = "两个角标叠着"）。
+//   ⑤ 日志必打「角标：命中 <完整路径>」/「角标：没找到素材」（换主题、开机各一次）。
 static void (*o_badgeLayout)(id, SEL);
-static UIImage *TBThemeBadgeImage(void) {
-    // 1) 全局自定义素材优先
+
+/// 角标素材查找：返回图，并回填它到底来自哪个文件（日志要打完整路径）
+static UIImage *TBThemeBadgeImageWithPath(NSString **outPath) {
+    if (outPath) *outPath = nil;
+
+    // ① 全局自定义素材 / 素材包（CustomBadgePath）—— 最高优先，按路径缓存
     id cb = TBPref(@"CustomBadgePath");
     if ([cb isKindOfClass:[NSString class]] && [(NSString *)cb length]) {
-        UIImage *im = [UIImage imageWithContentsOfFile:(NSString *)cb];
-        if (im) return im;
+        static NSString *sCachedPath = nil;
+        static UIImage *sCachedImg = nil;
+        static BOOL sCachedDone = NO;
+        NSString *cps = [(NSString *)cb copy];
+        if (!sCachedDone || ![cps isEqualToString:sCachedPath ?: @""]) {
+            sCachedPath = cps;
+            sCachedDone = YES;
+            // 必须用 init：imageWithContentsOfFile: 已被本引擎 hook（递归会爆栈）
+            sCachedImg = [[UIImage alloc] initWithContentsOfFile:cps];
+        }
+        if (sCachedImg) {
+            if (outPath) *outPath = cps;
+            return sCachedImg;
+        }
     }
-    // 2) 主题自带（SBBadgeBG@3x/@2x/无后缀，Bundles/ 与 Bundles/com.apple.springboard/ 都找）
     if (TBSafeMode()) return nil;
-    NSString *name = @"SBBadgeBG@3x.png";
-    UIImage *a = TBResourceImage(name);
-    if (!a) a = TBResourceImage(@"SBBadgeBG@2x.png");
-    if (!a) a = TBResourceImage(@"SBBadgeBG.png");
-    return a;
-}
-/// 深度遍历：盘子可能不在第一层，也可能直接画在 layer.contents 上
-/// 面积（用来挑「底板」：底面积最大的那个 UIImageView）
-static CGFloat TBBadgeViewArea(UIView *v) {
-    CGRect b = v.bounds;
-    return b.size.width * b.size.height;
+
+    NSString *theme = TBActiveTheme();
+    if (!theme.length) return nil;
+
+    // ② 主题 Bundles 递归表（大小写不敏感；Bundles/ 与 Bundles/com.apple.springboard/ 都覆盖）
+    [gLock lock];
+    NSMutableDictionary *res = TBThemeBundleRes();
+    NSString *hit = nil;
+    NSArray *keys = @[ @"sbbadgebg@3x.png", @"sbbadgebg@2x.png", @"sbbadgebg.png", @"sbbadgebg" ];
+    for (NSUInteger i = 0; i < keys.count; i++) {
+        NSString *p = res[keys[i]];
+        if (p.length) { hit = [p copy]; break; }
+    }
+    [gLock unlock];
+    if (hit.length) {
+        UIImage *im = [[UIImage alloc] initWithContentsOfFile:hit];
+        if (im) { if (outPath) *outPath = hit; return im; }
+    }
+
+    // ③ IconBundles / AnemoneEffects / 主题根目录（老主题常把角标丢在这些地方；素材包同名也算）
+    NSString *dir = TBThemeDir(theme);
+    if (dir.length) {
+        NSArray *subs = @[ @"IconBundles", @"AnemoneEffects", @"" ];
+        for (NSUInteger i = 0; i < subs.count; i++) {
+            NSString *sub = subs[i];
+            NSString *d = sub.length ? TBResolveDirCI(dir, sub) : dir;
+            if (!d.length) continue;
+            NSString *p = TBFindBestScaledPNG(d, @"SBBadgeBG");
+            if (!p) continue;
+            UIImage *im = [[UIImage alloc] initWithContentsOfFile:p];
+            if (im) { if (outPath) *outPath = p; return im; }
+        }
+    }
+    return nil;
 }
 
-/// 子树里有没有 UILabel —— 有就绝不碰这一层的 layer.contents
+/// 带日志的角标素材查找：同一主题（且"有没有素材"的结论没变）只打一次。
+/// 必打「角标：命中 <完整路径>」或「角标：没找到素材」。
+static UIImage *TBThemeBadgeImage(void) {
+    static NSString *sLoggedTheme = nil;
+    static BOOL sLoggedFound = NO;
+    NSString *theme = TBActiveTheme() ?: @"";
+    NSString *path = nil;
+    UIImage *img = TBThemeBadgeImageWithPath(&path);
+    BOOL found = (img != nil);
+    BOOL same = (sLoggedTheme && [sLoggedTheme isEqualToString:theme] && sLoggedFound == found);
+    if (!same) {
+        sLoggedTheme = [theme copy];
+        sLoggedFound = found;
+        if (found) {
+            TBLog(@"角标：命中 %@", path.length ? path : @"(自定义素材，路径为空)");
+        } else {
+            TBLog(@"角标：没找到素材（找过 CustomBadgePath、Bundles/SBBadgeBG@3x|@2x|.png、"
+                  @"Bundles/com.apple.springboard/SBBadgeBG*、IconBundles/SBBadgeBG*、"
+                  @"AnemoneEffects/SBBadgeBG* 和素材包同名文件，都大小写不敏感）"
+                  @"→ 不改角标。要换请在抽屉里「导入角标图片」，或把 SBBadgeBG@3x.png 放进主题 Bundles/");
+        }
+    }
+    return img;
+}
+
+#pragma mark - 角标还原表
+
+/// 一条还原记录：我们换掉过哪一层、换之前是什么（视图一律弱引用，注销时不留野指针）
+@interface TBBadgeRestore : NSObject
+@property (nonatomic, weak) UIView *owner;         // 角标根视图（判断"还是不是我们换的图"）
+@property (nonatomic, weak) UIImageView *plate;    // 被换的底板（nil = 走 layer.contents 通道）
+@property (nonatomic, weak) UIView *contentsView;  // 直接写在 layer.contents 上的那一层
+@property (nonatomic, strong) UIImage *origImage;
+@property (nonatomic, assign) UIViewContentMode origMode;
+@property (nonatomic, assign) BOOL origClips;
+@property (nonatomic, strong) UIColor *origBG;
+@property (nonatomic, assign) BOOL hadRedBG;
+@property (nonatomic, strong) UIImage *appliedImage;
+@property (nonatomic, strong) id origContents;
+@end
+
+@implementation TBBadgeRestore
+@end
+
+static NSMutableArray<TBBadgeRestore *> *gBadgeRestores;   // 全局还原表
+static BOOL gBadgeApplied = NO;                            // 现在有没有我们换上去的角标
+
+/// 这个角标上换过的地方，是不是"还是我们换的那张图"（是 → 本次布局不用再处理，幂等）
+static BOOL TBBadgeAlreadyApplied(UIView *owner) {
+    NSArray *list = gBadgeRestores;
+    if (!list.count) return NO;
+    for (NSUInteger i = 0; i < list.count; i++) {
+        TBBadgeRestore *e = list[i];
+        if (e.owner != owner) continue;
+        if (e.contentsView) {
+            if (e.contentsView.layer.contents) return YES;
+        } else if (e.plate && e.plate.image == e.appliedImage) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void TBBadgeRemember(TBBadgeRestore *e) {
+    if (!gBadgeRestores) gBadgeRestores = [NSMutableArray array];
+    [gBadgeRestores addObject:e];
+    gBadgeApplied = YES;
+}
+
+/// 还原我们换过的所有底板（换主题 / 关角标开关 / 取消应用 / 设置变更都走这里）。
+/// 必须在主线程调用（会碰 UIKit 视图）。
+static NSUInteger TBBadgeRestoreAll(NSString *why) {
+    if (!gBadgeRestores.count) { gBadgeApplied = NO; return 0; }
+    NSArray *list = [gBadgeRestores copy];
+    [gBadgeRestores removeAllObjects];
+    NSUInteger n = 0;
+    for (NSUInteger i = 0; i < list.count; i++) {
+        TBBadgeRestore *e = list[i];
+        @try {
+            if (e.contentsView) {
+                if (e.contentsView.layer.contents) { e.contentsView.layer.contents = e.origContents; n++; }
+            } else if (e.plate) {
+                e.plate.image = e.origImage;          // 写回系统原图
+                e.plate.contentMode = e.origMode;
+                e.plate.clipsToBounds = e.origClips;
+                if (e.hadRedBG) e.plate.backgroundColor = e.origBG;
+                n++;
+            }
+        } @catch (NSException *ex) { }
+    }
+    gBadgeApplied = NO;
+    if (n) TBLog(@"角标：还原 %lu 处（%@）", (unsigned long)n, why ?: @"设置变更");
+    return n;
+}
+
+#pragma mark - 角标底板识别 / 替换
+
+/// 角标子树里找【系统底板】：面积最大的那个 UIImageView（最底层、面积最大的那一层）
+static UIImageView *TBBadgeFindPlate(UIView *root) {
+    UIImageView *best = nil;
+    CGFloat bestA = 0;
+    NSMutableArray *level = [NSMutableArray arrayWithObject:root];
+    for (int d = 0; d <= 5 && level.count; d++) {
+        NSMutableArray *next = [NSMutableArray array];
+        for (NSUInteger i = 0; i < level.count; i++) {
+            UIView *v = level[i];
+            NSArray *kids = [[v subviews] copy];
+            for (NSUInteger k = 0; k < kids.count; k++) {
+                UIView *sv = kids[k];
+                if (sv.hidden) continue;
+                if ([sv isKindOfClass:[UIImageView class]]) {
+                    CGRect b = sv.bounds;
+                    CGFloat a = b.size.width * b.size.height;
+                    if (a > bestA) { bestA = a; best = (UIImageView *)sv; }
+                }
+                [next addObject:sv];
+            }
+        }
+        level = next;
+    }
+    return best;
+}
+
+/// 子树里有没有 UILabel —— 有就绝不能碰这一层的 layer.contents
 /// （UILabel 的文字就是画在自己的 layer.contents 上的，换掉 = 数字消失）
 static BOOL TBBadgeHasLabel(UIView *v, int depth) {
     if (depth > 5) return NO;
     if ([v isKindOfClass:[UILabel class]]) return YES;
-    for (UIView *c in v.subviews) if (TBBadgeHasLabel(c, depth + 1)) return YES;
+    NSArray *kids = [[v subviews] copy];
+    for (NSUInteger i = 0; i < kids.count; i++) {
+        if (TBBadgeHasLabel(kids[i], depth + 1)) return YES;
+    }
     return NO;
 }
 
-/// 深度遍历：每层只替换「面积最大的那个 UIImageView」（底板）。
-/// 其它 UIImageView 与所有 UILabel 一律不动 —— 旧实现递归把所有 UIImageView.image
-/// 和带 CGImage 的 layer.contents 全换成角标图，把数字（UILabel 的文字位图）也盖掉了。
-static void TBBadgePaint(UIView *v, UIImage *badge, int depth, int *hits, NSMutableString *dump,
-                         int *dumpNodes) {
-    if (depth > 4) return;
-    if (!dumpNodes) {
-        UIImageView *plate = nil;
-        CGFloat best = 0;
-        for (UIView *sv in v.subviews) {
-            if (![sv isKindOfClass:[UIImageView class]]) continue;
-            CGFloat a = TBBadgeViewArea(sv);
-            if (a > best) { best = a; plate = (UIImageView *)sv; }
+/// 只换【一层】底板；返回换了几层（0 或 1）。
+/// 绝不既改 image 又改 layer.contents —— 那会画两层（"角标有两个"）。
+static NSUInteger TBBadgeApply(UIView *root, UIImage *badge, BOOL verbose) {
+    if (!root || !badge) return 0;
+
+    // ① 优先：面积最大的 UIImageView = 系统底板
+    UIImageView *plate = TBBadgeFindPlate(root);
+    if (plate) {
+        if (plate.image == badge) return 1;      // 已经是主题角标 → 幂等（不重复叠加、不重复记录）
+        TBBadgeRestore *e = [[TBBadgeRestore alloc] init];
+        e.owner = root;
+        e.plate = plate;
+        e.origImage = plate.image;
+        e.origMode = plate.contentMode;
+        e.origClips = plate.clipsToBounds;
+        e.origBG = plate.backgroundColor;
+        plate.image = badge;
+        plate.contentMode = UIViewContentModeScaleToFill;
+        plate.clipsToBounds = YES;
+        // 底板自己画的红底 → 抹掉（只动底板，不碰数字和其它 view）
+        UIColor *bg = e.origBG;
+        CGFloat r = 0, g = 0, b = 0, a = 0;
+        if (bg && [bg getRed:&r green:&g blue:&b alpha:&a] &&
+            a > 0.2 && r > 0.45 && r > g * 1.6 && r > b * 1.6) {
+            e.hadRedBG = YES;
+            plate.backgroundColor = [UIColor clearColor];
         }
-        static int plateLogged = 0;
-        BOOL verbose = (plateLogged < 30);
-        if (plate) {
-            if (verbose) TBLog(@"角标替换[前]：L%d 底板=%@ frame=%@ 原图=%@",
-                               depth, NSStringFromClass([plate class]),
-                               NSStringFromCGRect(CGRectIntegral(plate.frame)),
-                               plate.image ? NSStringFromCGSize(plate.image.size) : @"(无)");
-            plate.image = badge;
-            plate.contentMode = UIViewContentModeScaleToFill;
-            plate.clipsToBounds = YES;
-            if (verbose) { plateLogged++; TBLog(@"角标替换[后]：L%d %@ frame=%@ 新图=%@",
-                                                depth, NSStringFromClass([plate class]),
-                                                NSStringFromCGRect(CGRectIntegral(plate.frame)),
-                                                NSStringFromCGSize(badge.size)); }
-            // 底板自己画的红底 → 抹掉（只动底板，不碰数字和其它 view）
-            UIColor *bg = plate.backgroundColor;
-            CGFloat r = 0, g = 0, b = 0, a = 0;
-            if (bg && [bg getRed:&r green:&g blue:&b alpha:&a] &&
-                a > 0.2 && r > 0.45 && r > g * 1.6 && r > b * 1.6) {
-                plate.backgroundColor = [UIColor clearColor];
-            }
-            (*hits)++;
-        } else if (!TBBadgeHasLabel(v, 0) && v.layer.contents &&
-                   CFGetTypeID((__bridge CFTypeRef)v.layer.contents) == CGImageGetTypeID() &&
-                   ![v.layer.contents isKindOfClass:[UIImage class]]) {
-            // 这一层没有 UIImageView 底板，子树里也没有 UILabel（不会盖掉数字）
-            // → 底板是直接画在 layer.contents 上的，只换它
-            if (verbose) TBLog(@"角标替换[前]：L%d %@ layer.contents 底板 %@", depth,
-                               NSStringFromClass([v class]),
-                               NSStringFromCGSize(CGSizeMake(CGImageGetWidth((__bridge CGImageRef)v.layer.contents) / 3.0,
-                                                             CGImageGetHeight((__bridge CGImageRef)v.layer.contents) / 3.0)));
-            v.layer.contents = (__bridge id)badge.CGImage;
-            if (verbose) { plateLogged++; TBLog(@"角标替换[后]：L%d %@ layer.contents → %@", depth,
-                                                NSStringFromClass([v class]),
-                                                NSStringFromCGSize(badge.size)); }
-            (*hits)++;
+        e.appliedImage = badge;
+        TBBadgeRemember(e);
+        if (verbose) {
+            TBLogOnce([@"badgeplate|" stringByAppendingFormat:@"%@|%@",
+                       NSStringFromClass([plate class]), TBActiveTheme() ?: @""],
+                      @"角标替换：底板 %@ frame=%@ 原图=%@ → 主题角标 %@（只换这一层，数字层没碰）",
+                      NSStringFromClass([plate class]),
+                      NSStringFromCGRect(CGRectIntegral(plate.frame)),
+                      e.origImage ? NSStringFromCGSize(e.origImage.size) : @"(无)",
+                      NSStringFromCGSize(badge.size));
         }
-    } else if (*dumpNodes < 12) {
-        (*dumpNodes)++;
-        [dump appendFormat:@"\n   %@ f=%@ img=%@ bg=%s",
-                           NSStringFromClass([v class]),
-                           NSStringFromCGRect(CGRectIntegral(v.frame)),
-                           ([v isKindOfClass:[UIImageView class]] && [(UIImageView *)v image])
-                               ? NSStringFromCGSize([(UIImageView *)v image].size) : @"-",
-                           v.backgroundColor ? "y" : "-"];
+        return 1;
     }
+
+    // ② 兜底：没有 UIImageView 底板 —— 只在「本层直接画了 CGImage，且子树里没有 UILabel」时换一次
+    if (!TBBadgeHasLabel(root, 0) && root.layer.contents &&
+        CFGetTypeID((__bridge CFTypeRef)root.layer.contents) == CGImageGetTypeID()) {
+        TBBadgeRestore *e = [[TBBadgeRestore alloc] init];
+        e.owner = root;
+        e.contentsView = root;
+        e.origContents = root.layer.contents;
+        root.layer.contents = (__bridge id)badge.CGImage;
+        e.appliedImage = badge;
+        TBBadgeRemember(e);
+        if (verbose) {
+            TBLogOnce([@"badgecontents|" stringByAppendingFormat:@"%@|%@",
+                       NSStringFromClass([root class]), TBActiveTheme() ?: @""],
+                      @"角标替换：%@ 的 layer.contents 底板 → 主题角标（子树里没有 UILabel，数字不受影响）",
+                      NSStringFromClass([root class]));
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/// 还原之后：让屏幕上已有的角标重新布局一次 —— 新主题（有素材）立刻补上，
+/// 没素材的主题就保持系统原样。只碰类名带 Badge 的视图，量很小。
+static int TBBadgeRelayoutTree(UIView *v, int depth) {
+    if (depth > 8) return 0;
+    int n = 0;
     NSArray *kids = [[v subviews] copy];
-    for (NSUInteger i = 0; i < kids.count; i++) {
-        TBBadgePaint([kids objectAtIndex:i], badge, depth + 1, hits, dump, dumpNodes);
+    if ([NSStringFromClass([v class]) rangeOfString:@"Badge"
+                                           options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        [v setNeedsLayout];
+        [v layoutIfNeeded];
+        return 1;
     }
+    for (NSUInteger i = 0; i < kids.count; i++) n += TBBadgeRelayoutTree(kids[i], depth + 1);
+    return n;
+}
+
+static void TBBadgeRelayoutVisible(void) {
+    @try {
+        NSArray *wins = [[UIApplication sharedApplication] windows];
+        for (NSUInteger i = 0; i < wins.count; i++) TBBadgeRelayoutTree(wins[i], 0);
+    } @catch (NSException *e) { }
 }
 
 static void tb_badgeLayout(id self, SEL _cmd) {
-    if (o_badgeLayout) o_badgeLayout(self, _cmd);
+    if (![self isKindOfClass:[UIView class]]) {
+        if (o_badgeLayout) o_badgeLayout(self, _cmd);
+        return;
+    }
+    // 父类/子类各挂了一次 hook 时，系统的 [super layoutSubviews] 会把我们拉回来：
+    // 只放行最外层那一次，避免同一次布局把角标处理两遍（"两个角标叠着"来源之一）
+    static int sDepth = 0;
+    if (sDepth > 0) {
+        if (o_badgeLayout) o_badgeLayout(self, _cmd);
+        return;
+    }
+    sDepth++;
+    UIView *selfView = (UIView *)self;
     @try {
         id ub = TBPref(@"UseThemeBadge");
         BOOL on = (ub && [ub boolValue]);
         id cb = TBPref(@"CustomBadgePath");
         BOOL hasCustom = ([cb isKindOfClass:[NSString class]] && [(NSString *)cb length] > 0);
-        if (!on && !hasCustom) return;
-        UIImage *badge = TBThemeBadgeImage();
-        if (!badge) {
-            TBLogOnce(@"badgeNoAsset", @"角标替换：主题/素材里没有 SBBadgeBG@3x.png → 跳过（开关已开也没用）");
+
+        if (!on && !hasCustom) {
+            // 关掉开关 / 取消应用 → 把之前换上的底板还原成系统原图（不还原就会"赖着不走"）
+            if (gBadgeApplied) TBBadgeRestoreAll(@"角标开关已关闭");
+            if (o_badgeLayout) o_badgeLayout(self, _cmd);
+            sDepth--;
             return;
         }
-        static int dumped = 0;
-        int hits = 0;
-        if (dumped < 2) {
-            UIView *selfView = (UIView *)self;
-            NSMutableString *d = [NSMutableString stringWithFormat:@"角标层级 %@ (%@):",
-                                  NSStringFromClass([self class]), NSStringFromCGRect(selfView.frame)];
-            int nodes = 0;
-            TBBadgePaint((UIView *)self, badge, 0, &hits, d, &nodes);
-            dumped++;
-            TBLog(@"%@", d);
-        } else {
-            TBBadgePaint((UIView *)self, badge, 0, &hits, nil, NULL);
+
+        if (o_badgeLayout) o_badgeLayout(self, _cmd);   // 先让系统把底板和数字摆好
+
+        UIImage *badge = TBThemeBadgeImage();
+        if (!badge) { sDepth--; return; }               // 没素材一律不动
+
+        if (TBBadgeAlreadyApplied(selfView)) { sDepth--; return; }   // 幂等
+
+        NSUInteger hits = TBBadgeApply(selfView, badge, YES);
+        if (hits > 0) {
+            TBLogOnce([@"badgecount|" stringByAppendingFormat:@"%@|%@",
+                       NSStringFromClass([self class]), TBActiveTheme() ?: @""],
+                      @"角标替换：已换底板（%@，%lu 处）", NSStringFromClass([self class]),
+                      (unsigned long)hits);
+            // 系统有时在 layout 之后才把图写回去 → 稍后补一次（同样幂等，不会叠加）
+            __weak UIView *wv = selfView;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                UIView *v = wv;
+                if (!v) return;
+                if (!gBadgeApplied) return;                    // 已经被还原了，不要再贴回去
+                if (TBBadgeAlreadyApplied(v)) return;          // 已经是我们换的图
+                TBBadgeApply(v, badge, NO);
+            });
         }
-        static int logged = 0;
-        if (logged < 5 && hits > 0) { logged++; TBLog(@"角标替换：已换底板 %@（%d 处）",
-                                                      NSStringFromClass([self class]), hits); }
-        // 系统有时在 layout 之后才把图写回去 → 稍后再补一次
-        __weak UIView *wv = (UIView *)self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            UIView *v = wv;
-            if (!v) return;
-            int h2 = 0;
-            TBBadgePaint(v, badge, 0, &h2, nil, NULL);
-        });
-    } @catch (NSException *e) { }
+    } @catch (NSException *e) {
+        TBLog(@"角标替换异常：%@", e.reason);
+    }
+    sDepth--;
 }
+
 static BOOL gDoneBadge = NO;
 
 static BOOL gDoneClock = NO;
@@ -3778,7 +4112,33 @@ static void TBInstall(void) {
 
 
 /// 让 SpringBoard 自己重绘桌面图标（不注销）
-static void TBRefreshSpringBoard(void) {
+/// 节流：noteIconStateChangedExternally 会让 SpringBoard 重排整个桌面，
+/// 日志里它在 01:04~01:05 稳定 3~4 秒一次地打，主线程就是这么被拖死的。
+/// 这里限制到最少 2 秒一次，被压掉的请求只记日志（合并成后面的那一次）。
+static void TBRefreshSpringBoard(NSString *why) {
+    static NSLock *sLock = nil;
+    static NSTimeInterval sLast = 0;
+    static NSUInteger sCalls = 0, sThrottled = 0;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ sLock = [[NSLock alloc] init]; });
+
+    const NSTimeInterval kMinInterval = 2.0;
+    [sLock lock];
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    sCalls++;
+    if (sLast > 0 && now - sLast < kMinInterval) {
+        NSTimeInterval since = now - sLast;
+        sThrottled++;
+        NSUInteger n = sCalls, t = sThrottled;
+        [sLock unlock];
+        TBLog(@"刷新节流：距上次 SpringBoard 刷新仅 %.2fs（< %.1fs）→ 跳过第 %lu 次请求（已压掉 %lu 次，触发者=%@）",
+              since, kMinInterval, (unsigned long)n, (unsigned long)t, why ?: @"?");
+        return;
+    }
+    sLast = now;
+    NSUInteger n = sCalls;
+    [sLock unlock];
+
     Class sc = NSClassFromString(@"SBIconController");
     if (sc) {
         @try {
@@ -3789,7 +4149,7 @@ static void TBRefreshSpringBoard(void) {
                 SEL selNote = NSSelectorFromString(@"noteIconStateChangedExternally");
                 if (mgr && [mgr respondsToSelector:selNote]) {
                     ((void (*)(id, SEL))objc_msgSend)(mgr, selNote);
-                    TBLog(@"已通知 SpringBoard 刷新图标");
+                    TBLog(@"已通知 SpringBoard 刷新图标（触发者=%@ 第 %lu 次）", why ?: @"?", (unsigned long)n);
                     return;
                 }
             }
@@ -3797,7 +4157,7 @@ static void TBRefreshSpringBoard(void) {
             TBLog(@"刷新失败: %@", e.reason);
         }
     }
-    TBLog(@"· 没有找到 iconManager，图标要等下次重绘");
+    TBLog(@"· 没有找到 iconManager，图标要等下次重绘（触发者=%@ 第 %lu 次）", why ?: @"?", (unsigned long)n);
 }
 
 /// 取桌面上所有图标（用于按需清理缓存）
@@ -3940,9 +4300,117 @@ static NSInteger TBInvalidateIconViews(NSArray *icons) {
     return sent;
 }
 
-static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, const void *obj, CFDictionaryRef info) {
-    static NSUInteger sReloadSeq = 0;
-    const NSUInteger mySeq = ++sReloadSeq;
+/// 正在执行的那次刷新序号（延迟任务用它判断自己是不是过期了）
+static NSUInteger gReloadRunSeq = 0;
+
+static void TBRunReload(NSUInteger mySeq, NSString *why);
+
+/// ---------------------------------------------------------------------------
+/// 刷新入口：**节流 + 去重 + 熔断**
+///
+/// 0.15.48 真机日志（shared-08E9891B_engine.log，8 分钟）实锤的卡死原因：
+///   「设置变更：重建索引」出现 256 次、「已通知 SpringBoard 刷新图标」89 次，
+///   后段稳定每 3~4 秒一次（01:04:23/24/26/28/31/35…）→ 主线程一直泡在
+///   【重建索引 + 全量清缓存 + 窗口树遍历重贴 95 个图标视图 + noteIconStateChangedExternally】
+///   里，最后 SpringBoard 被看门狗打死 / 用户看到卡死 + 回桌面。
+///
+/// 这里做三件事：
+///   ① 合并：0.8s 冷却窗口内的重复请求合并成一次（延迟执行，不丢最后一次）
+///   ② 熔断：10s 窗口内超过 8 次直接忽略 3s（风暴保护，防止连锁刷新自激）
+///   ③ 每条都带「触发者 + 计数」，方便回看是谁在刷（Darwin 通知不带发送者 PID）
+/// ---------------------------------------------------------------------------
+static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n,
+                     const void *obj, CFDictionaryRef info) {
+    static NSLock *sGate = nil;
+    static NSUInteger sReq = 0, sWinCount = 0, sRunCount = 0, sSuppressed = 0;
+    static NSTimeInterval sWinStart = 0, sLastRun = 0, sBreakerUntil = 0;
+    static BOOL sScheduled = NO, sSaidNoPid = NO;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        sGate = [[NSLock alloc] init];
+        sSaidNoPid = NO;
+    });
+
+    const NSTimeInterval kCooldown = 0.8;   // 冷却窗口
+    const NSTimeInterval kWindow   = 10.0;  // 统计窗口
+    const NSTimeInterval kBreaker  = 3.0;   // 熔断时长
+    const NSUInteger   kWindowMax  = 8;     // 窗口内允许的最大执行次数
+
+    NSString *why = @"Darwin通知";
+    @try { if (n) why = [NSString stringWithFormat:@"Darwin通知 %@", (__bridge NSString *)n]; }
+    @catch (NSException *e) { }
+
+    [sGate lock];
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    sReq++;
+    if (sWinStart <= 0 || now - sWinStart > kWindow) { sWinStart = now; sWinCount = 0; sSuppressed = 0; }
+    sWinCount++;
+
+    if (now < sBreakerUntil) {
+        sSuppressed++;
+        NSTimeInterval left = sBreakerUntil - now;
+        [sGate unlock];
+        if (sSuppressed == 1 || sSuppressed % 50 == 0) {
+            TBLog(@"刷新熔断中：忽略第 %lu 次请求（触发者=%@，还剩 %.1fs）", (unsigned long)sSuppressed, why, left);
+        }
+        return;
+    }
+
+    if (sWinCount > kWindowMax) {
+        sBreakerUntil = now + kBreaker;
+        sSuppressed = 0;
+        NSUInteger win = sWinCount;
+        [sGate unlock];
+        TBLog(@"刷新风暴！%.0fs 内收到 %lu 次刷新请求（第 %lu 次触发者=%@）→ 熔断 %.1fs 内不再刷新"
+              @"（日志里【本条】之前的『设置变更/阴影/全局效果』重复行就是刷新链在自激）",
+              kWindow, (unsigned long)win, (unsigned long)sReq, why, kBreaker);
+        return;
+    }
+
+    NSTimeInterval since = (sLastRun > 0) ? (now - sLastRun) : 1e9;
+    if (sLastRun > 0 && since < kCooldown) {
+        BOOL needSchedule = !sScheduled;
+        sScheduled = YES;
+        NSUInteger win = sWinCount;
+        [sGate unlock];
+        TBLog(@"刷新合并：距上次仅 %.2fs（< %.1fs 冷却，触发者=%@，本窗口第 %lu 次）→ 合并成一次",
+              since, kCooldown, why, (unsigned long)win);
+        if (needSchedule) {
+            int64_t delayNs = (int64_t)((kCooldown - since) * (double)NSEC_PER_SEC);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delayNs), dispatch_get_main_queue(), ^{
+                [sGate lock];
+                sScheduled = NO;
+                sLastRun = [NSDate timeIntervalSinceReferenceDate];
+                sRunCount++;
+                NSUInteger seq = ++gReloadRunSeq;
+                NSUInteger run = sRunCount;
+                NSUInteger req = sReq;
+                [sGate unlock];
+                TBLog(@"设置变更（合并后执行）：累计请求 %lu 次 / 实际执行 %lu 次", (unsigned long)req, (unsigned long)run);
+                TBRunReload(seq, @"合并延迟执行");
+            });
+        }
+        return;
+    }
+
+    sLastRun = now;
+    sRunCount++;
+    NSUInteger seq = ++gReloadRunSeq;
+    NSUInteger run = sRunCount, req = sReq;
+    BOOL first = !sSaidNoPid;
+    sSaidNoPid = YES;
+    [sGate unlock];
+
+    TBLog(@"刷新开始：触发者=%@（累计请求 %lu 次 / 实际执行 %lu 次）", why,
+          (unsigned long)req, (unsigned long)run);
+    if (first) {
+        TBLog(@"说明：Darwin 通知不带发送者，看不到是谁 post 的；若这里持续刷屏，"
+              @"说明有进程在反复 post com.ning.themeboard.changed（通常是 App 的滑块/开关在连点）");
+    }
+    TBRunReload(seq, why);
+}
+
+static void TBRunReload(NSUInteger mySeq, NSString *why) {
     [gLock lock];
     gIndex = nil;
     gBundleRes = nil;          // 强制重建资源表（含时钟/日历素材）
@@ -3950,9 +4418,11 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
     // 遮罩图是按「主题名」缓存的：设置一变（例如 App 刚导入遮罩）就允许重扫，
     // 否则导入完必须换主题 / 重启才看得到新形状
     gMaskThemeChecked = NO;
-    gGlobalImgCache = nil;      // 设置变更 → 全局效果的缓存一起清
     gMaskThemeKey = nil;
     gMaskThemeImg = nil;
+    // 全局效果缓存【不再每次清空】：以前这里 gGlobalImgCache = nil，
+    // 于是每次刷新（日志里 256 次）都要把所有图标重新套一遍形状+特效；
+    // 现在缓存键里带「主题+特效参数指纹」，参数没变就直接命中。
     // 同理：叠加层 / 阴影素材也是按主题名缓存的
     for (int i = 0; i < 2; i++) { gFxChecked[i] = NO; gFxKey[i] = nil; gFxImg[i] = nil; }
     NSArray *caches = gCaches.allObjects;
@@ -3971,6 +4441,11 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
 
     // 主线程：先（可选）分批清缓存，再通知图标视图重取，最后让 SpringBoard 重排
     dispatch_async(dispatch_get_main_queue(), ^{
+        // 角标还原（0.15.49 根因修复）：换主题 / 关角标开关 / 取消应用 / 任何设置变更
+        // 都要先把上次换上的底板写回【系统原图】—— 否则旧角标一直赖在图标上，
+        // 看起来就像"两个角标叠着"，只有注销才会消失。
+        if (gBadgeApplied) TBBadgeRestoreAll(@"设置变更（换主题/开关/取消应用）");
+
         NSArray *icons = TBAllIcons();
         NSArray *cacheList = caches;
 
@@ -4007,12 +4482,20 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            if (mySeq != sReloadSeq) return;   // 期间又切了主题，交给最新那次处理
+            if (mySeq != gReloadRunSeq) return;   // 期间又刷了一次，交给最新那次处理
             TBHealAllIconViews();
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            TBRefreshSpringBoard();
+            if (mySeq != gReloadRunSeq) return;   // 同上：过期的那次不要再补一刀
+            TBRefreshSpringBoard(why);
+        });
+        // 还原之后把屏幕上的角标重新布局一次：新主题（有素材）立刻补上，
+        // 没素材的主题就保持系统红底 —— 用户要的"换回没素材的主题，角标立刻变回来"
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (mySeq != gReloadRunSeq) return;
+            TBBadgeRelayoutVisible();
         });
     });
 }

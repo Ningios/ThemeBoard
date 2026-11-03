@@ -284,17 +284,18 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         [self alertTitle:@"当前没有应用主题" message:@"桌面已经是系统原样"];
         return;
     }
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:
-                             [NSString stringWithFormat:@"清除「%@」？", active]
-        message:@"桌面图标会恢复系统原样，主题文件夹不会被删除"
-        preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"清除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    // 自绘玻璃确认弹窗（TBConfirmPanelController），不再用系统 UIAlertController
+    __weak typeof(self) wself = self;
+    TBPresentConfirm(self, [NSString stringWithFormat:@"清除「%@」？", active],
+                     @"桌面图标会恢复系统原样，主题文件夹不会被删除",
+                     @"取消", @"清除", YES, ^(BOOL ok) {
+        if (!ok) return;
+        __strong typeof(self) s = wself;
+        if (!s) return;
         [TBPrefs setString:nil forKey:TBKeyActiveTheme];
         [TBPrefs notifyChanged];
-        [self reload];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
+        [s reload];
+    });
 }
 
 #pragma mark - Table
@@ -654,15 +655,49 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
                 [self reload];
             } else {
                 // 失败必须有明确提示，不能静默（原来是 done(NO) 什么都不说）
-                NSString *msg = err.localizedDescription.length ? err.localizedDescription
-                    : [NSString stringWithFormat:@"没法删除这个%@目录：\n%@\n\n可能是权限或路径问题。",
-                       isAsset ? @"素材包" : @"主题", t.path ?: @"(path 为空)"];
-                TBPresentAlert(self, @"删除失败", msg);
+                [self tb_showDeleteFailure:err theme:t];
             }
             done(deleted);
         });
     }];
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
+}
+
+/// 删除失败：给出【可操作】的提示 —— 完整路径 + 复制到剪贴板 + 建议用 Filza，
+/// 并把引擎重试时记下的 errno 一起说清楚（0.15.49：素材包删不掉就是这个）。
+- (void)tb_showDeleteFailure:(NSError *)err theme:(TBTheme *)t {
+    NSString *path = t.path.length ? t.path : (err.userInfo[NSFilePathErrorKey] ?: @"");
+    NSString *why = err.localizedDescription.length ? err.localizedDescription : @"未知原因";
+    NSNumber *eno = err.userInfo[@"errno"];
+    if (!eno) {
+        // 从 "（errno=13）" 这类文案里再兜一次底
+        NSRange rr = [why rangeOfString:@"errno="];
+        if (rr.location != NSNotFound) {
+            NSString *tail = [why substringFromIndex:NSMaxRange(rr)];
+            NSCharacterSet *nonDigit = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+            NSRange stop = [tail rangeOfCharacterFromSet:nonDigit];
+            if (stop.location != NSNotFound) tail = [tail substringToIndex:stop.location];
+            if (tail.length) eno = @(tail.integerValue);
+        }
+    }
+    if (path.length) [UIPasteboard generalPasteboard].string = path;
+    NSString *enumHint = nil;
+    if (eno) {
+        NSInteger e = eno.integerValue;
+        enumHint = (e == 1 || e == 13) ? @"没有访问许可（EPERM/EACCES），多半是文件属于 root 或只读"
+                 : (e == 30) ? @"文件系统只读（EROFS）"
+                 : (e == 16) ? @"目录还在被占用（EBUSY）"
+                 : [NSString stringWithFormat:@"errno=%ld", (long)e];
+    }
+    NSMutableString *msg = [NSMutableString stringWithFormat:@"目录：\n%@\n\n原因：%@", path ?: @"(路径为空)", why];
+    if (enumHint) [msg appendFormat:@"\n（%@）", enumHint];
+    [msg appendString:@"\n\n已依次尝试：直接删除 → 递归 chmod 0777 → 先删内容再删目录。"];
+    if (path.length) {
+        [msg appendString:@"\n\n完整路径【已复制到剪贴板】。\n可以打开 Filza 手动删除这一项（长按 → 删除）："
+                        @"\nFilza → /var/mobile/Documents/ThemeBoard/"];
+    }
+    TBLog2(@"[删除] 失败提示已弹出 path=%@ errno=%@", path ?: @"(空)", eno ? [eno stringValue] : @"-");
+    TBPresentAlert(self, @"删除失败", msg);
 }
 
 /// 删除后：把指向这个目录里的 Custom*Path 清掉并把对应开关关掉（否则设置里留着死路径）
@@ -707,7 +742,7 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         [TBPrefs notifyChanged];
         [self reload];
     } else {
-        [self alertTitle:@"删除失败" message:(err.localizedDescription ?: @"未知原因")];
+        [self tb_showDeleteFailure:err theme:t];
     }
 }
 

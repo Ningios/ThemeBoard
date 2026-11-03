@@ -1127,7 +1127,7 @@ static NSArray<NSArray<NSString *> *> *TBAssetKindTable(void) {
         [self tb_alert:@"导入失败" message:@"找不到主题目录，无法写入遮罩"];
         return;
     }
-    NSString *msg = [NSString stringWithFormat:@"遮罩会写入这个主题：\n%@\n\n也可以用 Filza 把图片直接放进 IconBundles/Icon.png。", dir];
+    NSString *msg = [NSString stringWithFormat:@"遮罩会写入这个主题：\n%@\n\n可以选一张图片，也可以直接选一个 zip（会自动解压，找里面的 IconBundles/Icon.png、icon.png，其次任意 PNG/JPG）。\n也可以用 Filza 把图片直接放进 IconBundles/Icon.png。", dir];
     __weak typeof(self) wself = self;
     TBChoicePanelController *p = [TBChoicePanelController panelWithTitle:@"导入遮罩"
                                                                  message:msg
@@ -1153,7 +1153,7 @@ static NSArray<NSArray<NSString *> *> *TBAssetKindTable(void) {
     // 类型放开到 public.item：否则 iCloud 上不匹配的文件会被系统置灰、根本点不动
     // （选完再由我们自己判定是不是图片，见 didPickDocumentsAtURLs）
     UIDocumentPickerViewController *picker =
-        TBNewImportPicker(@[ UTTypePNG, UTTypeJPEG, UTTypeItem ], @[ @"public.item" ]);
+        TBNewImportPicker(@[ UTTypePNG, UTTypeJPEG, UTTypeZIP, UTTypeArchive, UTTypeItem ], @[ @"public.item" ]);
     if (!picker) { [self tb_alert:@"打不开" message:@"系统没有可用的图片选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
@@ -1165,14 +1165,29 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *url = urls.firstObject;
     if (!url) return;
 
-    // 签发类型放开了，这里要把非图片挡掉并说清楚
+    // 签发类型放开了，这里要把「不是图片也不是 zip」的挡掉并说清楚
     static NSArray *kImgExt;
     if (!kImgExt) kImgExt = @[ @"png", @"jpg", @"jpeg", @"heic", @"webp", @"tiff", @"bmp" ];
     NSString *ext = url.pathExtension.lowercaseString;
+
+    // 直接选到 zip：解压到临时目录，递归找 IconBundles/Icon.png、icon.png，其次任意 PNG/JPG
+    if ([ext isEqualToString:@"zip"]) {
+        NSString *why = nil;
+        NSString *imgPath = [TBThemeScanner extractMaskImageFromZip:url reason:&why];
+        if (!imgPath.length) {
+            [self tb_alert:@"压缩包里没有遮罩图"
+                   message:(why.length ? why : @"解压后没找到可用的图片，换一个压缩包再试")];
+            return;
+        }
+        TBLog2(@"[导入遮罩] zip 里找到遮罩图：%@", imgPath);
+        url = [NSURL fileURLWithPath:imgPath];      // 后面按普通图片继续走
+        ext = url.pathExtension.lowercaseString;
+    }
+
     if (![kImgExt containsObject:(ext ?: @"")]) {
         [self tb_alert:@"这不是图片"
                message:[NSString stringWithFormat:
-                        @"遮罩需要 PNG / JPG 图片，你选的是「%@」。\n\n如果遮罩在压缩包里，请先用「文件」App 解压（或长按 → 解压缩），再选里面的图片。",
+                        @"遮罩需要 PNG / JPG 图片，或者一个装着遮罩图的 zip。\n你选的是「%@」。",
                         url.lastPathComponent ?: @"这个文件"]];
         return;
     }

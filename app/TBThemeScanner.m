@@ -4,7 +4,99 @@
 #import "TBImageUtil.h"
 #import "TBDocImport.h"
 #import <spawn.h>
+#import <sys/stat.h>
+#import <errno.h>
 extern char **environ;
+
+#pragma mark - 删除用的底层工具（0.15.49）
+
+/// 递归把目录/文件权限放开。素材包里常有 root 所有或只读的文件，
+/// App（mobile 用户）直接删会 EACCES，先 chmod 0777 再试一次。
+static void TBRecursiveChmod(NSString *path, mode_t mode) {
+    if (!path.length) return;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:path isDirectory:&isDir]) return;
+    if (chmod(path.fileSystemRepresentation, mode) != 0) {
+        TBLog2(@"[删除] chmod %@ 失败 errno=%d", path, errno);
+    }
+    if (!isDir) return;
+    NSArray *items = [fm contentsOfDirectoryAtPath:path error:NULL];
+    for (NSUInteger i = 0; i < items.count; i++) {
+        TBRecursiveChmod([path stringByAppendingPathComponent:items[i]], mode);
+    }
+}
+
+/// 先删内容、再删空目录（目录本身删不掉时，至少把里面的东西清干净）
+static BOOL TBRemoveContentsThenDir(NSString *path, NSError **outErr, int *errnoOut) {
+    if (!path.length) return NO;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:path isDirectory:&isDir]) return YES;   // 已经没了
+    if (!isDir) {
+        NSError *e = nil;
+        BOOL ok = [fm removeItemAtPath:path error:&e];
+        if (!ok) { if (outErr) *outErr = e; if (errnoOut) *errnoOut = (int)e.code; }
+        return ok;
+    }
+    NSArray *items = [fm contentsOfDirectoryAtPath:path error:NULL];
+    for (NSUInteger i = 0; i < items.count; i++) {
+        NSError *e = nil;
+        int eno = 0;
+        if (!TBRemoveContentsThenDir([path stringByAppendingPathComponent:items[i]], &e, &eno)) {
+            if (outErr) *outErr = e;
+            if (errnoOut) *errnoOut = eno;
+            return NO;
+        }
+    }
+    NSError *e = nil;
+    if (![fm removeItemAtPath:path error:&e]) {
+        if (outErr) *outErr = e;
+        if (errnoOut) *errnoOut = (int)e.code;
+        return NO;
+    }
+    return ![fm fileExistsAtPath:path];
+}
+
+/// 在解压出来的目录里递归找遮罩图：
+///   ① IconBundles/Icon.png  ② icon.png  ③ AppIconMask*  ④ IconMask*
+///   ⑤ 任意 PNG / JPG（深度 ≤ 6 层，条目上限保护）
+static NSString *TBMaskImageInsideDir(NSString *root) {
+    if (!root.length) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray *dirs = [NSMutableArray arrayWithObject:root];
+    NSMutableArray *imgs = [NSMutableArray array];
+    NSInteger guard = 0;
+    while (dirs.count && guard++ < 500) {
+        NSString *d = dirs.firstObject;
+        [dirs removeObjectAtIndex:0];
+        NSArray *items = [fm contentsOfDirectoryAtPath:d error:NULL];
+        for (NSUInteger i = 0; i < items.count; i++) {
+            NSString *item = items[i];
+            if ([item hasPrefix:@"__MACOSX"] || [item hasPrefix:@"."]) continue;
+            NSString *full = [d stringByAppendingPathComponent:item];
+            BOOL isDir = NO;
+            if (![fm fileExistsAtPath:full isDirectory:&isDir]) continue;
+            if (isDir) { [dirs addObject:full]; continue; }
+            NSString *low = item.lowercaseString;
+            if (![low hasSuffix:@".png"] && ![low hasSuffix:@".jpg"] && ![low hasSuffix:@".jpeg"]) continue;
+            if ([low isEqualToString:@"icon.png"]) {
+                NSString *parent = [d lastPathComponent].lowercaseString;
+                if ([parent isEqualToString:@"iconbundles"]) return full;   // 最优命中
+            }
+            [imgs addObject:full];
+        }
+    }
+    // 其次：任意 icon.png → AppIconMask* → IconMask* → 任意图片
+    NSArray *rankPrefixes = @[ @"icon.png", @"icon@", @"appiconmask", @"iconmask" ];
+    for (NSUInteger r = 0; r < rankPrefixes.count; r++) {
+        NSString *pre = rankPrefixes[r];
+        for (NSUInteger i = 0; i < imgs.count; i++) {
+            if ([[imgs[i] lastPathComponent].lowercaseString hasPrefix:pre]) return imgs[i];
+        }
+    }
+    return imgs.count ? imgs[0] : nil;
+}
 
 /// 扫描根 = 新结构下的 Themes/（主题包）+ Assets/（素材包）
 static NSArray<NSString *> *TBScanRoots(void) {
@@ -644,6 +736,75 @@ static BOOL TBIsThemeLikeDirectory(NSString *dir) {
     return dst;
 }
 
+/// 把一个 zip 解压到临时目录，递归找出里面的遮罩图，返回【临时图片路径】（调用方用完自行删）。
+/// 找图顺序：IconBundles/Icon.png → icon.png → AppIconMask* → IconMask* → 任意 PNG/JPG。
+/// 找不到就回填 reason（带压缩包里的文件名列表），方便用户知道到底为什么不行。
++ (nullable NSString *)extractMaskImageFromZip:(NSURL *)zipURL reason:(NSString **)reason {
+    if (reason) *reason = nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSError *err = nil;
+    NSURL *copy = TBCopyCoordinatedItemToTemp(zipURL, &err);
+    if (!copy) {
+        if (reason) *reason = TBImportFailureMessage(zipURL, err, @"压缩包读不出来");
+        return nil;
+    }
+    NSString *zipPath = copy.path;
+    NSString *work = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"tb-maskzip-%@", [NSUUID UUID].UUIDString]];
+    NSError *uzErr = nil;
+    BOOL ok = [TBZip unzipFileAtPath:zipPath toDirectory:work error:&uzErr];
+    TBRemoveTempCopy(copy);
+    if (!ok) {
+        [fm removeItemAtPath:work error:NULL];
+        TBLog2(@"[导入遮罩][zip] ❌ 解压失败 %@ err=%@", zipPath, uzErr.localizedDescription ?: @"-");
+        if (reason) *reason = [NSString stringWithFormat:@"解压失败：%@（%@）",
+                               uzErr.localizedDescription ?: @"不是有效的 zip",
+                               zipURL.lastPathComponent ?: @"这个文件"];
+        return nil;
+    }
+    NSString *found = TBMaskImageInsideDir(work);
+    if (!found.length) {
+        // 列几个文件名 —— 只说「没找到」用户没法定位
+        NSMutableArray *names = [NSMutableArray array];
+        NSMutableArray *dirs = [NSMutableArray arrayWithObject:work];
+        NSInteger guard = 0;
+        while (dirs.count && names.count < 8 && guard++ < 200) {
+            NSString *d = dirs.firstObject;
+            [dirs removeObjectAtIndex:0];
+            NSArray *items = [fm contentsOfDirectoryAtPath:d error:NULL];
+            for (NSUInteger i = 0; i < items.count; i++) {
+                NSString *item = items[i];
+                if ([item hasPrefix:@"__MACOSX"] || [item hasPrefix:@"."]) continue;
+                NSString *full = [d stringByAppendingPathComponent:item];
+                BOOL isDir = NO;
+                if (![fm fileExistsAtPath:full isDirectory:&isDir]) continue;
+                if (isDir) { [dirs addObject:full]; continue; }
+                [names addObject:item];
+            }
+        }
+        [fm removeItemAtPath:work error:NULL];
+        TBLog2(@"[导入遮罩][zip] ❌ 包里没有图片：%@", [names componentsJoinedByString:@", "]);
+        if (reason) *reason = [NSString stringWithFormat:
+            @"压缩包里没有找到图片（找过 IconBundles/Icon.png、icon.png、AppIconMask*、IconMask*，"
+            @"以及任意 PNG/JPG）。\n里面是：\n%@",
+            names.count ? [names componentsJoinedByString:@"\n"] : @"(空压缩包)"];
+        return nil;
+    }
+    NSString *ext = found.pathExtension.length ? found.pathExtension.lowercaseString : @"png";
+    NSString *dest = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"tbmaskv-%@.%@", [NSUUID UUID].UUIDString, ext]];
+    NSError *cpErr = nil;
+    BOOL cp = [fm copyItemAtPath:found toPath:dest error:&cpErr];
+    [fm removeItemAtPath:work error:NULL];
+    if (!cp) {
+        if (reason) *reason = [NSString stringWithFormat:@"压缩包里的图片拿不出来：%@",
+                               cpErr.localizedDescription ?: @"未知原因"];
+        return nil;
+    }
+    TBLog2(@"[导入遮罩][zip] ✅ %@ → %@", zipURL.lastPathComponent ?: @"?", dest);
+    return dest;
+}
+
 + (BOOL)deleteTheme:(TBTheme *)theme error:(NSError **)error {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *path = theme.path;
@@ -677,18 +838,50 @@ static BOOL TBIsThemeLikeDirectory(NSString *dir) {
     }
     if (!underKnownRoot) TBLog2(@"[删除] ⚠️ 不在已知根目录下，仍然按 path 删除：%@", path);
 
+    // ---- 删除：按序重试 ----
+    // 用户实测素材包会弹「未能移除"虚化蒙版.theme"，因为你没有访问许可」：
+    // 素材包/主题包里的文件常是 root 或只读权限，直接 removeItemAtPath 会 EACCES。
+    // 这里按序来：① 直接删 → ② 递归 chmod 0777 再删 → ③ 先删内容、再删空目录。
+    int lastErrno = 0;
     NSError *err = nil;
     BOOL ok = [fm removeItemAtPath:path error:&err];
+    if (!ok) lastErrno = (int)err.code;
+    BOOL still = [fm fileExistsAtPath:path];
+
+    if ((!ok || still)) {
+        TBLog2(@"[删除] 第 1 次失败（errno=%d，%@）→ 递归 chmod 0777 后重试：%@",
+               lastErrno, err.localizedDescription ?: @"无错误", path);
+        TBRecursiveChmod(path, 0777);
+        err = nil;
+        ok = [fm removeItemAtPath:path error:&err];
+        if (!ok) lastErrno = (int)err.code;
+        still = [fm fileExistsAtPath:path];
+    }
+    if ((!ok || still)) {
+        TBLog2(@"[删除] 第 2 次失败（errno=%d，%@）→ 改为先删内容、再删目录：%@",
+               lastErrno, err.localizedDescription ?: @"无错误", path);
+        NSError *e3 = nil;
+        int e3no = 0;
+        ok = TBRemoveContentsThenDir(path, &e3, &e3no);
+        if (!ok) { err = e3; if (e3no) lastErrno = e3no; }
+    }
     // 二次确认：有些路径 removeItemAtPath 返回 YES 但目录还在（文件系统写入延迟）
     if (ok && [fm fileExistsAtPath:path]) {
         ok = NO;
         if (!err) err = [NSError errorWithDomain:@"TB" code:13 userInfo:@{
             NSLocalizedDescriptionKey: @"删除后目录仍然存在（可能没有权限）"}];
     }
-    TBLog2(@"[删除] %@ path=%@（%@）", ok ? @"✅ 成功" : @"❌ 失败", path,
+    TBLog2(@"[删除] %@ path=%@ errno=%d（%@）", ok ? @"✅ 成功" : @"❌ 失败", path, lastErrno,
            err.localizedDescription ?: @"无错误");
-    if (!ok && error) *error = err ?: [NSError errorWithDomain:@"TB" code:14 userInfo:@{
-        NSLocalizedDescriptionKey: @"删除失败（未知原因）"}];
+    if (!ok && error) {
+        NSString *why = err.localizedDescription.length ? err.localizedDescription
+                                                        : @"未知原因（权限或只读文件系统）";
+        *error = [NSError errorWithDomain:@"TB" code:(err.code ?: 14) userInfo:@{
+            NSLocalizedDescriptionKey: [NSString stringWithFormat:@"%@（errno=%d）", why, lastErrno],
+            NSFilePathErrorKey: path ?: @"",
+            @"errno": @(lastErrno),
+            NSLocalizedFailureReasonErrorKey: @"已依次尝试：直接删除 → 递归 chmod 0777 → 先删内容再删目录"}];
+    }
     return ok;
 }
 

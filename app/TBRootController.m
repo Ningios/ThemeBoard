@@ -26,6 +26,7 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
 @property (nonatomic, assign) NSInteger current;
 @property (nonatomic, strong) UIViewPropertyAnimator *pillAnimator;
 @property (nonatomic, assign) BOOL switching;
+@property (nonatomic, assign) BOOL draggingDock;   // 底栏跟手拖动中
 @end
 
 @implementation TBRootController
@@ -163,6 +164,12 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
         [btns addObject:b];
     }
 
+    // 底栏跟手滑动：按住左右拖 → 胶囊跟着手指走，松手吸附到最近 Tab 并播水滴动画
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                        action:@selector(tb_dockPan:)];
+    pan.cancelsTouchesInView = NO;
+    [dock addGestureRecognizer:pan];
+
     self.dock = dock;
     self.dockButtons = btns;
     [self.view addSubview:dock];
@@ -200,6 +207,51 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
         return;
     }
     [self tb_switchToTab:idx];
+}
+
+- (void)tb_dockPan:(UIPanGestureRecognizer *)g {
+    NSInteger n = (NSInteger)self.dockButtons.count;
+    if (n < 1 || self.switching) return;
+    CGFloat w = self.dock.bounds.size.width / n;
+    CGFloat h = self.dock.bounds.size.height;
+    CGPoint p = [g locationInView:self.dock];
+
+    if (g.state == UIGestureRecognizerStateBegan) {
+        self.draggingDock = YES;
+        [self.pillAnimator stopAnimation:YES];
+        [self.pill.layer removeAllAnimations];
+    }
+    if (self.draggingDock) {
+        CGFloat x = MIN(MAX(p.x - w / 2.0, 0.0), self.dock.bounds.size.width - w);
+        self.pill.frame = CGRectMake(x + 4, 4, w - 8, h - 8);     // 胶囊跟手
+        // 图标/文字按与胶囊中心的距离淡入淡出（拖到哪边哪边亮）
+        CGFloat pc = CGRectGetMidX(self.pill.frame);
+        for (UIButton *b in self.dockButtons) {
+            CGFloat d = fabs((CGRectGetMidX(b.frame)) - pc) / w;   // 0 = 正对，1 = 隔一个
+            CGFloat on = MAX(0.0, 1.0 - d);
+            ((UIImageView *)[b viewWithTag:101]).alpha = 0.45 + 0.55 * on;
+            ((UILabel *)[b viewWithTag:102]).alpha = 0.45 + 0.55 * on;
+        }
+    }
+    if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled ||
+        g.state == UIGestureRecognizerStateFailed) {
+        if (!self.draggingDock) return;
+        self.draggingDock = NO;
+        CGFloat vx = [g velocityInView:self.dock].x;
+        NSInteger idx = (NSInteger)floor(p.x / w);
+        if (vx > 320.0) idx = (NSInteger)floor(p.x / w) + 1;        // 快速甩 → 往下一格
+        else if (vx < -320.0) idx = (NSInteger)floor(p.x / w);
+        idx = MAX(0, MIN(idx, n - 1));
+        if (idx == self.current) {                                   // 没换页：吸附回原位
+            [UIView animateWithDuration:0.22 delay:0
+                                options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                             animations:^{ self.pill.frame = [self pillFrameForTab:self.current]; }
+                             completion:^(BOOL f) { [self refreshDock]; }];
+            return;
+        }
+        self.current = idx;                                          // 先记当前页，动画里从手指位置收到目标
+        [self tb_switchToTab:idx];
+    }
 }
 
 - (void)tb_switchToTab:(NSInteger)idx {

@@ -59,4 +59,8 @@
 /// 删除主题目录（不可恢复）
 + (BOOL)deleteTheme:(TBTheme *)theme error:(NSError **)error;
 
+/// 把 zip 解压到临时目录并找出里面的遮罩图，返回【临时图片路径】（用完自行删除）。
+/// 失败时回填 reason（带压缩包里的文件名列表）。
++ (nullable NSString *)extractMaskImageFromZip:(NSURL *)zipURL reason:(NSString *_Nullable *_Nullable)reason;
+
 @end

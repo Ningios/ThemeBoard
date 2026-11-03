@@ -340,11 +340,7 @@ static NSString *TBReadLogLossy(NSString *path) {
         }
     }
     [UIPasteboard generalPasteboard].string = dir;
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已复制日志目录"
-                                                                message:dir
-                                                         preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
+    TBPresentAlert(self, @"已复制日志目录", dir);   // 自绘玻璃弹窗（不再用系统 UIAlertController）
 }
 
 @end
