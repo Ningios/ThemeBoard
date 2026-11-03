@@ -303,12 +303,20 @@ void TBStyleSearchBarGlass(UISearchBar *sb) {
     sb.searchBarStyle = UISearchBarStyleMinimal;
     sb.barTintColor = [UIColor clearColor];
     sb.backgroundColor = [UIColor clearColor];
+    sb.showsCancelButton = NO;               // ★ 不要系统的「取消」按钮（用户要求删掉）
+    if ([sb respondsToSelector:@selector(setShowsScopeBar:)]) sb.showsScopeBar = NO;
 
     UITextField *tf = (UITextField *)TBFindSearchField(sb, 0);
     if (!tf) return;                       // 还没建出输入框 → 等下一次布局
     tf.backgroundColor = [UIColor clearColor];
     tf.borderStyle = UITextBorderStyleNone;
     tf.textColor = [UIColor labelColor];
+    // ★ 文字聚焦后"会动/错位"：系统在聚焦时会改 tf 的左右内边距（给取消按钮腾位）。
+    //   固定成对称内边距，聚焦前后文字位置一致。
+    tf.leftView = nil;
+    tf.rightView = nil;
+    [tf setValue:@(12.0) forKey:@"paddingLeft"];
+    [tf setValue:@(12.0) forKey:@"paddingRight"];
 
     UIView *glass = objc_getAssociatedObject(tf, kTBSearchGlassKey);
     if (!glass) {
