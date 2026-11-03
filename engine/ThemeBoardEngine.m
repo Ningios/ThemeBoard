@@ -1340,6 +1340,34 @@ static void TBSetAppearanceType(long t, NSString *why) {
     });
 }
 
+static BOOL TBFollowSystemDark(void);
+/// 启动后每 1 秒核对一次系统深浅色（唯一来源，不会像 per-view 回调那样互相打架）
+static void TBStartAppearanceWatch(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // 先按当前系统状态定初值
+        @try {
+            UITraitCollection *tc = [UIScreen mainScreen].traitCollection;
+            if (tc && tc.userInterfaceStyle == UIUserInterfaceStyleDark) gTBAppearanceType = 1;
+        } @catch (NSException *e) { }
+
+        dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                     dispatch_get_main_queue());
+        dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+                                  NSEC_PER_SEC, 200 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(t, ^{
+            if (!TBFollowSystemDark() || !TBAppearanceEnabled()) return;
+            @try {
+                UITraitCollection *tc = [UIScreen mainScreen].traitCollection;
+                if (!tc) return;
+                long want = (tc.userInterfaceStyle == UIUserInterfaceStyleDark) ? 1 : 0;
+                if (want != gTBAppearanceType) TBSetAppearanceType(want, @"系统深浅色");
+            } @catch (NSException *e) { }
+        });
+        dispatch_resume(t);
+    });
+}
+
 static id tb_storeImageForIcon(id self, SEL _cmd, id icon, id appearance) {
     @try {
         if (appearance && [appearance respondsToSelector:NSSelectorFromString(@"appearanceType")]) {
@@ -1354,7 +1382,7 @@ static id tb_storeImageForIcon(id self, SEL _cmd, id icon, id appearance) {
 /// iOS 17 没有图标外观，用系统深色模式当开关
 static BOOL TBFollowSystemDark(void) {
     id v = TBPref(@"FollowSystemDark");
-    return v ? [v boolValue] : NO;   // 默认关闭：先由用户主动开启再观察
+    return v ? [v boolValue] : YES;  // 默认跟随系统深浅色
 }
 
 typedef void (*TraitFn)(id, SEL, id);
@@ -3092,12 +3120,13 @@ static void TBInstall(void) {
             o_storeImage = (FnStoreImage)TBHook(apStore, @"imageForIcon:appearance:",
                                                 (IMP)tb_storeImageForIcon, "图标外观记录");
         }
-        // iOS 17：跟随系统深色模式
+        // iOS 17：跟随系统深色模式（轮询 UIScreen，1 秒一次，最可靠）
         Class ivCls = NSClassFromString(@"SBIconView");
         if (ivCls && TBHasMethod(ivCls, @"traitCollectionDidChange:")) {
             o_traitDidChange = (TraitFn)TBHook(ivCls, @"traitCollectionDidChange:",
                                                (IMP)tb_traitDidChange, "深色模式跟随");
         }
+        TBStartAppearanceWatch();
 
     }
 
