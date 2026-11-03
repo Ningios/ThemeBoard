@@ -514,6 +514,21 @@ static UIImage *TBMakeOpaqueOnBodyColor(UIImage *img) {
 /// 主题里是否有同名资源（表盘/指针/文件夹底等）
 static UIImage *TBResourceImage(NSString *name) {
     if (!name.length || TBSafeMode() || !TBEnabled()) return nil;
+
+    // 同一主题同一素材只解码一次（原来每次取图都重新读盘 + 解码 PNG）
+    static NSMutableDictionary *gResCache = nil;
+    static NSString *gResTheme = nil;
+    static dispatch_once_t onceRes;
+    dispatch_once(&onceRes, ^{ gResCache = [NSMutableDictionary dictionary]; });
+    NSString *themeKey = TBActiveTheme() ?: @"";
+    if (![themeKey isEqualToString:gResTheme ?: @""]) {
+        [gResCache removeAllObjects];
+        gResTheme = [themeKey copy];
+    }
+    NSString *ck = [themeKey stringByAppendingFormat:@"|%@", name];
+    id cached = gResCache[ck];
+    if (cached) return (cached == [NSNull null]) ? nil : cached;
+
     [gLock lock];
     TBLoadIndex();
     NSString *dir = nil;
@@ -523,12 +538,11 @@ static UIImage *TBResourceImage(NSString *name) {
     }
     NSMutableDictionary *res = TBThemeBundleRes();   // 无主题 → 清空并返回 nil
     [gLock unlock];
-    if (!res.count) return nil;
+    if (!res.count) { gResCache[ck] = [NSNull null]; return nil; }
 
     NSString *key = name.lastPathComponent.lowercaseString;
     NSString *path = res[key];
     if ([key hasPrefix:@"clockicon"]) {
-        // 诊断：这根针到底来自哪里、原始画布多大（对照 SB 会不会用它）
         TBLogOnce([@"clocksrc|" stringByAppendingString:(TBActiveTheme() ?: @"")],
                   @"时钟素材来源[%@] %@ → %@",
                   TBActiveTheme() ?: @"?", key,
@@ -542,11 +556,9 @@ static UIImage *TBResourceImage(NSString *name) {
     }
     // 必须用 init 方法：imageWithContentsOfFile: 已被本引擎 hook，
     // 在此调用会形成无限递归（栈溢出 → SpringBoard 崩溃循环）。
-    if (!path) return nil;
+    if (!path) { gResCache[ck] = [NSNull null]; return nil; }
     UIImage *img = [[UIImage alloc] initWithContentsOfFile:path];
-
-    // 注意：不做任何"填白/不透明化"。SnowBoard 也不做 —— 填色会把半透明玻璃表盘
-    // 整块填成主题主体色（玻璃主题就变成一块黑）。四角由图标圆角遮罩处理即可。
+    gResCache[ck] = img ?: (id)[NSNull null];
     return img;
 }
 
@@ -2248,6 +2260,18 @@ static void TBApplyClockImagesToSet(id set) {
         {@"secondDot",     @"ClockIconRedDot"},
     };
     NSInteger applied = 0, restored = 0;
+    // 时钟素材准备结果缓存：同主题同成员只解码/抠白底/缩放一次。
+    // 系统每次重建针集（约每 10 秒）都会走到这里，原来每次重跑一遍 → 持续耗电发热。
+    static NSMutableDictionary *gPrepared = nil;
+    static NSString *gPreparedTheme = nil;
+    static dispatch_once_t oncePrep;
+    dispatch_once(&oncePrep, ^{ gPrepared = [NSMutableDictionary dictionary]; });
+    NSString *prepTheme = TBActiveTheme() ?: @"";
+    if (![prepTheme isEqualToString:gPreparedTheme ?: @""]) {
+        [gPrepared removeAllObjects];
+        gPreparedTheme = [prepTheme copy];
+    }
+
     static NSMutableDictionary *gOriginalMembers = nil;
     static dispatch_once_t onceMembers;
     static BOOL captured = NO;
@@ -2268,6 +2292,17 @@ static void TBApplyClockImagesToSet(id set) {
         SEL setter0 = NSSelectorFromString([NSString stringWithFormat:@"set%@%@:",
                                            [[map[i].key substringToIndex:1] uppercaseString],
                                            [map[i].key substringFromIndex:1]]);
+        NSString *pkey = [prepTheme stringByAppendingFormat:@"|%@", map[i].key];
+        {
+            UIImage *prep = gPrepared[pkey];
+            if ([prep isKindOfClass:[UIImage class]] && [set respondsToSelector:setter0]) {
+                @try {
+                    ((void (*)(id, SEL, id))objc_msgSend)(set, setter0, prep);
+                    applied++;
+                } @catch (NSException *e) { }
+                continue;
+            }
+        }
         UIImage *img = TBResourceImage(map[i].res);
         if (!img) {
             // 主题没这一项 → 还原系统原样（系统的针集是缓存复用的，不还原会残留上一个主题的针）
@@ -2354,10 +2389,13 @@ static void TBApplyClockImagesToSet(id set) {
         @try {
             ((void (*)(id, SEL, id))objc_msgSend)(set, setter, img);
             applied++;
+            gPrepared[pkey] = img;
         } @catch (NSException *e) { }
     }
     if (applied > 0 || restored > 0) {
-        TBLog(@"时钟图像集：注入 %ld 项，还原系统 %ld 项", (long)applied, (long)restored);
+        TBLogOnce([@"clockset|" stringByAppendingFormat:@"%@|%ld|%ld", prepTheme,
+                   (long)applied, (long)restored],
+                  @"时钟图像集：注入 %ld 项，还原系统 %ld 项", (long)applied, (long)restored);
     }
 }
 
