@@ -21,6 +21,9 @@ extern NSString *const TBKeyLogEnabled;     // BOOL
 + (NSString *)stringForKey:(NSString *)key;
 + (void)setString:(NSString *)value forKey:(NSString *)key;
 
++ (double)doubleForKey:(NSString *)key defaultValue:(double)value;
++ (void)setDouble:(double)value forKey:(NSString *)key;
+
 + (void)synchronize;
 + (void)notifyChanged;
 

@@ -38,6 +38,12 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
         @[ @{@"t": @"引擎状态", @"act": @"engineInfo"},
            @{@"t": @"重启桌面（让引擎生效）", @"act": @"respring"} ],
         @[ @{@"t": @"启用引擎", @"k": TBKeyEnabled, @"v": @YES, @"d": @"关闭后完全恢复系统原样"} ],
+        @[ @{@"t": @"用主题遮罩图", @"k": @"UseThemeIconMask", @"v": @NO,
+             @"d": @"主题里放 IconMask.png 就用它当图标形状"},
+           @{@"t": @"自定义图标圆角", @"k": @"MaskCornerRadiusOn", @"v": @NO,
+             @"d": @"开启后按 CustomCornerRadius 算法（默认 13.42）裁圆角"},
+           @{@"t": @"图标圆角半径", @"k": @"MaskCornerRadius", @"v": @13.42, @"num": @YES,
+             @"d": @"CustomCornerRadius，60 ≈ 满圆角，默认 13.42"} ],
         @[ @{@"t": @"程序坞", @"k": TBKeyApplyDock, @"v": @YES},
            @{@"t": @"文件夹预览", @"k": TBKeyApplyFolder, @"v": @YES},
            @{@"t": @"App 切换器", @"k": TBKeyApplySwitcher, @"v": @YES},
@@ -58,6 +64,7 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
         @"引擎状态": @"waveform.path.ecg", @"重启桌面（让引擎生效）": @"arrow.clockwise.circle", @"安装 / 更新引擎": @"arrow.down.circle",
         @"重启桌面": @"arrow.clockwise.circle",
         @"启用引擎": @"power", @"程序坞": @"dock.rectangle", @"文件夹预览": @"folder",
+        @"用主题遮罩图": @"square.dashed", @"自定义图标圆角": @"circle.dashed", @"图标圆角半径": @"ruler",
         @"App 切换器": @"rectangle.stack", @"设置页图标": @"gearshape", @"分享面板": @"square.and.arrow.up",
         @"通知中心": @"bell.badge",
         @"导入主题…": @"square.and.arrow.down", @"在文件管理器中打开主题目录": @"folder.badge.gearshape",
@@ -86,9 +93,10 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
     switch (section) {
         case 0: return @"引擎组件";
         case 1: return @"开关";
-        case 2: return @"生效范围";
-        case 3: return @"主题";
-        case 4: return @"外观";
+        case 2: return @"图标形状";
+        case 3: return @"生效范围";
+        case 4: return @"主题";
+        case 5: return @"外观";
         default: return @"诊断";
     }
 }
@@ -101,8 +109,9 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
         return @"没有检测到引擎。RootHide 下 App 无法写入注入目录，请在 Sileo 安装「ThemeBoard 引擎」，装完重启一次桌面。";
     }
     if (section == 1) return @"关闭后完全恢复系统原样。";
-    if (section == 2) return @"程序坞 / 文件夹预览 / App 切换器共用系统图标缓存，任一开启即生效；设置页图标 / 通知中心 / 分享面板可单独关闭。";
-    if (section == 3) {
+    if (section == 2) return @"优先级：主题遮罩图 → 自定义圆角 → 系统形状。两个开关都关着 = 保持现在这样。";
+    if (section == 3) return @"程序坞 / 文件夹预览 / App 切换器共用系统图标缓存，任一开启即生效；设置页图标 / 通知中心 / 分享面板可单独关闭。";
+    if (section == 4) {
         NSMutableString *s = [NSMutableString stringWithString:@"主题目录：\n"];
         for (NSDictionary *d in [TBThemeScanner rootDiagnostics]) {
             NSString *flag = [d[@"exists"] boolValue]
@@ -112,8 +121,9 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
         }
         return s;
     }
-    if (section == 4) return nil;
-    if (section == 5) return @"打开：应用主题后分批清理图标缓存，桌面立即刷新。关闭：资源库立即生效，桌面要等系统自然刷新或重启桌面。";
+    if (section == 5) return nil;
+    if (section == 6) return nil;
+    if (section == 7) return @"打开：应用主题后分批清理图标缓存，桌面立即刷新。关闭：资源库立即生效，桌面要等系统自然刷新或重启桌面。";
     return nil;
 }
 
@@ -136,7 +146,27 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
         cell.imageView.tintColor = [UIColor secondaryLabelColor];
     }
 
-    if (row[@"k"]) {
+    if (row[@"num"]) {
+        // 数值行（MaskCornerRadius）：右侧可编辑的输入框，失焦/点"完成"时写回偏好
+        if (row[@"d"]) cell.detailTextLabel.text = row[@"d"];
+        UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 88, 32)];
+        tf.textAlignment = NSTextAlignmentRight;
+        tf.keyboardType = UIKeyboardTypeDecimalPad;
+        tf.borderStyle = UITextBorderStyleRoundedRect;
+        tf.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightRegular];
+        tf.text = [NSString stringWithFormat:@"%.2f",
+                   [TBPrefs doubleForKey:row[@"k"] defaultValue:[row[@"v"] doubleValue]]];
+        tf.tag = indexPath.section * 100 + indexPath.row;
+        [tf addTarget:self action:@selector(numberChanged:) forControlEvents:UIControlEventEditingDidEnd];
+        UIToolbar *bar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 320, 44)];
+        bar.items = @[ [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace
+                                                                     target:nil action:nil],
+                       [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                                     target:tf action:@selector(resignFirstResponder)] ];
+        tf.inputAccessoryView = bar;
+        cell.accessoryView = tf;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (row[@"k"]) {
         UISwitch *sw = [[UISwitch alloc] init];
         sw.on = [TBPrefs boolForKey:row[@"k"] defaultValue:[row[@"v"] boolValue]];
         sw.tag = indexPath.section * 100 + indexPath.row;
@@ -182,6 +212,21 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
     if ([item[@"k"] isEqualToString:@"FollowSystem"]) {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"TBAppearanceChanged" object:nil];
     }
+}
+
+/// 数值行编辑结束：写回偏好（非法输入回默认值）
+- (void)numberChanged:(UITextField *)tf {
+    NSInteger section = tf.tag / 100, row = tf.tag % 100;
+    if (section < 0 || section >= (NSInteger)self.model.count) return;
+    if (row < 0 || row >= (NSInteger)self.model[section].count) return;
+    NSDictionary *item = self.model[section][row];
+    NSString *k = item[@"k"];
+    if (!k.length) return;
+    double v = tf.text.doubleValue;
+    if (tf.text.length == 0 || v < 0 || v != v || v > 10000) v = [item[@"v"] doubleValue];
+    [TBPrefs setDouble:v forKey:k];
+    [TBPrefs notifyChanged];
+    tf.text = [NSString stringWithFormat:@"%.2f", v];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {

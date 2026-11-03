@@ -759,6 +759,8 @@ static UIImage *TBCalendarCompositeImage(UIImage *bg) {
 /// （WPS / 设置 / 相机 / 备忘录这些）不打遮罩就是方块，这里统一按超椭圆裁。
 static UIImage *gSystemMaskTemplate;                 // 系统遮罩形状（学到后全用它）
 static UIImage *TBMaskWithSystemShape(UIImage *art);
+static UIImage *TBMaskWithThemeMask(UIImage *art, UIImage *mask);      // 用主题自带遮罩图裁
+static UIImage *TBApplyIconShape(UIImage *img, BOOL skipIfRounded);    // 三种模式的统一入口
 
 typedef id (*ContentsImgFn)(id, SEL);
 static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
@@ -795,15 +797,134 @@ static BOOL TBIconArtAlreadyRounded(UIImage *img) {
     return rounded;
 }
 
-static UIImage *TBIconRoundedImage(UIImage *img) {
-    if (!img) return img;
-    if (TBIconArtAlreadyRounded(img)) return img;      // 已是圆角素材 → 不裁
-    if (gSystemMaskTemplate) return TBMaskWithSystemShape(img);   // 按系统形状裁
-    CGSize pt = img.size;
-    if (pt.width < 16 || pt.height < 16) return img;
-    CGFloat radius = MIN(pt.width, pt.height) * 0.2237;
+// ---- 图标形状：三种模式（优先级从高到低）----
+//   ① UseThemeIconMask   主题自带遮罩图 IconMask.png 当 alpha 遮罩（作者明确要的形状）
+//   ② MaskCornerRadiusOn 按 SnowBoard 的 CustomCornerRadius 算法裁圆角
+//   ③ 现状              gSystemMaskTemplate → 已是圆角素材就跳过 → MIN(宽,高)×22.37% 兜底
+static BOOL TBUseThemeIconMask(void) {
+    id v = TBPref(@"UseThemeIconMask");
+    return v ? [v boolValue] : NO;
+}
+static BOOL TBMaskCornerRadiusOn(void) {
+    id v = TBPref(@"MaskCornerRadiusOn");
+    return v ? [v boolValue] : NO;
+}
+/// CustomCornerRadius：SB 默认 60 × 22.37% ≈ 13.42（60 == 半径等于半宽）
+static double TBMaskCornerRadius(void) {
+    id v = TBPref(@"MaskCornerRadius");
+    double r = 13.42;
+    if ([v respondsToSelector:@selector(doubleValue)]) {
+        double d = [v doubleValue];
+        if (d == d && d >= 0.0) r = d;      // NaN / 负数 → 回到默认
+    }
+    return r;
+}
+
+/// 在一个目录里按名字找文件（大小写不敏感，命中第一个）
+static NSString *TBFindFileCI(NSString *dir, NSString *name) {
+    if (!dir.length || !name.length) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *item in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
+        if ([item caseInsensitiveCompare:name] != NSOrderedSame) continue;
+        NSString *p = [dir stringByAppendingPathComponent:item];
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:p isDirectory:&isDir] && !isDir) return p;
+    }
+    return nil;
+}
+
+/// 逐段解析相对目录（每段都大小写不敏感），任一段不存在就返回 nil
+static NSString *TBResolveDirCI(NSString *base, NSString *rel) {
+    if (!base.length) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *cur = base;
+    for (NSString *comp in [rel componentsSeparatedByString:@"/"]) {
+        if (!comp.length) continue;
+        NSString *next = nil;
+        for (NSString *item in [fm contentsOfDirectoryAtPath:cur error:NULL]) {
+            NSString *full = [cur stringByAppendingPathComponent:item];
+            BOOL isDir = NO;
+            if ([fm fileExistsAtPath:full isDirectory:&isDir] && isDir &&
+                [item caseInsensitiveCompare:comp] == NSOrderedSame) { next = full; break; }
+        }
+        if (!next) return nil;
+        cur = next;
+    }
+    return cur;
+}
+
+/// 主题自带遮罩图（大小写不敏感，按顺序命中第一个）：
+///   IconMask.png → IconMask@3x.png → IconMask@2x.png
+///   → IconBundles/IconMask.png → Bundles/com.apple.springboard/IconMask.png
+/// 结果按主题名缓存：同一主题只扫一次盘，换主题自动失效。
+static UIImage *gMaskThemeImg;
+static NSString *gMaskThemeKey;      // 缓存对应的主题名
+static BOOL gMaskThemeChecked;
+static UIImage *TBThemeMaskImage(void) {
+    if (TBSafeMode() || !TBEnabled()) return nil;
+    NSString *theme = TBActiveTheme();
+    if (!theme.length) return nil;
+    if (gMaskThemeChecked && gMaskThemeKey && [gMaskThemeKey isEqualToString:theme]) return gMaskThemeImg;
+    gMaskThemeKey = theme;
+    gMaskThemeChecked = YES;
+    gMaskThemeImg = nil;
+
+    NSString *dir = TBThemeDir(theme);
+    if (!dir.length) return nil;
+    NSArray *cands = @[ @[@"",                             @"IconMask.png"],
+                        @[@"",                             @"IconMask@3x.png"],
+                        @[@"",                             @"IconMask@2x.png"],
+                        @[@"IconBundles",                  @"IconMask.png"],
+                        @[@"Bundles/com.apple.springboard", @"IconMask.png"] ];
+    for (NSArray *c in cands) {
+        NSString *sub = c[0], *name = c[1];
+        NSString *d = sub.length ? TBResolveDirCI(dir, sub) : dir;
+        if (!d.length) continue;
+        NSString *path = TBFindFileCI(d, name);
+        if (!path) continue;
+        // 必须用 init：imageWithContentsOfFile: 已被本引擎 hook（递归会爆栈）
+        UIImage *img = [[UIImage alloc] initWithContentsOfFile:path];
+        if (img) {
+            gMaskThemeImg = img;
+            TBLogOnce([@"thememask|" stringByAppendingString:theme],
+                      @"图标形状：用主题遮罩图 %@（%.0fx%.0f pt）",
+                      [path stringByReplacingOccurrencesOfString:dir withString:@""],
+                      img.size.width, img.size.height);
+            return img;
+        }
+    }
+    TBLogOnce([@"thememask|none|" stringByAppendingString:theme],
+              @"图标形状：主题里没有 IconMask.png，落到自定义圆角 / 系统形状");
+    return nil;
+}
+
+/// 用主题遮罩图裁素材：遮罩图缩放到素材尺寸 → DestinationIn 只留遮罩不透明处
+/// （和 TBMaskWithSystemShape 同一套做法，只是把"系统遮罩模板"换成"主题遮罩图"）
+static UIImage *TBMaskWithThemeMask(UIImage *art, UIImage *mask) {
+    if (!art || !mask) return art;
+    CGSize pt = art.size;
+    if (pt.width < 1 || pt.height < 1) return art;
+    if (mask.size.width < 1 || mask.size.height < 1) return art;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-    fmt.scale = img.scale;
+    fmt.scale = art.scale > 0.5 ? art.scale : 3.0;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [art drawInRect:CGRectMake(0, 0, pt.width, pt.height)];
+        [mask drawInRect:CGRectMake(0, 0, pt.width, pt.height)   // 按素材尺寸缩放遮罩图
+               blendMode:kCGBlendModeDestinationIn alpha:1.0];
+    }];
+}
+
+/// 按给定半径裁圆角（SB roundedRectImageFromImage:withRadius:withCrop:YES 同款）
+static UIImage *TBRoundedCornerImage(UIImage *img, CGFloat radius) {
+    CGSize pt = img.size;
+    if (pt.width < 1 || pt.height < 1) return img;
+    if (radius < 0) radius = 0;
+    CGFloat maxR = pt.width / 2.0;
+    if (radius > maxR) radius = maxR;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = img.scale > 0.5 ? img.scale : 3.0;
     fmt.opaque = NO;
     UIGraphicsImageRenderer *rd = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
     return [rd imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
@@ -812,6 +933,37 @@ static UIImage *TBIconRoundedImage(UIImage *img) {
         [p addClip];
         [img drawInRect:CGRectMake(0, 0, pt.width, pt.height)];
     }];
+}
+
+/// 图标形状统一入口（图标与时钟表盘共用）：
+///   ① 主题遮罩图（作者明确要的形状，这个模式下不做"已圆角就跳过"排查）
+///   ② skipIfRounded：素材四角本来透明 → 直接返回，避免裁多
+///   ③ MaskCornerRadiusOn：radius = (MaskCornerRadius / 60) × 宽度，上限 宽/2
+///   ④ gSystemMaskTemplate：按系统遮罩形状裁（现状）
+///   ⑤ 兜底 MIN(宽,高) × 0.2237（现状）
+static UIImage *TBApplyIconShape(UIImage *img, BOOL skipIfRounded) {
+    if (!img) return img;
+    if (TBUseThemeIconMask()) {                       // ① 主题自带遮罩图
+        UIImage *m = TBThemeMaskImage();
+        if (m) return TBMaskWithThemeMask(img, m);
+        // 主题里没有遮罩图 → 继续往下落到 ② / ③
+    }
+    if (skipIfRounded && TBIconArtAlreadyRounded(img)) return img;    // ② 已是圆角素材 → 不裁
+    CGSize pt = img.size;
+    if (pt.width >= 1 && pt.height >= 1 && TBMaskCornerRadiusOn()) {  // ③ 自定义圆角半径
+        CGFloat radius = (CGFloat)(TBMaskCornerRadius() / 60.0) * pt.width;
+        TBLogOnce([@"maskradius|" stringByAppendingFormat:@"%@", TBActiveTheme() ?: @""],
+                  @"图标形状：自定义圆角 %.2f → radius %.2f（%.0fpt 宽）",
+                  TBMaskCornerRadius(), radius, pt.width);
+        return TBRoundedCornerImage(img, radius);
+    }
+    if (gSystemMaskTemplate) return TBMaskWithSystemShape(img);       // ④ 按系统形状裁（现状）
+    if (pt.width < 16 || pt.height < 16) return img;                  // 现状：太小不动
+    return TBRoundedCornerImage(img, MIN(pt.width, pt.height) * 0.2237);  // ⑤ 兜底（现状）
+}
+
+static UIImage *TBIconRoundedImage(UIImage *img) {
+    return TBApplyIconShape(img, YES);   // 图标：保留"已是圆角素材就跳过"保护
 }
 
 static UIImage *gSystemClockFace;   // 系统自己的时钟表盘（主题取消后还原用）
@@ -2503,24 +2655,11 @@ static BOOL TBIsClockView(id v) {
 /// 按视图当前尺寸把主题表盘做成对应像素尺寸的图
 /// 表盘必须带圆角遮罩：系统给出的图标是遮罩过的（超椭圆），我们直接写
 /// layer.contents 的话，四角不透明就会露出方块（就是「时不时变成方的」）。
+/// 形状规则与图标完全一致（① 主题遮罩图 → ② 自定义圆角 → ③ 系统形状 → 兜底）
 static UIImage *TBClockRoundedFace(UIImage *img) {
-    if (!img) return img;
-    // 有系统遮罩模板就用系统的形状（和系统图标完全一致）；
-    // 还没有模板时先用圆角矩形兜底（只是极短暂的过渡，不参与缓存）
-    if (gSystemMaskTemplate) return TBMaskWithSystemShape(img);
-    CGSize pt = img.size;
-    if (pt.width < 1 || pt.height < 1) return img;
-    CGFloat r = MIN(pt.width, pt.height) * 0.2237;
-    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-    fmt.scale = img.scale;
-    fmt.opaque = NO;
-    UIGraphicsImageRenderer *rd = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
-    return [rd imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, pt.width, pt.height)
-                                                    cornerRadius:r];
-        [p addClip];
-        [img drawInRect:CGRectMake(0, 0, pt.width, pt.height)];
-    }];
+    // 表盘不做"已圆角就跳过"排查：表盘素材经常自带透明圆角，跳过的话
+    // 写进 layer.contents 就会露出透明角（这点和图标不同）
+    return TBApplyIconShape(img, NO);
 }
 
 /// 时钟表盘：SnowBoard 的做法 —— 主题 Bundles 里有 ClockIconBackgroundSquare 就用它

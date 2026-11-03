@@ -50,6 +50,18 @@ NSString *const TBKeyLogEnabled    = @"LogEnabled";
     [self synchronize];
 }
 
++ (double)doubleForKey:(NSString *)key defaultValue:(double)value {
+    id v = [self _valueForKey:key];
+    return [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : value;
+}
+
++ (void)setDouble:(double)value forKey:(NSString *)key {
+    CFPreferencesSetAppValue((__bridge CFStringRef)key,
+                             (__bridge CFNumberRef)@(value),
+                             (__bridge CFStringRef)TBDefaultsDomain);
+    [self synchronize];
+}
+
 + (void)synchronize {
     CFPreferencesAppSynchronize((__bridge CFStringRef)TBDefaultsDomain);
 }
