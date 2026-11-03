@@ -5,6 +5,22 @@
 
 
 
+
+/// 简单日志：写 /var/mobile/Library/ThemeBoard/app.log（便于真机排查）
+void TBLog2(NSString *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    NSString *m = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSString *dir = @"/var/mobile/Library/ThemeBoard";
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
+                                               attributes:nil error:NULL];
+    NSString *path = [dir stringByAppendingPathComponent:@"app.log"];
+    NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], m ?: @""];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!fh) { [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]; }
+    else { @try { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; } @catch (id e) {} [fh closeFile]; }
+}
+
 @implementation TBGlassPanelBase
 
 - (instancetype)initWithNibName:(NSString *)nibNameOrNil bundle:(NSBundle *)nibBundleOrNil {
@@ -329,6 +345,10 @@ static NSString *TBRadiusText(double v) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    if (!self.cardView) [self tb_setupBase];      // 兜底：确保卡片与遮罩已创建
+    TBLog2(@"圆角面板 viewDidLoad card=%@ subviews=%lu",
+           self.cardView ? NSStringFromCGRect(self.cardView.frame) : @"(nil)",
+           (unsigned long)self.cardView.subviews.count);
 
     self.titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
@@ -405,6 +425,15 @@ static NSString *TBRadiusText(double v) {
     self.okButton.layer.cornerCurve = kCACornerCurveContinuous;
     [self.okButton addTarget:self action:@selector(tb_okTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.cardView addSubview:self.okButton];
+
+    // 兜底：把所有内容视图提到最上层（blur / fill 都在 cardView 里，避免被盖住看不到）
+    for (UIView *v in @[self.titleLabel, self.descLabel, self.fieldCaption, self.field,
+                        self.slider, self.percentLabel, self.cancelButton, self.okButton]) {
+        [self.cardView bringSubviewToFront:v];
+    }
+    // 先按一个合理宽度算一次高度，保证首帧就有正确尺寸（不依赖 viewDidLayoutSubviews 时机）
+    CGFloat w0 = [self tb_cardWidthForBounds:self.view.bounds];
+    if (w0 > 1) { [self tb_cardHeightForWidth:w0]; }
 }
 
 - (void)viewDidAppear:(BOOL)animated {

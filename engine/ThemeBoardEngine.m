@@ -2759,6 +2759,45 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 
 // ---- 静态图标模式：隐藏系统指针（图标自己画了指针，否则会重影）----
 static void (*o_updateClockImages)(id, SEL);
+// ---- 替换角标底板（SBBadgeBG）：系统取角标图不走 imageNamed:，只能从视图层换 ----
+static void (*o_badgeLayout)(id, SEL);
+static UIImage *TBThemeBadgeImage(void) {
+    // 1) 全局自定义素材优先
+    id cb = TBPref(@"CustomBadgePath");
+    if ([cb isKindOfClass:[NSString class]] && [(NSString *)cb length]) {
+        UIImage *im = [UIImage imageWithContentsOfFile:(NSString *)cb];
+        if (im) return im;
+    }
+    // 2) 主题自带（SBBadgeBG@3x/@2x/无后缀，Bundles/ 与 Bundles/com.apple.springboard/ 都找）
+    if (TBSafeMode()) return nil;
+    NSString *name = @"SBBadgeBG@3x.png";
+    UIImage *a = TBResourceImage(name);
+    if (!a) a = TBResourceImage(@"SBBadgeBG@2x.png");
+    if (!a) a = TBResourceImage(@"SBBadgeBG.png");
+    return a;
+}
+static void tb_badgeLayout(id self, SEL _cmd) {
+    if (o_badgeLayout) o_badgeLayout(self, _cmd);
+    @try {
+        id ub = TBPref(@"UseThemeBadge");
+        BOOL on = (ub && [ub boolValue]);
+        id cb = TBPref(@"CustomBadgePath");
+        BOOL hasCustom = ([cb isKindOfClass:[NSString class]] && [(NSString *)cb length] > 0);
+        if (!on && !hasCustom) return;
+        UIImage *badge = TBThemeBadgeImage();
+        if (!badge) return;
+        static int logged = 0;
+        for (UIView *v in [self subviews]) {
+            if (![v isKindOfClass:[UIImageView class]]) continue;
+            UIImageView *iv = (UIImageView *)v;
+            iv.image = badge;
+            iv.contentMode = UIViewContentModeScaleToFill;
+            if (logged < 5) { logged++; TBLog(@"角标替换：已换底板 %@", NSStringFromClass([self class])); }
+        }
+    } @catch (NSException *e) { }
+}
+static BOOL gDoneBadge = NO;
+
 static BOOL gDoneClock = NO;
 
 // ---- 时钟表盘：SBHClockApplicationIconImageView 把整块表盘合成进自己的 contents，
@@ -2967,6 +3006,18 @@ static void TBInstall(void) {
         // 表盘：hook contentsImage，始终返回当前主题的表盘（换主题后自然就是新表盘）
         TBInstallClockContentsHooks();
 
+    // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）
+    if (!gDoneBadge) {
+        gDoneBadge = YES;
+        for (NSString *clsName in @[@"SBIconBadgeView", @"_SBIconBadgeView", @"SBHIconBadgeView"]) {
+            Class bc = NSClassFromString(clsName);
+            if (!bc) continue;
+            if (TBHasMethod(bc, @"layoutSubviews")) {
+                o_badgeLayout = (void (*)(id, SEL))TBHook(bc, @"layoutSubviews",
+                                                          (IMP)tb_badgeLayout, "角标视图");
+            }
+        }
+    }
         // 左滑删除：装一次观测，把滑动容器的层级结构打进日志
         {
             Class pull = NSClassFromString(@"UISwipeActionPullView");
