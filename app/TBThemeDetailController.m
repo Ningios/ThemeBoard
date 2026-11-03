@@ -4,32 +4,167 @@
 #import "TBPrefs.h"
 #import "TBMissingController.h"
 #import "TBGlass.h"
-#import "TBTableViewController.h"
 
-static NSString *const kSummaryID = @"summary";
-static NSString *const kGridID = @"grid";
+#pragma mark - 遮罩偏好键（与引擎 / 抽屉完全一致）
 
-@interface TBThemeDetailController () <UISearchResultsUpdating>
+static NSString *const kTBKeyUseThemeIconMask   = @"UseThemeIconMask";
+static NSString *const kTBKeyMaskCornerRadiusOn = @"MaskCornerRadiusOn";
+static NSString *const kTBKeyMaskCornerRadius   = @"MaskCornerRadius";
+static NSString *const kTBKeyUseThemeIconOverlay = @"UseThemeIconOverlay";
+static NSString *const kTBKeyUseThemeIconShadow  = @"UseThemeIconShadow";
+static const double  kTBDefaultMaskCornerRadius = 13.42;
+
+static const CGFloat kTBCardRadius   = 20.0;   // 与 TBGlassCard(20) / 列表卡片一致
+static const CGFloat kTBCardGap      = 12.0;   // 卡片间距
+static const CGFloat kTBSideInset    = 16.0;   // 左右内缩
+
+#pragma mark - 方形卡片 cell（双列网格的通用卡片）
+
+@interface TBSquareCardCell : UICollectionViewCell
+@property (nonatomic, strong) UIView *card;
+@property (nonatomic, strong) UIImageView *icon;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *captionLabel;
+@end
+
+@implementation TBSquareCardCell
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.backgroundColor = [UIColor clearColor];
+        self.contentView.backgroundColor = [UIColor clearColor];
+
+        _card = TBGlassCard(kTBCardRadius);
+        _card.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:_card];
+        [NSLayoutConstraint activateConstraints:@[
+            [_card.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
+            [_card.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+            [_card.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+            [_card.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
+        ]];
+
+        _titleLabel = [[UILabel alloc] init];
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        _titleLabel.textColor = [UIColor labelColor];
+        _titleLabel.textAlignment = NSTextAlignmentCenter;
+        _titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [_card addSubview:_titleLabel];
+
+        _icon = [[UIImageView alloc] init];
+        _icon.translatesAutoresizingMaskIntoConstraints = NO;
+        _icon.contentMode = UIViewContentModeScaleAspectFit;
+        _icon.clipsToBounds = NO;
+        [_card addSubview:_icon];
+
+        _captionLabel = [[UILabel alloc] init];
+        _captionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _captionLabel.font = [UIFont systemFontOfSize:11];
+        _captionLabel.textColor = [UIColor secondaryLabelColor];
+        _captionLabel.textAlignment = NSTextAlignmentCenter;
+        _captionLabel.numberOfLines = 3;
+        _captionLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        [_card addSubview:_captionLabel];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:12],
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:8],
+            [_titleLabel.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-8],
+
+            [_icon.centerXAnchor constraintEqualToAnchor:_card.centerXAnchor],
+            [_icon.centerYAnchor constraintEqualToAnchor:_card.centerYAnchor constant:-4],
+            [_icon.widthAnchor constraintEqualToAnchor:_card.widthAnchor multiplier:0.46],
+            [_icon.heightAnchor constraintEqualToAnchor:_icon.widthAnchor],
+
+            [_captionLabel.bottomAnchor constraintEqualToAnchor:_card.bottomAnchor constant:-12],
+            [_captionLabel.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:8],
+            [_captionLabel.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-8],
+        ]];
+    }
+    return self;
+}
+
+- (void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    self.card.alpha = highlighted ? 0.7 : 1.0;
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.card.alpha = 1.0;
+    self.icon.image = nil;
+    self.titleLabel.text = nil;
+    self.captionLabel.text = nil;
+}
+
+@end
+
+#pragma mark - 分区标题
+
+@interface TBSectionHeaderView : UICollectionReusableView
+@property (nonatomic, strong) UILabel *titleLabel;
+@end
+
+@implementation TBSectionHeaderView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        _titleLabel = [[UILabel alloc] init];
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        _titleLabel.textColor = [UIColor secondaryLabelColor];
+        [self addSubview:_titleLabel];
+        [NSLayoutConstraint activateConstraints:@[
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:4],
+            [_titleLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-4],
+            [_titleLabel.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-6],
+        ]];
+    }
+    return self;
+}
+@end
+
+#pragma mark - 详情页
+
+@interface TBThemeDetailController () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout,
+                                       UISearchResultsUpdating>
 @property (nonatomic, strong) TBTheme *theme;
 @property (nonatomic, strong) NSArray<NSString *> *allBids;
-@property (nonatomic, strong) NSArray<NSString *> *bids;
+@property (nonatomic, strong) NSArray<NSString *> *bids;        // 搜索过滤后
+@property (nonatomic, strong) NSArray<NSString *> *previewBids; // 预览方卡用的前几个
 @property (nonatomic, strong) UISearchController *search;
-@property (nonatomic, strong) UILabel *summaryLabel;
-@property (nonatomic, strong) UIButton *applyButton;
-@property (nonatomic, strong) UIButton *cancelButton;
-@property (nonatomic, strong) UIButton *exportButton;
+@property (nonatomic, strong) UIView *bgView;
+@property (nonatomic, strong) UICollectionView *collectionView;
 @property (nonatomic, assign) NSUInteger covered;
 @property (nonatomic, assign) NSUInteger installed;
+@property (nonatomic, assign) BOOL active;
+@property (nonatomic, strong) UIImage *maskPreviewImage;   // 遮罩预览（已按当前形状裁好）
+@property (nonatomic, copy) NSString *maskPreviewCaption;
+
+- (void)tb_prefsChanged;   // 偏好变更通知 → 刷新遮罩预览
 @end
+
+/// 偏好一变（形状三模式 / 叠加层 / 阴影 / 导入遮罩）就让遮罩预览立即重算
+static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer, CFNotificationName name,
+                                 const void *object, CFDictionaryRef userInfo) {
+    TBThemeDetailController *vc = (__bridge TBThemeDetailController *)observer;
+    if (!vc) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [vc tb_prefsChanged];
+    });
+}
+
 
 @implementation TBThemeDetailController
 
 - (instancetype)initWithTheme:(TBTheme *)theme {
-    if ((self = [super initWithStyle:UITableViewStylePlain])) {
+    if ((self = [super initWithNibName:nil bundle:nil])) {
         _theme = theme;
     }
     return self;
 }
+
+#pragma mark - 生命周期
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -39,7 +174,18 @@ static NSString *const kGridID = @"grid";
     self.allBids = [self.theme bundleIdentifiers];
     self.bids = self.allBids;
 
+    // 预览方卡：取前 5 个真的有图的图标
+    NSMutableArray<NSString *> *pv = [NSMutableArray array];
+    for (NSString *bid in self.allBids) {
+        if ([self.theme imageForBundleID:bid]) {
+            [pv addObject:bid];
+            if (pv.count >= 5) break;
+        }
+    }
+    self.previewBids = pv;
+
     [self computeCoverage];
+    [self tb_buildUI];
 
     self.search = [[UISearchController alloc] initWithSearchResultsController:nil];
     self.search.searchResultsUpdater = self;
@@ -48,10 +194,72 @@ static NSString *const kGridID = @"grid";
     self.navigationItem.searchController = self.search;
     self.navigationItem.hidesSearchBarWhenScrolling = YES;
 
-    [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:kSummaryID];
-    [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:kGridID];
-    [self.tableView reloadData];
-    [self refreshApplyButton];
+    [self refreshMaskPreview];
+    [self refreshApplyState];
+
+    // 偏好变更（形状 / 叠加层 / 阴影）：预览卡片立即刷新
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                    (__bridge const void *)(self), TBDetailPrefsChanged,
+                                    (__bridge CFStringRef)TBNotifyChanged, NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+
+- (void)dealloc {
+    CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                       (__bridge const void *)(self),
+                                       (__bridge CFStringRef)TBNotifyChanged, NULL);
+}
+
+/// 遮罩/特效参数变了 → 重算预览并只重载「预览」分区
+- (void)tb_prefsChanged {
+    [self refreshMaskPreview];
+    if (self.collectionView.numberOfSections > 1) {
+        [self.collectionView reloadSections:[NSIndexSet indexSetWithIndex:1]];
+    }
+}
+
+/// 背景 + 双列方形卡片网格
+- (void)tb_buildUI {
+    self.view.backgroundColor = [UIColor clearColor];
+
+    self.bgView = [[UIView alloc] initWithFrame:self.view.bounds];
+    self.bgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.bgView.userInteractionEnabled = NO;
+    [self.view addSubview:self.bgView];
+    TBApplyPageBackground(self.bgView);
+
+    UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
+    layout.minimumInteritemSpacing = kTBCardGap;
+    layout.minimumLineSpacing = kTBCardGap;
+    layout.sectionInset = UIEdgeInsetsMake(8, kTBSideInset, 28, kTBSideInset);
+
+    self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:layout];
+    self.collectionView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.collectionView.backgroundColor = [UIColor clearColor];
+    self.collectionView.alwaysBounceVertical = YES;
+    self.collectionView.dataSource = self;
+    self.collectionView.delegate = self;
+    self.collectionView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
+    [self.collectionView registerClass:[TBSquareCardCell class]
+            forCellWithReuseIdentifier:@"card"];
+    [self.collectionView registerClass:[TBSectionHeaderView class]
+            forSupplementaryViewOfKind:UICollectionElementKindSectionHeader
+                   withReuseIdentifier:@"header"];
+    [self.view addSubview:self.collectionView];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.collectionView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [self.collectionView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.collectionView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.collectionView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+    ]];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self refreshMaskPreview];      // 遮罩形状参数可能在别处改过
+    [self refreshApplyState];
+    [self.collectionView reloadData];
 }
 
 - (void)computeCoverage {
@@ -64,27 +272,142 @@ static NSString *const kGridID = @"grid";
     self.covered = hit;
 }
 
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [self refreshApplyButton];
-}
-
-- (void)refreshApplyButton {
-    BOOL active = [[TBPrefs stringForKey:TBKeyActiveTheme] isEqualToString:self.theme.name];
-    [self.applyButton setTitle:(active ? @"已应用" : @"应用这个主题") forState:UIControlStateNormal];
-    self.applyButton.alpha = active ? 0.55 : 1.0;
-    self.cancelButton.enabled = active;
-    self.cancelButton.alpha = active ? 1.0 : 0.45;
+/// 应用状态 + 右上角「缺 N」入口（原有功能入口全部保留）
+- (void)refreshApplyState {
+    self.active = [[TBPrefs stringForKey:TBKeyActiveTheme] isEqualToString:self.theme.name];
     NSUInteger miss = self.installed > self.covered ? self.installed - self.covered : 0;
-    // 右上角只保留「缺 N」（缺失列表入口）；应用/导出在卡片的按钮里
     self.navigationItem.rightBarButtonItems = @[
         [[UIBarButtonItem alloc] initWithTitle:(miss ? [NSString stringWithFormat:@"缺 %lu", (unsigned long)miss] : @"全覆盖")
                                          style:UIBarButtonItemStylePlain
                                         target:self action:@selector(missingTapped)],
     ];
+    if (self.collectionView.numberOfSections > 0) {
+        [self.collectionView reloadSections:[NSIndexSet indexSetWithIndex:0]];
+    }
 }
 
-#pragma mark - 导出已覆盖图标
+#pragma mark - 遮罩预览
+
+/// 示例图标：优先用主题里第一张真图；没有就画一张占位方图（保证预览永远有东西看）
+- (UIImage *)tb_sampleIcon {
+    for (NSString *bid in self.allBids) {
+        UIImage *img = [self.theme imageForBundleID:bid];
+        if (img) return img;
+    }
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(180, 180)];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [[UIColor systemBlueColor] setFill];
+        UIRectFill(CGRectMake(0, 0, 180, 180));
+        [[UIColor whiteColor] setFill];
+        UIBezierPath *p = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(55, 55, 70, 70)];
+        [p fill];
+    }];
+}
+
+/// 按当前生效的形状 + AnemoneEffects（叠加层 / 阴影）裁出示例图标：
+///   UseThemeIconMask  → 用主题的遮罩图（找不到就顺延，和引擎一致）
+///   MaskCornerRadiusOn → 圆角 = (MaskCornerRadius / 60) × 边长
+///   否则               → 系统形状 22.37%
+///   UseThemeIconShadow → 阴影垫在图标下方
+///   UseThemeIconOverlay→ 叠加层盖在图标之上
+/// 任一参数变了，viewWillAppear / 通知回调都会重算这张预览
+- (void)refreshMaskPreview {
+    BOOL useThemeMask = [TBPrefs boolForKey:kTBKeyUseThemeIconMask defaultValue:NO];
+    BOOL cornerOn = [TBPrefs boolForKey:kTBKeyMaskCornerRadiusOn defaultValue:NO];
+    double r = [TBPrefs doubleForKey:kTBKeyMaskCornerRadius defaultValue:kTBDefaultMaskCornerRadius];
+    if (!(r > 0.0)) r = kTBDefaultMaskCornerRadius;
+
+    UIImage *art = [self tb_sampleIcon];
+    UIImage *mask = nil;
+    if (useThemeMask) {
+        NSString *p = [self.theme iconMaskPath];
+        if (p.length) mask = [UIImage imageWithContentsOfFile:p];
+    }
+    // AnemoneEffects：主题里真的有素材才算"生效"
+    UIImage *shadow = nil, *overlay = nil;
+    NSString *shadowPath = [self.theme anemoneEffectPath:@"iPhoneShadow"];
+    NSString *overlayPath = [self.theme anemoneEffectPath:@"iPhoneOverlay"];
+    if ([TBPrefs boolForKey:kTBKeyUseThemeIconShadow defaultValue:NO] && shadowPath.length)
+        shadow = [UIImage imageWithContentsOfFile:shadowPath];
+    if ([TBPrefs boolForKey:kTBKeyUseThemeIconOverlay defaultValue:NO] && overlayPath.length)
+        overlay = [UIImage imageWithContentsOfFile:overlayPath];
+
+    const CGFloat side = 200.0;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *rd = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:fmt];
+    UIImage *out = [rd imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextRef c = ctx.CGContext;
+        CGRect rect = CGRectMake(0, 0, side, side);
+        if (shadow) [shadow drawInRect:rect];                 // ① 阴影垫在下面
+
+        CGContextSaveGState(c);
+        if (mask) {                                           // ② 形状：主题遮罩图
+            [art drawInRect:rect];
+            [mask drawInRect:rect blendMode:kCGBlendModeDestinationIn alpha:1.0];
+        } else if (cornerOn) {                                //    形状：自定义圆角
+            CGFloat radius = (CGFloat)(r / 60.0) * side;
+            CGFloat maxR = side / 2.0;
+            if (radius > maxR) radius = maxR;
+            UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:radius];
+            [p addClip];
+            [art drawInRect:rect];
+        } else {                                              //    形状：系统形状
+            UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:rect
+                                                         cornerRadius:side * 0.2237];
+            [p addClip];
+            [art drawInRect:rect];
+        }
+        CGContextRestoreGState(c);
+
+        if (overlay) [overlay drawInRect:rect];                // ③ 叠加层盖在上面
+    }];
+    self.maskPreviewImage = out;
+
+    NSMutableString *cap = [NSMutableString string];
+    if (useThemeMask && mask) {
+        [cap appendString:@"主题遮罩图"];
+    } else if (cornerOn) {
+        [cap appendFormat:@"自定义圆角\n半径 %.2f", r];
+    } else if (useThemeMask) {
+        [cap appendString:@"主题里没有遮罩图\n→ 系统形状"];
+    } else {
+        [cap appendString:@"系统形状\n（22.37%）"];
+    }
+    if (overlay || shadow) {
+        [cap appendString:@"\n"];
+        if (overlay) [cap appendString:@"＋叠加层 "];
+        if (shadow) [cap appendString:@"＋阴影"];
+    }
+    self.maskPreviewCaption = cap;
+}
+
+#pragma mark - 操作卡片
+
+- (void)applyTapped {
+    [TBPrefs setString:self.theme.name forKey:TBKeyActiveTheme];
+    [TBPrefs setBool:YES forKey:TBKeyEnabled];
+    [TBPrefs notifyChanged];
+    [self refreshApplyState];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已应用"
+        message:@"设置已写入。引擎生效后桌面会立即换图。" preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)cancelApplyTapped {
+    NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
+    if (![active isEqualToString:self.theme.name]) return;
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"取消应用？"
+        message:@"桌面图标会恢复系统原样，主题文件夹不会被删除" preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消应用" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        [TBPrefs setString:nil forKey:TBKeyActiveTheme];
+        [TBPrefs notifyChanged];
+        [self refreshApplyState];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
 
 - (void)exportTapped {
     NSArray<NSDictionary *> *apps = [TBAppInfo installedApps];
@@ -124,30 +447,7 @@ static NSString *const kGridID = @"grid";
     [self.navigationController pushViewController:[[TBMissingController alloc] initWithTheme:self.theme] animated:YES];
 }
 
-- (void)applyTapped {
-    [TBPrefs setString:self.theme.name forKey:TBKeyActiveTheme];
-    [TBPrefs setBool:YES forKey:TBKeyEnabled];
-    [TBPrefs notifyChanged];
-    [self refreshApplyButton];
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已应用"
-        message:@"设置已写入。引擎生效后桌面会立即换图。" preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
-}
-
-- (void)cancelApplyTapped {
-    NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
-    if (![active isEqualToString:self.theme.name]) return;
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"取消应用？"
-        message:@"桌面图标会恢复系统原样，主题文件夹不会被删除" preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消应用" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-        [TBPrefs setString:nil forKey:TBKeyActiveTheme];
-        [TBPrefs notifyChanged];
-        [self refreshApplyButton];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
-}
+#pragma mark - 搜索
 
 - (void)updateSearchResultsForSearchController:(UISearchController *)sc {
     NSString *q = sc.searchBar.text;
@@ -163,200 +463,136 @@ static NSString *const kGridID = @"grid";
             return name && [[name lowercaseString] rangeOfString:q2].location != NSNotFound;
         }]];
     }
-    [self.tableView reloadData];
+    [self.collectionView reloadSections:[NSIndexSet indexSetWithIndex:2]];
 }
 
-#pragma mark - Table
+#pragma mark - 网格（双列方形卡片）
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return 2; }
+- (NSInteger)numberOfSectionsInCollectionView:(UICollectionView *)cv { return 3; }
 
-- (NSString *)tableView:(UITableView *)t titleForHeaderInSection:(NSInteger)s {
-    return s == 0 ? nil : @"全部图标";
+- (NSInteger)collectionView:(UICollectionView *)cv numberOfItemsInSection:(NSInteger)s {
+    if (s == 0) return 4;                       // 概览 / 应用 / 取消应用 / 导出
+    if (s == 1) return 1 + self.previewBids.count;   // 遮罩预览 + 图标预览
+    return self.bids.count;
 }
 
-- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s {
-    return s == 0 ? 1 : self.bids.count;
+- (CGFloat)collectionView:(UICollectionView *)cv
+layout:(UICollectionViewLayout *)layout
+heightForHeaderInSection:(NSInteger)s {
+    return s == 0 ? 0.0 : 30.0;
 }
 
-- (CGFloat)tableView:(UITableView *)t heightForRowAtIndexPath:(NSIndexPath *)ip {
-    return ip.section == 0 ? 190 : 88;
+- (UICollectionReusableView *)collectionView:(UICollectionView *)cv
+           viewForSupplementaryElementOfKind:(NSString *)kind
+                                 atIndexPath:(NSIndexPath *)ip {
+    if (![kind isEqualToString:UICollectionElementKindSectionHeader]) return nil;
+    TBSectionHeaderView *h = [cv dequeueReusableSupplementaryViewOfKind:kind
+                                                    withReuseIdentifier:@"header"
+                                                           forIndexPath:ip];
+    h.titleLabel.text = (ip.section == 1)
+        ? @"预览"
+        : [NSString stringWithFormat:@"全部图标（%lu）", (unsigned long)self.bids.count];
+    return h;
 }
 
-- (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip {
+- (CGSize)collectionView:(UICollectionView *)cv
+                  layout:(UICollectionViewLayout *)layout
+  sizeForItemAtIndexPath:(NSIndexPath *)ip {
+    CGFloat W = cv.bounds.size.width;
+    if (W < 1) W = [UIScreen mainScreen].bounds.size.width;
+    CGFloat side = floor((W - kTBSideInset * 2 - kTBCardGap) / 2.0);   // 两列 + 正方形
+    if (side < 120) side = 120;
+    return CGSizeMake(side, side);
+}
+
+- (UICollectionViewCell *)collectionView:(UICollectionView *)cv
+                  cellForItemAtIndexPath:(NSIndexPath *)ip {
+    TBSquareCardCell *cell = [cv dequeueReusableCellWithReuseIdentifier:@"card" forIndexPath:ip];
+    cell.icon.tintColor = [UIColor secondaryLabelColor];
+
     if (ip.section == 0) {
-        UITableViewCell *cell = [t dequeueReusableCellWithIdentifier:kSummaryID forIndexPath:ip];
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        cell.backgroundColor = [UIColor clearColor];
-        cell.contentView.backgroundColor = [UIColor clearColor];
-        cell.backgroundView = TBGlassCellBG(12);
-
-        for (UIView *v in cell.contentView.subviews) [v removeFromSuperview];
-
-        // 横排 5 个小预览
-        UIView *prev = nil;
-        NSMutableArray<UIImage *> *thumbs = [NSMutableArray array];
-        for (NSString *bid in [self.theme bundleIdentifiers]) {
-            if (thumbs.count >= 5) break;
-            UIImage *img = [self.theme imageForBundleID:bid];
-            if (img) [thumbs addObject:img];
+        NSString *sym = nil;
+        switch (ip.item) {
+            case 0: sym = @"square.grid.2x2"; break;
+            case 1: sym = self.active ? @"checkmark.circle.fill" : @"checkmark.circle"; break;
+            case 2: sym = @"arrow.uturn.backward.circle"; break;
+            default: sym = @"square.and.arrow.up"; break;
         }
-        while (thumbs.count < 5) [thumbs addObject:[UIImage systemImageNamed:@"app"]];
-        for (UIImage *img in thumbs) {
-            UIImageView *iv = [[UIImageView alloc] initWithImage:img];
-            iv.translatesAutoresizingMaskIntoConstraints = NO;
-            iv.contentMode = UIViewContentModeScaleAspectFill;
-            iv.layer.cornerRadius = 8;
-            iv.layer.cornerCurve = kCACornerCurveContinuous;
-            iv.clipsToBounds = YES;
-            [cell.contentView addSubview:iv];
-            [NSLayoutConstraint activateConstraints:@[
-                [iv.widthAnchor constraintEqualToConstant:36],
-                [iv.heightAnchor constraintEqualToConstant:36],
-                [iv.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:14],
-                (prev ? [iv.leadingAnchor constraintEqualToAnchor:prev.trailingAnchor constant:7]
-                      : [iv.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16]),
-            ]];
-            prev = iv;
+        UIImageSymbolConfiguration *sc =
+            [UIImageSymbolConfiguration configurationWithPointSize:34 weight:UIFontWeightRegular];
+        cell.icon.image = [[UIImage systemImageNamed:sym withConfiguration:sc]
+                           imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        cell.icon.contentMode = UIViewContentModeCenter;
+        if (ip.item == 0) {
+            cell.titleLabel.text = @"概览";
+            cell.captionLabel.text = [NSString stringWithFormat:@"%lu 个图标\n覆盖 %lu/%lu · %lu 文件",
+                                      (unsigned long)self.allBids.count, (unsigned long)self.covered,
+                                      (unsigned long)self.installed, (unsigned long)self.theme.fileCount];
+        } else if (ip.item == 1) {
+            cell.titleLabel.text = self.active ? @"已应用" : @"应用主题";
+            cell.captionLabel.text = self.active ? @"当前正在使用" : @"点一下立即换图";
+        } else if (ip.item == 2) {
+            cell.titleLabel.text = @"取消应用";
+            cell.captionLabel.text = self.active ? @"恢复系统图标\n（不删主题）" : @"当前未应用";
+        } else {
+            cell.titleLabel.text = @"导出";
+            cell.captionLabel.text = @"导出已覆盖图标\n到“文件”App";
         }
-
-        UILabel *summary = [[UILabel alloc] init];
-        summary.translatesAutoresizingMaskIntoConstraints = NO;
-        summary.numberOfLines = 0;
-        summary.font = [UIFont systemFontOfSize:13];
-        summary.textColor = [UIColor secondaryLabelColor];
-        summary.text = [NSString stringWithFormat:@"%lu 个图标\n覆盖 %lu / %lu 个已装应用 · %lu 个文件",
-                        (unsigned long)self.allBids.count, (unsigned long)self.covered,
-                        (unsigned long)self.installed, (unsigned long)self.theme.fileCount];
-        [cell.contentView addSubview:summary];
-
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.translatesAutoresizingMaskIntoConstraints = NO;
-        btn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-        BOOL active = [[TBPrefs stringForKey:TBKeyActiveTheme] isEqualToString:self.theme.name];
-        [btn setTitle:(active ? @"已应用" : @"应用这个主题") forState:UIControlStateNormal];
-        btn.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
-                                             [UIColor colorWithWhite:1 alpha:0.14]);
-        [btn setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
-        btn.layer.cornerRadius = 13;
-        btn.layer.cornerCurve = kCACornerCurveContinuous;
-        TBApplyRim(btn, 0.55);
-        [btn addTarget:self action:@selector(applyTapped) forControlEvents:UIControlEventTouchUpInside];
-        [cell.contentView addSubview:btn];
-        self.applyButton = btn;
-
-        // 取消应用：和「应用」等宽，把原来那一整条平均分成两个
-        UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
-        cancel.translatesAutoresizingMaskIntoConstraints = NO;
-        [cancel setTitle:@"取消应用" forState:UIControlStateNormal];
-        cancel.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-        [cancel setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
-        cancel.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                                [UIColor colorWithWhite:1 alpha:0.10]);
-        cancel.layer.cornerRadius = 13;
-        cancel.layer.cornerCurve = kCACornerCurveContinuous;
-        TBApplyRim(cancel, 0.55);
-        [cancel addTarget:self action:@selector(cancelApplyTapped) forControlEvents:UIControlEventTouchUpInside];
-        [cell.contentView addSubview:cancel];
-        self.cancelButton = cancel;
-
-        // 导出按钮（与应用同款玻璃：半透明填充 + 白边 + 同圆角）
-        UIButton *exp = [UIButton buttonWithType:UIButtonTypeSystem];
-        exp.translatesAutoresizingMaskIntoConstraints = NO;
-        [exp setTitle:@"导出" forState:UIControlStateNormal];
-        exp.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-        [exp setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
-        exp.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
-                                             [UIColor colorWithWhite:1 alpha:0.14]);
-        exp.layer.cornerRadius = 13;
-        exp.layer.cornerCurve = kCACornerCurveContinuous;
-        TBApplyRim(exp, 0.55);
-        [exp addTarget:self action:@selector(exportTapped) forControlEvents:UIControlEventTouchUpInside];
-        [cell.contentView addSubview:exp];
-        self.exportButton = exp;
-
-        [NSLayoutConstraint activateConstraints:@[
-            [summary.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:58],
-            [summary.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:18],
-            [summary.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-18],
-
-            [btn.topAnchor constraintEqualToAnchor:summary.bottomAnchor constant:12],
-            [btn.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
-            [btn.heightAnchor constraintEqualToConstant:44],
-            [btn.widthAnchor constraintEqualToAnchor:exp.widthAnchor multiplier:1.5 constant:-6],
-
-            [cancel.topAnchor constraintEqualToAnchor:btn.topAnchor],
-            [cancel.leadingAnchor constraintEqualToAnchor:btn.trailingAnchor constant:12],
-            [cancel.heightAnchor constraintEqualToAnchor:btn.heightAnchor],
-            [cancel.widthAnchor constraintEqualToAnchor:btn.widthAnchor],
-
-            [exp.topAnchor constraintEqualToAnchor:btn.topAnchor],
-            [exp.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
-            [exp.heightAnchor constraintEqualToAnchor:btn.heightAnchor],
-            [exp.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-14],
-
-            [cancel.trailingAnchor constraintEqualToAnchor:exp.leadingAnchor constant:-12],
-        ]];
+        cell.icon.alpha = (ip.item == 1 && self.active) ? 0.6 : 1.0;
+        cell.titleLabel.textColor = ([UIColor labelColor]);
         return cell;
     }
 
-    // 图标行
-    UITableViewCell *cell = [t dequeueReusableCellWithIdentifier:kGridID forIndexPath:ip];
-    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    cell.backgroundColor = [UIColor clearColor];
-    cell.contentView.backgroundColor = [UIColor clearColor];
-    cell.backgroundView = TBGlassCellBG(12);
-    cell.selectedBackgroundView = nil;
-    for (UIView *v in cell.contentView.subviews) [v removeFromSuperview];
+    if (ip.section == 1) {
+        if (ip.item == 0) {                      // 遮罩预览卡
+            cell.icon.contentMode = UIViewContentModeScaleAspectFit;
+            cell.icon.alpha = 1.0;
+            cell.icon.image = self.maskPreviewImage;
+            cell.titleLabel.text = @"遮罩预览";
+            cell.titleLabel.textColor = [UIColor labelColor];
+            cell.captionLabel.text = self.maskPreviewCaption;
+            return cell;
+        }
+        NSString *bid = self.previewBids[ip.item - 1];
+        cell.icon.contentMode = UIViewContentModeScaleAspectFit;
+        cell.icon.alpha = 1.0;
+        cell.icon.image = [self.theme imageForBundleID:bid];
+        cell.titleLabel.textColor = [UIColor labelColor];
+        NSString *dn = [TBAppInfo displayNameForBundleID:bid];
+        cell.titleLabel.text = dn.length ? dn : [[bid componentsSeparatedByString:@"."] lastObject];
+        cell.captionLabel.text = bid;
+        return cell;
+    }
 
-    NSString *bid = self.bids[ip.row];
-    CGFloat side = 56;
-
-    UIImageView *iv = [[UIImageView alloc] initWithImage:[self.theme imageForBundleID:bid]];
-    iv.translatesAutoresizingMaskIntoConstraints = NO;
-    iv.contentMode = UIViewContentModeScaleAspectFit;
-    iv.layer.cornerRadius = side * 0.2237;
-    iv.layer.cornerCurve = kCACornerCurveContinuous;
-    iv.clipsToBounds = YES;
-    [cell.contentView addSubview:iv];
-
-    UILabel *name = [[UILabel alloc] init];
-    name.translatesAutoresizingMaskIntoConstraints = NO;
+    // 全部图标（两列方形卡）
+    NSString *bid = self.bids[ip.item];
+    cell.icon.contentMode = UIViewContentModeScaleAspectFit;
+    cell.icon.alpha = 1.0;
+    cell.icon.image = [self.theme imageForBundleID:bid];
+    cell.titleLabel.textColor = [UIColor labelColor];
     NSString *dn = [TBAppInfo displayNameForBundleID:bid];
-    name.text = dn.length ? dn : [bid componentsSeparatedByString:@"."].lastObject;
-    name.font = [UIFont systemFontOfSize:14];
-    name.textColor = [UIColor labelColor];
-    name.lineBreakMode = NSLineBreakByTruncatingTail;
-    [cell.contentView addSubview:name];
-
-    UILabel *sub = [[UILabel alloc] init];
-    sub.translatesAutoresizingMaskIntoConstraints = NO;
-    sub.text = bid;
-    sub.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
-    sub.textColor = [UIColor secondaryLabelColor];
-    sub.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    [cell.contentView addSubview:sub];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [iv.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-        [iv.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:14],
-        [iv.widthAnchor constraintEqualToConstant:side],
-        [iv.heightAnchor constraintEqualToConstant:side],
-
-        [name.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:18],
-        [name.leadingAnchor constraintEqualToAnchor:iv.trailingAnchor constant:12],
-        [name.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-14],
-
-        [sub.topAnchor constraintEqualToAnchor:name.bottomAnchor constant:2],
-        [sub.leadingAnchor constraintEqualToAnchor:iv.trailingAnchor constant:12],
-        [sub.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-14],
-    ]];
+    cell.titleLabel.text = dn.length ? dn : [[bid componentsSeparatedByString:@"."] lastObject];
+    NSString *tail = [bid componentsSeparatedByString:@"."].lastObject;
+    cell.captionLabel.text = tail.length ? tail : bid;
     return cell;
 }
 
-- (void)tableView:(UITableView *)t didSelectRowAtIndexPath:(NSIndexPath *)ip {
-    [t deselectRowAtIndexPath:ip animated:YES];
-    if (ip.section != 1) return;
-    NSString *bid = self.bids[ip.row];
+- (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)ip {
+    [cv deselectItemAtIndexPath:ip animated:YES];
+    if (ip.section == 1) return;             // 预览卡只做展示
+    if (ip.section == 0) {
+        if (ip.item == 0) {                  // 概览卡：点一下刷新统计
+            [self computeCoverage];
+            [self refreshApplyState];
+            return;
+        }
+        if (ip.item == 1) { [self applyTapped]; return; }
+        if (ip.item == 2) { [self cancelApplyTapped]; return; }
+        [self exportTapped];
+        return;
+    }
+    // 图标卡：保留原来的「复制文件名」入口
+    NSString *bid = self.bids[ip.item];
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:
                              [TBAppInfo displayNameForBundleID:bid] ?: bid message:bid
                              preferredStyle:UIAlertControllerStyleAlert];

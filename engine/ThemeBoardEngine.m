@@ -809,6 +809,15 @@ static BOOL TBMaskCornerRadiusOn(void) {
     id v = TBPref(@"MaskCornerRadiusOn");
     return v ? [v boolValue] : NO;
 }
+/// AnemoneEffects：玻璃叠加层 / 图标阴影（都必须主题里真的有素材才生效）
+static BOOL TBUseThemeIconOverlay(void) {
+    id v = TBPref(@"UseThemeIconOverlay");
+    return v ? [v boolValue] : NO;
+}
+static BOOL TBUseThemeIconShadow(void) {
+    id v = TBPref(@"UseThemeIconShadow");
+    return v ? [v boolValue] : NO;
+}
 /// CustomCornerRadius：SB 默认 60 × 22.37% ≈ 13.42（60 == 半径等于半宽）
 static double TBMaskCornerRadius(void) {
     id v = TBPref(@"MaskCornerRadius");
@@ -853,10 +862,38 @@ static NSString *TBResolveDirCI(NSString *base, NSString *rel) {
     return cur;
 }
 
-/// 主题自带遮罩图（大小写不敏感，按顺序命中第一个）：
-///   IconMask.png → IconMask@3x.png → IconMask@2x.png
-///   → IconBundles/IconMask.png → Bundles/com.apple.springboard/IconMask.png
-/// 结果按主题名缓存：同一主题只扫一次盘，换主题自动失效。
+/// 在目录里找「名字以 prefix 开头、以 .png 结尾」的文件（大小写不敏感），
+/// 优先 @3x → @2x → 其它（~iphone / ~ipad 之类的后缀都照收）
+static NSString *TBFindBestScaledPNG(NSString *dir, NSString *prefix) {
+    if (!dir.length || !prefix.length) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *lp = prefix.lowercaseString;
+    NSString *best = nil;
+    NSInteger bestRank = -1;
+    for (NSString *item in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
+        NSString *li = item.lowercaseString;
+        if (![li hasPrefix:lp] || ![li hasSuffix:@".png"]) continue;
+        NSString *p = [dir stringByAppendingPathComponent:item];
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:p isDirectory:&isDir] || isDir) continue;
+        NSInteger rank = [li rangeOfString:@"@3x"].location != NSNotFound ? 30
+                       : ([li rangeOfString:@"@2x"].location != NSNotFound ? 20 : 10);
+        if (rank > bestRank) { bestRank = rank; best = p; }
+    }
+    return best;
+}
+
+/// 主题自带遮罩图（大小写不敏感，按顺序命中第一个）。
+/// 前三个是经典 Anemone / WinterBoard 的遮罩命名（真实主题里就是这个），
+/// 我们自己的 IconMask.png 系列保留为最低优先级兜底：
+///   ① IconBundles/Icon.png（含小写 icon.png）
+///   ② 主题根目录 icon.png
+///   ③ Bundles/com.apple.mobileicons.framework/AppIconMask*.png
+///      （同目录还有 TableIconMask / SpotlightAppIconMask，这里只认 AppIconMask）
+///   ④ IconMask.png → IconMask@3x.png → IconMask@2x.png
+///      → IconBundles/IconMask.png → Bundles/com.apple.springboard/IconMask.png
+/// 结果按主题名缓存：同一主题只扫一次盘，换主题或设置变更自动失效
+/// （TBReload 里会清这个缓存，这样 App 导入遮罩后不用重启就生效）。
 static UIImage *gMaskThemeImg;
 static NSString *gMaskThemeKey;      // 缓存对应的主题名
 static BOOL gMaskThemeChecked;
@@ -871,17 +908,31 @@ static UIImage *TBThemeMaskImage(void) {
 
     NSString *dir = TBThemeDir(theme);
     if (!dir.length) return nil;
-    NSArray *cands = @[ @[@"",                             @"IconMask.png"],
-                        @[@"",                             @"IconMask@3x.png"],
-                        @[@"",                             @"IconMask@2x.png"],
-                        @[@"IconBundles",                  @"IconMask.png"],
-                        @[@"Bundles/com.apple.springboard", @"IconMask.png"] ];
-    for (NSArray *c in cands) {
-        NSString *sub = c[0], *name = c[1];
-        NSString *d = sub.length ? TBResolveDirCI(dir, sub) : dir;
-        if (!d.length) continue;
-        NSString *path = TBFindFileCI(d, name);
-        if (!path) continue;
+
+    NSString *path = nil;
+    NSString *iconBundles = TBResolveDirCI(dir, @"IconBundles");
+    if (iconBundles.length) path = TBFindFileCI(iconBundles, @"Icon.png");        // ①
+    if (!path) path = TBFindFileCI(dir, @"Icon.png");                             // ②
+    if (!path) {                                                                  // ③
+        NSString *fw = TBResolveDirCI(dir, @"Bundles/com.apple.mobileicons.framework");
+        if (fw.length) path = TBFindBestScaledPNG(fw, @"AppIconMask");
+    }
+    if (!path) {                                                                  // ④ 旧写法兜底
+        NSArray *cands = @[ @[@"",                             @"IconMask.png"],
+                            @[@"",                             @"IconMask@3x.png"],
+                            @[@"",                             @"IconMask@2x.png"],
+                            @[@"IconBundles",                  @"IconMask.png"],
+                            @[@"Bundles/com.apple.springboard", @"IconMask.png"] ];
+        for (NSArray *c in cands) {
+            NSString *sub = c[0], *name = c[1];
+            NSString *d = sub.length ? TBResolveDirCI(dir, sub) : dir;
+            if (!d.length) continue;
+            NSString *p = TBFindFileCI(d, name);
+            if (p) { path = p; break; }
+        }
+    }
+
+    if (path.length) {
         // 必须用 init：imageWithContentsOfFile: 已被本引擎 hook（递归会爆栈）
         UIImage *img = [[UIImage alloc] initWithContentsOfFile:path];
         if (img) {
@@ -894,7 +945,7 @@ static UIImage *TBThemeMaskImage(void) {
         }
     }
     TBLogOnce([@"thememask|none|" stringByAppendingString:theme],
-              @"图标形状：主题里没有 IconMask.png，落到自定义圆角 / 系统形状");
+              @"图标形状：主题里没有遮罩图（IconBundles/Icon.png、icon.png、AppIconMask*、IconMask.png 都没有），落到自定义圆角 / 系统形状");
     return nil;
 }
 
@@ -964,6 +1015,72 @@ static UIImage *TBApplyIconShape(UIImage *img, BOOL skipIfRounded) {
 
 static UIImage *TBIconRoundedImage(UIImage *img) {
     return TBApplyIconShape(img, YES);   // 图标：保留"已是圆角素材就跳过"保护
+}
+
+// ---- AnemoneEffects：玻璃叠加层 / 图标阴影 ----
+//   AnemoneEffects/iPhoneOverlay@3x.png → @2x → 无后缀   叠在图标之上
+//   AnemoneEffects/iPhoneShadow@3x.png  → @2x            垫在图标之下
+// 只看这两个名字；icon_shortcut_mask 之类的专用遮罩不算，AnemoneEffects 也不当形状遮罩用。
+// 结果按「主题名 + 名字」缓存，设置变更（TBReload）时清掉。
+static UIImage *gFxImg[2];
+static NSString *gFxKey[2];
+static BOOL gFxChecked[2];
+static UIImage *TBThemeFxImage(int slot, NSString *base) {
+    if (TBSafeMode() || !TBEnabled()) return nil;
+    NSString *theme = TBActiveTheme();
+    if (!theme.length) return nil;
+    if (gFxChecked[slot] && gFxKey[slot] && [gFxKey[slot] isEqualToString:theme]) return gFxImg[slot];
+    gFxKey[slot] = theme;
+    gFxChecked[slot] = YES;
+    gFxImg[slot] = nil;
+
+    NSString *dir = TBThemeDir(theme);
+    if (!dir.length) return nil;
+    NSString *fx = TBResolveDirCI(dir, @"AnemoneEffects");
+    if (!fx.length) return nil;
+    NSArray *names = @[ [base stringByAppendingString:@"@3x.png"],
+                        [base stringByAppendingString:@"@2x.png"],
+                        [base stringByAppendingString:@".png"] ];
+    for (NSString *n in names) {
+        NSString *p = TBFindFileCI(fx, n);
+        if (!p) continue;
+        // 必须用 init：imageWithContentsOfFile: 已被本引擎 hook（递归会爆栈）
+        UIImage *img = [[UIImage alloc] initWithContentsOfFile:p];
+        if (!img) continue;
+        gFxImg[slot] = img;
+        TBLogOnce([@[@"overlay|", @"shadow|"][slot] stringByAppendingString:theme],
+                  @"特效：用 %@（%.0fx%.0f pt）", n, img.size.width, img.size.height);
+        return img;
+    }
+    return nil;
+}
+static UIImage *TBThemeOverlayImage(void) { return TBThemeFxImage(0, @"iPhoneOverlay"); }
+static UIImage *TBThemeShadowImage(void)  { return TBThemeFxImage(1, @"iPhoneShadow"); }
+
+/// 特效合成：阴影垫在图标下方 → 图标 → 叠加层盖在图标之上（都按图标尺寸缩放对齐）
+static UIImage *TBApplyIconEffects(UIImage *img) {
+    if (!img) return img;
+    CGSize pt = img.size;
+    if (pt.width < 1 || pt.height < 1) return img;
+    UIImage *shadow  = TBUseThemeIconShadow()  ? TBThemeShadowImage()  : nil;
+    UIImage *overlay = TBUseThemeIconOverlay() ? TBThemeOverlayImage() : nil;
+    if (!shadow && !overlay) return img;      // 没开 / 主题里没素材 → 原样返回
+
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = img.scale > 0.5 ? img.scale : 3.0;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGRect rect = CGRectMake(0, 0, pt.width, pt.height);
+        if (shadow) [shadow drawInRect:rect blendMode:kCGBlendModeNormal alpha:1.0];
+        [img drawInRect:rect];
+        if (overlay) [overlay drawInRect:rect blendMode:kCGBlendModeNormal alpha:1.0];
+    }];
+}
+
+/// 图标最终出图：① 按形状裁（主题遮罩 / 自定义圆角 / 系统形状）② 再叠特效（阴影在下、叠加层在上）
+static UIImage *TBIconFinalImage(UIImage *img) {
+    return TBApplyIconEffects(TBIconRoundedImage(img));
 }
 
 static UIImage *gSystemClockFace;   // 系统自己的时钟表盘（主题取消后还原用）
@@ -1065,7 +1182,7 @@ static UIImage *TBImageForBundle(NSString *bid) {
         if (!calDynamic) {
             // 主题图标自己已经画了日期/星期 → 直接用，不叠加（否则会重影）
             TBLogOnce(@"calc|static", @"日历：主题图标已自带日期，跳过叠加");
-            UIImage *masked = TBIconRoundedImage(img);      // 圆角遮罩不能漏
+            UIImage *masked = TBIconFinalImage(img);        // 圆角遮罩 + 叠加层/阴影不能漏
             if (masked) img = masked;
             [gImageCache setObject:img forKey:cacheKey];
             return img;
@@ -1073,7 +1190,7 @@ static UIImage *TBImageForBundle(NSString *bid) {
         UIImage *composed = TBCalendarCompositeImage(img);
         if (composed) {
             TBLogOnce(@"calc|ok", @"日历合成：底图 + 红星期 + 黑日期");
-            UIImage *masked = TBIconRoundedImage(composed);   // 合成后同样要裁圆角
+            UIImage *masked = TBIconFinalImage(composed);     // 合成后同样要裁圆角 + 叠特效
             if (masked) composed = masked;
             [gImageCache setObject:composed forKey:cacheKey];
             return composed;
@@ -1090,7 +1207,8 @@ static UIImage *TBImageForBundle(NSString *bid) {
         img = TBIconRoundedImage(img);
         }
         // 按系统遮罩形状裁一刀（= SnowBoard 的 roundedRectImage:withCrop:YES 那一步）
-        img = TBIconRoundedImage(img);          // 交给系统前按系统形状裁（SB 同款）
+        // 最后一道：按形状裁 + 叠 AnemoneEffects（阴影在下、叠加层在上），一次性出最终图
+        img = TBIconFinalImage(img);            // 交给系统前按形状裁 + 叠特效（SB 同款）
         if (!dynamic) [gImageCache setObject:img forKey:bid];
     }
     return img;
@@ -3158,6 +3276,13 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
     gIndex = nil;
     gBundleRes = nil;          // 强制重建资源表（含时钟/日历素材）
     gBundleResTheme = nil;
+    // 遮罩图是按「主题名」缓存的：设置一变（例如 App 刚导入遮罩）就允许重扫，
+    // 否则导入完必须换主题 / 重启才看得到新形状
+    gMaskThemeChecked = NO;
+    gMaskThemeKey = nil;
+    gMaskThemeImg = nil;
+    // 同理：叠加层 / 阴影素材也是按主题名缓存的
+    for (int i = 0; i < 2; i++) { gFxChecked[i] = NO; gFxKey[i] = nil; gFxImg[i] = nil; }
     NSArray *caches = gCaches.allObjects;
     [gLock unlock];
     TBLog(@"设置变更：重建索引，清理 %lu 个缓存", (unsigned long)caches.count);

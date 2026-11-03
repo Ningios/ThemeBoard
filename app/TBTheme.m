@@ -94,6 +94,112 @@ static NSInteger TBScaleRank(NSString *file) {
     return bid && [self imagePathForBundleID:bid] != nil;
 }
 
+#pragma mark - 主题自带遮罩图
+
+/// 逐段大小写不敏感地解析相对目录
+static NSString *TBResolveSubdirCI(NSString *base, NSString *rel) {
+    if (!base.length) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *cur = base;
+    for (NSString *comp in [rel componentsSeparatedByString:@"/"]) {
+        if (!comp.length) continue;
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:cur isDirectory:&isDir] || !isDir) return nil;
+        NSString *next = nil;
+        for (NSString *item in [fm contentsOfDirectoryAtPath:cur error:NULL]) {
+            NSString *full = [cur stringByAppendingPathComponent:item];
+            BOOL d = NO;
+            if ([fm fileExistsAtPath:full isDirectory:&d] && d &&
+                [item caseInsensitiveCompare:comp] == NSOrderedSame) { next = full; break; }
+        }
+        if (!next) return nil;
+        cur = next;
+    }
+    return cur;
+}
+
+/// 目录里按名字找文件（大小写不敏感）
+static NSString *TBFindFileCIInDir(NSString *dir, NSString *name) {
+    if (!dir.length || !name.length) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *item in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
+        if ([item caseInsensitiveCompare:name] != NSOrderedSame) continue;
+        NSString *p = [dir stringByAppendingPathComponent:item];
+        BOOL d = NO;
+        if ([fm fileExistsAtPath:p isDirectory:&d] && !d) return p;
+    }
+    return nil;
+}
+
+/// 在目录里找「名字以 prefix 开头、以 .png 结尾」的文件（大小写不敏感），
+/// 优先 @3x → @2x → 其它（~iphone / ~ipad 之类的后缀都照收）
+static NSString *TBFindBestScaledPNG(NSString *dir, NSString *prefix) {
+    if (!dir.length || !prefix.length) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *lp = prefix.lowercaseString;
+    NSString *best = nil;
+    NSInteger bestRank = -1;
+    for (NSString *item in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
+        NSString *li = item.lowercaseString;
+        if (![li hasPrefix:lp] || ![li hasSuffix:@".png"]) continue;
+        NSString *p = [dir stringByAppendingPathComponent:item];
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:p isDirectory:&isDir] || isDir) continue;
+        NSInteger rank = [li rangeOfString:@"@3x"].location != NSNotFound ? 30
+                       : ([li rangeOfString:@"@2x"].location != NSNotFound ? 20 : 10);
+        if (rank > bestRank) { bestRank = rank; best = p; }
+    }
+    return best;
+}
+
+- (NSString *)iconMaskPath {
+    if (!self.path.length) return nil;
+
+    // ① IconBundles/Icon.png（含小写 icon.png）
+    NSString *ib = TBResolveSubdirCI(self.path, @"IconBundles");
+    if (ib.length) {
+        NSString *p = TBFindFileCIInDir(ib, @"Icon.png");
+        if (p) return p;
+    }
+    // ② 主题根目录 icon.png
+    NSString *p2 = TBFindFileCIInDir(self.path, @"Icon.png");
+    if (p2) return p2;
+    // ③ 经典 AppIconMask
+    NSString *fw = TBResolveSubdirCI(self.path, @"Bundles/com.apple.mobileicons.framework");
+    if (fw.length) {
+        NSString *p3 = TBFindBestScaledPNG(fw, @"AppIconMask");
+        if (p3) return p3;
+    }
+    // ④ 旧写法兜底
+    NSArray *cands = @[ @[@"", @"IconMask.png"],
+                        @[@"", @"IconMask@3x.png"],
+                        @[@"", @"IconMask@2x.png"],
+                        @[@"IconBundles", @"IconMask.png"],
+                        @[@"Bundles/com.apple.springboard", @"IconMask.png"] ];
+    for (NSArray *c in cands) {
+        NSString *sub = c[0], *name = c[1];
+        NSString *d = sub.length ? TBResolveSubdirCI(self.path, sub) : self.path;
+        if (!d.length) continue;
+        NSString *p = TBFindFileCIInDir(d, name);
+        if (p) return p;
+    }
+    return nil;
+}
+
+- (NSString *)anemoneEffectPath:(NSString *)base {
+    if (!self.path.length || !base.length) return nil;
+    NSString *fx = TBResolveSubdirCI(self.path, @"AnemoneEffects");
+    if (!fx.length) return nil;
+    NSArray *names = @[ [base stringByAppendingString:@"@3x.png"],
+                        [base stringByAppendingString:@"@2x.png"],
+                        [base stringByAppendingString:@".png"] ];
+    for (NSString *n in names) {
+        NSString *p = TBFindFileCIInDir(fx, n);
+        if (p) return p;
+    }
+    return nil;
+}
+
 - (UIImage *)coverImageWithSize:(CGFloat)size {
     [self loadIndex];
     NSArray<NSString *> *bids = [self bundleIdentifiers];

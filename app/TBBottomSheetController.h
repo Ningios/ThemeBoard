@@ -3,12 +3,16 @@
 @class TBTheme;
 
 /// 自定义底部抽屉（自己实现，**不用** UISheetPresentationController）：
+///   - 高度：等于内容实际高度（紧凑排布，展开态下方不留空白），不再按屏高比例撑开
 ///   - 阻尼橡皮筋：拖出边界后按 1 - 1/(over*k+1) 衰减（近处斜率 ≈ 0.35）
-///   - 松手按手势速度吸附：y 速度大就顺方向吸到下一个锚点，速度小吸最近锚点
-///   - 弹簧收尾：UISpringTimingParameters + UIViewPropertyAnimator
-///   - 三个锚点：收起（屏外）/ 中间（约屏高 45%）/ 展开（约屏高 85%）
+///   - 松手按手势速度投影吸附：offset + vy×0.20 选最近锚点，甩得够快就顺方向走一格
+///   - 收尾只用**一个** UIViewPropertyAnimator（弹簧 damping 0.88 / 0.34s），
+///     抽屉位移与背景 alpha 在同一次动画块里一起走，收起动画结束后才 dismiss
+///   - 三个锚点：收起（屏外）/ 中间（露出内容一半）/ 展开（= 内容高度）
 ///   - 半透明黑色遮罩，点它收起；顶部一根小拖拽指示条
-/// 抽屉内容：遮罩三选一（系统形状 / 主题遮罩图 / 自定义圆角）+ 应用主题 + 详情。
+/// 抽屉内容：遮罩三选一（系统形状 / 主题遮罩图 / 自定义圆角）
+///          + AnemoneEffects 开关两个（叠加层 / 阴影，主题里没有就灰显）
+///          + 应用主题 / 导入遮罩 / 详情。
 @interface TBBottomSheetController : UIViewController
 
 - (instancetype)initWithTheme:(TBTheme *)theme;
