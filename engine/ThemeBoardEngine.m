@@ -986,6 +986,82 @@ static UIImage *TBRoundedCornerImage(UIImage *img, CGFloat radius) {
     }];
 }
 
+/// 把「四角本来就透明的圆角素材」补成方角：用同行/同列最近的边缘像素颜色填四角。
+/// 不补的话，素材自己的圆角永远盖过设置 —— 自定义圆角调小（更方）会完全看不出效果。
+static NSMapTable *gSquareFillCache;
+static UIImage *TBArtSquareFilled(UIImage *img) {
+    if (!img || !img.CGImage) return img;
+    const size_t W = CGImageGetWidth(img.CGImage), H = CGImageGetHeight(img.CGImage);
+    if (W < 8 || H < 8 || W > 1400 || H > 1400) return img;
+    if (!gSquareFillCache) gSquareFillCache = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsObjectPointerPersonality
+                                                                   valueOptions:0];
+    UIImage *hit = [gSquareFillCache objectForKey:img];
+    if (hit) return hit;
+
+    const size_t bpr = W * 4;
+    unsigned char *buf = calloc(H * bpr, 1);
+    if (!buf) return img;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, bpr, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return img; }
+    CGContextDrawImage(ctx, CGRectMake(0, 0, W, H), img.CGImage);
+
+    // 四角都不透明 → 本来就是方角素材，不用补
+    if (buf[3] > 24 && buf[(W - 1) * 4 + 3] > 24 &&
+        buf[(H - 1) * bpr + 3] > 24 && buf[(H - 1) * bpr + (W - 1) * 4 + 3] > 24) {
+        CGContextRelease(ctx); free(buf);
+        [gSquareFillCache setObject:img forKey:img];
+        return img;
+    }
+
+    int *xl = calloc(H, sizeof(int)), *xr = calloc(H, sizeof(int));
+    int *yt = calloc(W, sizeof(int)), *yb = calloc(W, sizeof(int));
+    if (!xl || !xr || !yt || !yb) { free(xl); free(xr); free(yt); free(yb); free(buf); CGContextRelease(ctx); return img; }
+    for (size_t y = 0; y < H; y++) {
+        xl[y] = -1; xr[y] = -1;
+        for (size_t x = 0; x < W; x++) {
+            if (buf[y * bpr + x * 4 + 3] > 24) { if (xl[y] < 0) xl[y] = (int)x; xr[y] = (int)x; }
+        }
+    }
+    for (size_t x = 0; x < W; x++) {
+        yt[x] = -1; yb[x] = -1;
+        for (size_t y = 0; y < H; y++) {
+            if (buf[y * bpr + x * 4 + 3] > 24) { if (yt[x] < 0) yt[x] = (int)y; yb[x] = (int)y; }
+        }
+    }
+    for (size_t y = 0; y < H; y++) {
+        if (xl[y] < 0) continue;
+        for (size_t x = 0; x < W; x++) {
+            unsigned char *d = &buf[y * bpr + x * 4];
+            if (d[3] > 24) continue;
+            const unsigned char *src = NULL;
+            int hd = -1, vd = -1;
+            if ((int)x < xl[y])      { hd = xl[y] - (int)x; src = &buf[y * bpr + (size_t)xl[y] * 4]; }
+            else if ((int)x > xr[y]) { hd = (int)x - xr[y]; src = &buf[y * bpr + (size_t)xr[y] * 4]; }
+            if (yt[x] >= 0 && (int)y < yt[x]) {
+                int d2 = yt[x] - (int)y;
+                if (hd < 0 || d2 < hd) { vd = d2; src = &buf[(size_t)yt[x] * bpr + x * 4]; }
+            } else if (yb[x] >= 0 && (int)y > yb[x]) {
+                int d2 = (int)y - yb[x];
+                if (hd < 0 || d2 < hd) { vd = d2; src = &buf[(size_t)yb[x] * bpr + x * 4]; }
+            }
+            if (!src) continue;
+            d[0] = src[0]; d[1] = src[1]; d[2] = src[2]; d[3] = 255;
+        }
+    }
+    free(xl); free(xr); free(yt); free(yb);
+    CGImageRef outRef = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    free(buf);
+    if (!outRef) return img;
+    UIImage *out = [UIImage imageWithCGImage:outRef scale:(img.scale > 0.5 ? img.scale : 3.0)
+                                 orientation:img.imageOrientation];
+    CGImageRelease(outRef);
+    if (out) [gSquareFillCache setObject:out forKey:img];
+    return out ?: img;
+}
+
 /// 图标形状统一入口（图标与时钟表盘共用）：
 ///   ① 主题遮罩图（作者明确要的形状，这个模式下不做"已圆角就跳过"排查）
 ///   ② skipIfRounded：素材四角本来透明 → 直接返回，避免裁多
@@ -999,15 +1075,16 @@ static UIImage *TBApplyIconShape(UIImage *img, BOOL skipIfRounded) {
         if (m) return TBMaskWithThemeMask(img, m);
         // 主题里没有遮罩图 → 继续往下落到 ② / ③
     }
-    if (skipIfRounded && TBIconArtAlreadyRounded(img)) return img;    // ② 已是圆角素材 → 不裁
     CGSize pt = img.size;
-    if (pt.width >= 1 && pt.height >= 1 && TBMaskCornerRadiusOn()) {  // ③ 自定义圆角半径
+    if (pt.width >= 1 && pt.height >= 1 && TBMaskCornerRadiusOn()) {  // ② 自定义圆角半径（用户显式选了就以它为准）
         CGFloat radius = (CGFloat)(TBMaskCornerRadius() / 60.0) * pt.width;
+        UIImage *square = TBArtSquareFilled(img);      // 素材自带圆角 → 先补成方角，半径才看得出变化
         TBLogOnce([@"maskradius|" stringByAppendingFormat:@"%@", TBActiveTheme() ?: @""],
-                  @"图标形状：自定义圆角 %.2f → radius %.2f（%.0fpt 宽）",
-                  TBMaskCornerRadius(), radius, pt.width);
-        return TBRoundedCornerImage(img, radius);
+                  @"图标形状：自定义圆角 %.2f → radius %.2f（%.0fpt 宽）%@",
+                  TBMaskCornerRadius(), radius, pt.width, (square == img ? @"" : @"（已补方角）"));
+        return TBRoundedCornerImage(square, radius);
     }
+    if (skipIfRounded && TBIconArtAlreadyRounded(img)) return img;    // ③ 已是圆角素材 → 不裁
     if (gSystemMaskTemplate) return TBMaskWithSystemShape(img);       // ④ 按系统形状裁（现状）
     if (pt.width < 16 || pt.height < 16) return img;                  // 现状：太小不动
     return TBRoundedCornerImage(img, MIN(pt.width, pt.height) * 0.2237);  // ⑤ 兜底（现状）
@@ -2776,6 +2853,48 @@ static UIImage *TBThemeBadgeImage(void) {
     if (!a) a = TBResourceImage(@"SBBadgeBG.png");
     return a;
 }
+/// 深度遍历：盘子可能不在第一层，也可能直接画在 layer.contents 上
+static void TBBadgePaint(UIView *v, UIImage *badge, int depth, int *hits, NSMutableString *dump,
+                         int *dumpNodes) {
+    if (depth > 4) return;
+    if (!dumpNodes) {
+        // 正常替换：图片视图换图；直接把图写进 layer 的也换掉
+        if ([v isKindOfClass:[UIImageView class]]) {
+            UIImageView *iv = (UIImageView *)v;
+            iv.image = badge;
+            iv.contentMode = UIViewContentModeScaleToFill;
+            (*hits)++;
+        }
+        id contents = v.layer.contents;
+        if (contents && ![contents isKindOfClass:[UIImage class]] &&
+            CFGetTypeID((__bridge CFTypeRef)contents) == CGImageGetTypeID()) {
+            v.layer.contents = (__bridge id)badge.CGImage;
+            (*hits)++;
+        }
+        // 红底：SBIconBadgeView 体系里个别版本用背景色画红，直接抹掉
+        UIColor *bg = v.backgroundColor;
+        if (bg) {
+            CGFloat r = 0, g = 0, b = 0, a = 0;
+            if ([bg getRed:&r green:&g blue:&b alpha:&a] && a > 0.2 && r > 0.45 && r > g * 1.6 && r > b * 1.6) {
+                v.backgroundColor = [UIColor clearColor];
+                (*hits)++;
+            }
+        }
+    } else if (*dumpNodes < 12) {
+        (*dumpNodes)++;
+        [dump appendFormat:@"\n   %@ f=%@ img=%@ bg=%s",
+                           NSStringFromClass([v class]),
+                           NSStringFromCGRect(CGRectIntegral(v.frame)),
+                           ([v isKindOfClass:[UIImageView class]] && [(UIImageView *)v image])
+                               ? NSStringFromCGSize([(UIImageView *)v image].size) : @"-",
+                           v.backgroundColor ? "y" : "-"];
+    }
+    NSArray *kids = [[v subviews] copy];
+    for (NSUInteger i = 0; i < kids.count; i++) {
+        TBBadgePaint([kids objectAtIndex:i], badge, depth + 1, hits, dump, dumpNodes);
+    }
+}
+
 static void tb_badgeLayout(id self, SEL _cmd) {
     if (o_badgeLayout) o_badgeLayout(self, _cmd);
     @try {
@@ -2785,15 +2904,35 @@ static void tb_badgeLayout(id self, SEL _cmd) {
         BOOL hasCustom = ([cb isKindOfClass:[NSString class]] && [(NSString *)cb length] > 0);
         if (!on && !hasCustom) return;
         UIImage *badge = TBThemeBadgeImage();
-        if (!badge) return;
-        static int logged = 0;
-        for (UIView *v in [self subviews]) {
-            if (![v isKindOfClass:[UIImageView class]]) continue;
-            UIImageView *iv = (UIImageView *)v;
-            iv.image = badge;
-            iv.contentMode = UIViewContentModeScaleToFill;
-            if (logged < 5) { logged++; TBLog(@"角标替换：已换底板 %@", NSStringFromClass([self class])); }
+        if (!badge) {
+            TBLogOnce(@"badgeNoAsset", @"角标替换：主题/素材里没有 SBBadgeBG@3x.png → 跳过（开关已开也没用）");
+            return;
         }
+        static int dumped = 0;
+        int hits = 0;
+        if (dumped < 2) {
+            UIView *selfView = (UIView *)self;
+            NSMutableString *d = [NSMutableString stringWithFormat:@"角标层级 %@ (%@):",
+                                  NSStringFromClass([self class]), NSStringFromCGRect(selfView.frame)];
+            int nodes = 0;
+            TBBadgePaint((UIView *)self, badge, 0, &hits, d, &nodes);
+            dumped++;
+            TBLog(@"%@", d);
+        } else {
+            TBBadgePaint((UIView *)self, badge, 0, &hits, nil, NULL);
+        }
+        static int logged = 0;
+        if (logged < 5 && hits > 0) { logged++; TBLog(@"角标替换：已换底板 %@（%d 处）",
+                                                      NSStringFromClass([self class]), hits); }
+        // 系统有时在 layout 之后才把图写回去 → 稍后再补一次
+        __weak UIView *wv = (UIView *)self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UIView *v = wv;
+            if (!v) return;
+            int h2 = 0;
+            TBBadgePaint(v, badge, 0, &h2, nil, NULL);
+        });
     } @catch (NSException *e) { }
 }
 static BOOL gDoneBadge = NO;

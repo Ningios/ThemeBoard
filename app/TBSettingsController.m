@@ -223,7 +223,7 @@
     if ([act isEqualToString:@"import"]) {
         // 与主题列表页同一个选择器：iOS14+ = initForOpeningContentTypes:asCopy:YES
         UIDocumentPickerViewController *picker =
-            TBNewImportPicker(@[ UTTypeFolder, UTTypeZIP ], @[ @"public.folder", @"public.zip-archive" ]);
+            TBNewImportPicker(@[ UTTypeFolder, UTTypeZIP, UTTypeItem ], @[ @"public.item" ]);
         if (!picker) { [self alert:@"打不开" msg:@"系统没有可用的文件夹选择器"]; return; }
         picker.delegate = self;
         [self presentViewController:picker animated:YES completion:nil];

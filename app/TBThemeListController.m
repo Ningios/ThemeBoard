@@ -175,7 +175,7 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
     // iOS14+：initForOpeningContentTypes:asCopy:YES（系统先把文件/目录复制进 App 临时区）
     // 老系统：initWithDocumentTypes:inMode:UIDocumentPickerModeImport
     UIDocumentPickerViewController *picker =
-        TBNewImportPicker(@[ UTTypeFolder, UTTypeZIP ], @[ @"public.folder", @"public.zip-archive" ]);
+        TBNewImportPicker(@[ UTTypeFolder, UTTypeZIP, UTTypeItem ], @[ @"public.item" ]);
     if (!picker) { [self alertTitle:@"打不开" message:@"系统没有可用的文件夹选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;

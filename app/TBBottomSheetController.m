@@ -7,6 +7,7 @@
 #import "TBPaths.h"
 #import "TBImageUtil.h"
 #import "TBDocImport.h"
+#import "TBToast.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #pragma mark - 偏好键（用 TBPrefs.h 里的常量，键名与引擎完全一致）
@@ -86,6 +87,8 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 
 @property (nonatomic, strong) UIPanGestureRecognizer *pan;
 @property (nonatomic, assign) BOOL cancelApplyInActionRow;   // 素材包：取消应用和应用按钮同一行
+@property (nonatomic, assign) NSInteger pendingChoice;       // 待应用的模式（-1 = 没有，仅点选不生效）
+@property (nonatomic, strong) NSMutableSet<NSNumber *> *pendingAssets;   // 素材包：待应用项
 
 // ---- 动画状态 ----
 /// 位移（正数 = 往下移；0 = 展开，sheetHeight = 收起）
@@ -116,6 +119,8 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         _fxButtons = [NSMutableArray array];
         _fxChecks = [NSMutableArray array];
         _actionButtons = [NSMutableArray array];
+        _pendingChoice = -1;
+        _pendingAssets = [NSMutableSet set];
     }
     return self;
 }
@@ -519,8 +524,9 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     if (!self.isAssetPack) {
         TBSheetMaskMode mode = [self currentMode];
         BOOL hasMask = [self tb_hasMask];
+        BOOL pend = (self.pendingChoice >= 0);
         for (UIButton *b in self.choiceButtons) {
-            BOOL selected = (b.tag == (NSInteger)mode);
+            BOOL selected = pend ? (b.tag == self.pendingChoice) : (b.tag == (NSInteger)mode);
             UIImageView *check = self.choiceChecks[b.tag];
             BOOL available = (b.tag != (NSInteger)TBSheetMaskModeThemeMask) || hasMask;
             if (!available && !selected) {
@@ -536,6 +542,11 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
                 double r = [TBPrefs doubleForKey:TBKeyMaskCornerRadius defaultValue:kTBDefaultMaskCornerRadius];
                 NSString *t = selected ? [NSString stringWithFormat:@"自定义圆角 %.2f", r] : @"自定义圆角";
                 [b setTitle:t forState:UIControlStateNormal];
+            } else {
+                NSString *base = (b.tag == (NSInteger)TBSheetMaskModeSystem) ? @"默认" : @"遮罩";
+                BOOL wait = pend && (b.tag == self.pendingChoice);
+                [b setTitle:(wait ? [base stringByAppendingString:@"（待应用）"] : base)
+                    forState:UIControlStateNormal];
             }
         }
 
@@ -560,9 +571,10 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         }
 
         // 底部：应用主题 / 正在使用
-        [self.applyButton setTitle:(activeTheme ? @"正在使用" : @"应用主题") forState:UIControlStateNormal];
+        [self.applyButton setTitle:(pend ? @"应用" : (activeTheme ? @"正在使用" : @"应用主题"))
+                          forState:UIControlStateNormal];
         [self tb_stylePrimary:self.applyButton];
-        self.applyButton.alpha = activeTheme ? 0.55 : 1.0;
+        self.applyButton.alpha = (pend || !activeTheme) ? 1.0 : 0.55;
         self.cancelApplyButton.hidden = !activeTheme;
         self.importButton.hidden = NO;
         self.detailButton.hidden = NO;
@@ -585,16 +597,21 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         for (NSInteger i = 0; i < (NSInteger)self.choiceButtons.count && i < (NSInteger)items.count; i++) {
             UIButton *b = self.choiceButtons[i];
             BOOL on = [self tb_assetItemActive:items[i]];
-            [self tb_applySelectedLook:b selected:on check:self.choiceChecks[i]];
-            [b setTitle:[NSString stringWithFormat:@"%@%@", items[i][@"title"], (on ? @"（已启用）" : @"")]
+            BOOL wait = [self.pendingAssets containsObject:@(i)];
+            [self tb_applySelectedLook:b selected:(on || wait) check:self.choiceChecks[i]];
+            if (wait && !on) self.choiceChecks[i].hidden = YES;     // 待应用：只高亮，不出对勾
+            NSString *sfx = on ? @"（已启用）" : (wait ? @"（待应用）" : @"");
+            [b setTitle:[NSString stringWithFormat:@"%@%@", items[i][@"title"], sfx]
               forState:UIControlStateNormal];
             b.alpha = 1.0;
             [b setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
         }
         BOOL applied = [self tb_assetPackApplied];
-        [self.applyButton setTitle:(applied ? @"正在使用" : @"应用") forState:UIControlStateNormal];
+        BOOL pendAny = (self.pendingAssets.count > 0);
+        [self.applyButton setTitle:(pendAny ? @"应用" : (applied ? @"正在使用" : @"应用"))
+                          forState:UIControlStateNormal];
         [self tb_stylePrimary:self.applyButton];
-        self.applyButton.alpha = applied ? 0.55 : 1.0;
+        self.applyButton.alpha = (pendAny || !applied) ? 1.0 : 0.55;
         self.applyButton.hidden = NO;
         self.cancelApplyButton.hidden = !applied;
 
@@ -627,16 +644,8 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         [self tb_showRadiusPanel];     // 自定义圆角 → 自绘面板（滑块 + 输入框）
         return;
     }
-    if (mode == TBSheetMaskModeSystem) {
-        [TBPrefs setBool:NO forKey:TBKeyUseThemeIconMask];
-        [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];
-    } else {
-        [TBPrefs setBool:YES forKey:TBKeyUseThemeIconMask];
-        [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];
-        double r = [TBPrefs doubleForKey:TBKeyMaskCornerRadius defaultValue:kTBDefaultMaskCornerRadius];
-        if (!(r > 0.0)) [TBPrefs setDouble:kTBDefaultMaskCornerRadius forKey:TBKeyMaskCornerRadius];
-    }
-    [TBPrefs notifyChanged];
+    // 只记「选中」，不动设置 —— 点下面的「应用」才真正生效
+    self.pendingChoice = (NSInteger)mode;
     [self refreshState];
 }
 
@@ -645,19 +654,10 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     NSArray<NSDictionary *> *items = [self.theme availableAssetItems];
     NSInteger i = sender.tag;
     if (i < 0 || i >= (NSInteger)items.count) return;
-    NSDictionary *it = items[i];
-    NSString *key = it[@"key"];
-    NSString *switchKey = [self tb_switchKeyForKind:it[@"kind"]];
-    if ([self tb_assetItemActive:it]) {
-        [TBPrefs setBool:NO forKey:switchKey];
-    } else {
-        [TBPrefs setString:it[@"path"] forKey:key];
-        [TBPrefs setBool:YES forKey:switchKey];
-        if ([it[@"kind"] isEqualToString:@"mask"]) {
-            [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];   // 遮罩优先，别和圆角打架
-        }
-    }
-    [TBPrefs notifyChanged];
+    // 只切换「待应用」勾选，不动设置 —— 点下面的「应用」才真正生效
+    NSNumber *n = @(i);
+    if ([self.pendingAssets containsObject:n]) [self.pendingAssets removeObject:n];
+    else [self.pendingAssets addObject:n];
     [self refreshState];
 }
 
@@ -703,6 +703,24 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 
 - (void)applyTapped {
     if (self.isAssetPack) {
+        NSArray<NSDictionary *> *all = [self.theme availableAssetItems];
+        if (self.pendingAssets.count) {           // 只应用勾选的那些
+            for (NSNumber *n in self.pendingAssets) {
+                NSInteger i = n.integerValue;
+                if (i < 0 || i >= (NSInteger)all.count) continue;
+                NSDictionary *it = all[i];
+                [TBPrefs setString:it[@"path"] forKey:it[@"key"]];
+                [TBPrefs setBool:YES forKey:[self tb_switchKeyForKind:it[@"kind"]]];
+                if ([it[@"kind"] isEqualToString:@"mask"]) {
+                    [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];   // 遮罩优先，别和圆角打架
+                }
+            }
+            [self.pendingAssets removeAllObjects];
+            [TBPrefs notifyChanged];
+            [self refreshState];
+            [TBToast showAppliedIn:self];
+            return;
+        }
         for (NSDictionary *it in [self.theme availableAssetItems]) {
             [TBPrefs setString:it[@"path"] forKey:it[@"key"]];
             [TBPrefs setBool:YES forKey:[self tb_switchKeyForKind:it[@"kind"]]];
@@ -710,6 +728,23 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         [TBPrefs notifyChanged];
         [self refreshState];
         return;   // 素材包不关抽屉：用户可以继续微调
+    }
+    if (self.pendingChoice >= 0) {            // 先把选中的形状落到设置
+        TBSheetMaskMode m = (TBSheetMaskMode)self.pendingChoice;
+        self.pendingChoice = -1;
+        if (m == TBSheetMaskModeSystem) {
+            [TBPrefs setBool:NO forKey:TBKeyUseThemeIconMask];
+            [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];
+        } else if (m == TBSheetMaskModeThemeMask) {
+            [TBPrefs setBool:YES forKey:TBKeyUseThemeIconMask];
+            [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];
+            double r = [TBPrefs doubleForKey:TBKeyMaskCornerRadius defaultValue:kTBDefaultMaskCornerRadius];
+            if (!(r > 0.0)) [TBPrefs setDouble:kTBDefaultMaskCornerRadius forKey:TBKeyMaskCornerRadius];
+        }
+        [TBPrefs notifyChanged];
+        [self refreshState];
+        [TBToast showAppliedIn:self];
+        return;                                // 形状改了不关抽屉
     }
     // 与详情页「应用这个主题」完全一致
     [TBPrefs setString:self.theme.name forKey:TBKeyActiveTheme];
@@ -1071,8 +1106,10 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 
 - (void)tb_pickMaskFile {
     // 与导入主题同一个访问层：iOS14+ = initForOpeningContentTypes:asCopy:YES，老系统 = Import 模式
+    // 类型放开到 public.item：否则 iCloud 上不匹配的文件会被系统置灰、根本点不动
+    // （选完再由我们自己判定是不是图片，见 didPickDocumentsAtURLs）
     UIDocumentPickerViewController *picker =
-        TBNewImportPicker(@[ UTTypePNG, UTTypeJPEG ], @[ @"public.png", @"public.jpeg" ]);
+        TBNewImportPicker(@[ UTTypePNG, UTTypeJPEG, UTTypeItem ], @[ @"public.item" ]);
     if (!picker) { [self tb_alert:@"打不开" message:@"系统没有可用的图片选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
@@ -1083,6 +1120,18 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *url = urls.firstObject;
     if (!url) return;
+
+    // 签发类型放开了，这里要把非图片挡掉并说清楚
+    static NSArray *kImgExt;
+    if (!kImgExt) kImgExt = @[ @"png", @"jpg", @"jpeg", @"heic", @"webp", @"tiff", @"bmp" ];
+    NSString *ext = url.pathExtension.lowercaseString;
+    if (![kImgExt containsObject:(ext ?: @"")]) {
+        [self tb_alert:@"这不是图片"
+               message:[NSString stringWithFormat:
+                        @"遮罩需要 PNG / JPG 图片，你选的是「%@」。\n\n如果遮罩在压缩包里，请先用「文件」App 解压（或长按 → 解压缩），再选里面的图片。",
+                        url.lastPathComponent ?: @"这个文件"]];
+        return;
+    }
 
     NSString *dir = self.theme.path;
     NSFileManager *fm = [NSFileManager defaultManager];

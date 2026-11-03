@@ -117,10 +117,15 @@ void TBLog2(NSString *fmt, ...) {
 
 - (void)tb_presentOver:(UIViewController *)host {
     if (!host) return;
+    // ★ 先隐藏、先把卡片摆到最终位置，再 present —— 否则会有一帧"卡片全亮"的闪烁
+    self.dimView.alpha = 0;
+    self.cardView.alpha = 0;
+    self.cardView.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    self.view.hidden = YES;
+    [self.view setNeedsLayout];
+    [self.view layoutIfNeeded];
+    self.view.hidden = NO;
     [host presentViewController:self animated:NO completion:^{   // 系统动画关掉，自己淡入
-        self.dimView.alpha = 0;
-        self.cardView.alpha = 0;
-        self.cardView.transform = CGAffineTransformMakeScale(0.96, 0.96);
         [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionCurveEaseOut
                          animations:^{
             self.dimView.alpha = 0.44;
