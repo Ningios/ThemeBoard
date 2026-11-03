@@ -4,6 +4,7 @@
 #import "TBPrefs.h"
 #import "TBMissingController.h"
 #import "TBGlass.h"
+#import "TBToast.h"
 
 #pragma mark - 遮罩偏好键（与引擎 / 抽屉完全一致）
 
@@ -389,10 +390,7 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
     [TBPrefs setBool:YES forKey:TBKeyEnabled];
     [TBPrefs notifyChanged];
     [self refreshApplyState];
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已应用"
-        message:@"设置已写入。引擎生效后桌面会立即换图。" preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
+    [TBToast showAppliedIn:self];   // 玻璃胶囊提示，替换原来的系统弹窗
 }
 
 - (void)cancelApplyTapped {
@@ -405,6 +403,7 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
         [TBPrefs setString:nil forKey:TBKeyActiveTheme];
         [TBPrefs notifyChanged];
         [self refreshApplyState];
+        [TBToast showCancelledIn:self];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
 }

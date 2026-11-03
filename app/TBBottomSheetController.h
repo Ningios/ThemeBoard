@@ -24,4 +24,7 @@
 @property (nonatomic, copy) void (^onApply)(TBTheme *theme);
 @property (nonatomic, copy) void (^onDetail)(TBTheme *theme);
 
+/// 点了「取消应用」之后回调（宿主页用来弹「已取消」胶囊 toast）
+@property (nonatomic, copy) void (^onCancelApply)(TBTheme *theme);
+
 @end

@@ -2,6 +2,7 @@
 #import "TBZip.h"
 #import "TBPaths.h"
 #import "TBImageUtil.h"
+#import "TBDocImport.h"
 #import <spawn.h>
 extern char **environ;
 
@@ -248,16 +249,38 @@ static BOOL TBIsThemeLikeDirectory(NSString *dir) {
 }
 
 + (NSString *)importFromAnyURL:(NSURL *)url error:(NSError **)error {
-    // iCloud 占位文件：先让文件协调器把它真正下载下来，再走本地流程
+    if (!url) {
+        if (error) *error = [NSError errorWithDomain:@"TB" code:1
+                                            userInfo:@{NSLocalizedDescriptionKey: @"没有选择文件"}];
+        return nil;
+    }
+    // iCloud 云盘的文件在没下载时只是占位符（.icloud），直接 contentsOfFile: 拿到空数据。
+    // 统一走 TBCopyCoordinatedItemToTemp：
+    //   ① startAccessingSecurityScopedResource
+    //   ② NSFileCoordinator + NSFileCoordinatorReadingForUploading（会触发 iCloud 下载）
+    //   ③ 在 accessor 里把文件 / 整个目录递归复制到 NSTemporaryDirectory()
+    // 之后再在副本上跑原来的本地导入流程。
+    NSError *copyErr = nil;
+    NSURL *tmp = TBCopyCoordinatedItemToTemp(url, &copyErr);
+    if (!tmp) {
+        if (error) *error = copyErr ?: [NSError errorWithDomain:@"TB" code:7
+            userInfo:@{NSLocalizedDescriptionKey: @"复制到临时目录失败"}];
+        return nil;
+    }
+
     __block NSString *result = nil;
     __block NSError *inner = nil;
-    NSError *coordErr = nil;
-    NSFileCoordinator *coord = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
-    [coord coordinateReadingItemAtURL:url options:0 error:&coordErr byAccessor:^(NSURL *newURL) {
-        result = [self importLocalURL:newURL error:&inner];
-    }];
+    @try {
+        result = [self importLocalURL:tmp error:&inner];
+    } @catch (NSException *ex) {
+        inner = [NSError errorWithDomain:@"TB" code:9
+                                userInfo:@{NSLocalizedDescriptionKey:
+                                               [NSString stringWithFormat:@"导入异常：%@", ex.reason ?: ex.name]}];
+    }
+    TBRemoveTempCopy(tmp);   // 临时副本用完即删（成功失败都删）
+
     if (result) return result;
-    if (error) *error = inner ?: coordErr;
+    if (error) *error = inner ?: copyErr;
     return nil;
 }
 
@@ -400,19 +423,33 @@ static BOOL TBIsThemeLikeDirectory(NSString *dir) {
     NSString *k = kind.length ? kind : @"mask";
     NSFileManager *fm = [NSFileManager defaultManager];
 
-    // 文件夹：整体搬进来
+    // 文件夹：整体搬进来（先经文件协调器复制到沙盒临时目录，iCloud 上的目录也能下载下来）
     BOOL isDir = NO;
     if ([fm fileExistsAtPath:url.path isDirectory:&isDir] && isDir) {
-        return [self importAssetDirectory:url kind:k error:error];
+        NSError *cpErr = nil;
+        NSURL *tmp = TBCopyCoordinatedItemToTemp(url, &cpErr);
+        if (!tmp) {
+            if (error) *error = cpErr;
+            return nil;
+        }
+        NSString *r = [self importAssetDirectory:tmp kind:k error:error];
+        TBRemoveTempCopy(tmp);
+        return r;
     }
 
-    BOOL scoped = [url startAccessingSecurityScopedResource];
-    NSData *raw = [NSData dataWithContentsOfURL:url options:0 error:NULL];
-    UIImage *img = raw.length ? [[UIImage alloc] initWithData:raw] : nil;
-    if (scoped) [url stopAccessingSecurityScopedResource];
+    // 单个图片：必须走 NSFileCoordinator（iCloud 未下载的文件直接读会是占位符）
+    NSError *readErr = nil;
+    NSData *raw = TBReadCoordinatedData(url, &readErr);
+    if (!raw.length) {
+        if (error) *error = readErr ?: [NSError errorWithDomain:@"TB" code:7
+            userInfo:@{NSLocalizedDescriptionKey: @"读不到图片（换一张 PNG/JPG 再试）"}];
+        return nil;
+    }
+    UIImage *img = [[UIImage alloc] initWithData:raw];
     if (!img) {
         if (error) *error = [NSError errorWithDomain:@"TB" code:7
-            userInfo:@{NSLocalizedDescriptionKey: @"读不到图片（换一张 PNG/JPG 再试）"}];
+            userInfo:@{NSLocalizedDescriptionKey:
+                           TBImportFailureMessage(url, nil, @"读不到图片（换一张 PNG/JPG 再试）")}];
         return nil;
     }
 

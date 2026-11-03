@@ -6,6 +6,7 @@
 #import "TBPanelController.h"
 #import "TBPaths.h"
 #import "TBImageUtil.h"
+#import "TBDocImport.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #pragma mark - 偏好键（用 TBPrefs.h 里的常量，键名与引擎完全一致）
@@ -21,7 +22,7 @@ typedef NS_ENUM(NSInteger, TBSheetMaskMode) {
 
 #pragma mark - 几何 / 手感参数
 
-static const CGFloat kTBSheetMaxRatio       = 0.88;  // 内容过高时的上限（相对屏高）
+static const CGFloat kTBSheetTopGap         = 8.0;   // 高度上限 = 屏高 − 顶部安全区 − 这个间隙
 static const CGFloat kTBSheetTopPad         = 8.0;   // 内容顶部留白
 static const CGFloat kTBSheetBottomPad      = 8.0;   // 内容底部留白（另加安全区）
 static const CGFloat kTBRubberK             = 0.35;  // 橡皮筋阻尼系数（近处斜率 ≈ 0.35）
@@ -91,6 +92,8 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 @property (nonatomic, assign) CGFloat offset;
 @property (nonatomic, assign) CGFloat dragStartOffset;
 @property (nonatomic, assign) CGFloat sheetHeight;      // 展开态高度（= 内容高度）
+@property (nonatomic, assign) CGFloat extra;            // 上拉增高量（>0 时抽屉变高，底边始终贴屏底）
+@property (nonatomic, assign) CGFloat maxSheetHeight;    // 高度上限：屏高 − 顶部安全区 − 8
 @property (nonatomic, assign) CGFloat pendingSheetHeight; // 动画期间算出的新高度，等收尾再落地
 @property (nonatomic, strong) NSArray<NSNumber *> *anchors;   // 位移锚点（升序）
 @property (nonatomic, assign) NSInteger anchorIndex;
@@ -262,8 +265,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     [self.sheet addGestureRecognizer:self.pan];
 
     self.titleLabel.text = self.theme.name.length ? self.theme.name : (self.isAssetPack ? @"素材" : @"主题");
-    self.offset = 10000.0;      // 出场前先藏在屏外，首帧不会闪
-    self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
+    self.offset = 10000.0;      // 出场前先藏在屏外，首帧不会闪（位置在 layout 里用 frame 算）
 
     [self refreshState];
     [self tb_refreshDynamicColors];
@@ -336,26 +338,52 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 
     // ---- 先把内容按当前宽度排一遍，拿到真实内容高度 ----
     CGFloat contentH = [self tb_layoutContentWithWidth:W];
-    CGFloat maxH = round(H * kTBSheetMaxRatio);
+    // 高度上限：屏高 − 顶部安全区 − 8（可以拉到接近全屏，但不能顶到刘海/状态栏）
+    CGFloat topInset = MAX(self.view.safeAreaInsets.top, 20.0);
+    CGFloat maxH = H - topInset - kTBSheetTopGap;
+    maxH = MAX(maxH, 240.0);
     CGFloat expandedH = MIN(round(contentH), maxH);
     expandedH = MAX(expandedH, 200.0);
+    self.maxSheetHeight = maxH;
     self.sheetHeight = expandedH;
+    if (self.extra > maxH - expandedH) self.extra = MAX(0.0, maxH - expandedH);
     self.anchors = @[ @(0.0), @(round(expandedH * 0.5)), @(expandedH) ];
 
-    // ★ 关键：动画中 / 关闭中，绝不回写 sheet 的 frame / transform / dim.alpha
-    //   （上一版在这里 `self.sheet.frame = ...`，而 sheet 带着非 identity 的 transform，
-    //    给带 transform 的 view 设 frame 是未定义行为 → 关闭时先"弹高一下"）
+    // ★ 关键：动画中 / 关闭中，绝不回写 sheet 的 frame / dim.alpha
     if (self.closing || self.animator) {
         self.pendingSheetHeight = expandedH;
         return;
     }
 
-    // 静止态：先把 transform 归零再设 frame（此时设 frame 才是确定的），最后再套位移
-    self.sheet.transform = CGAffineTransformIdentity;
-    self.sheet.frame = CGRectMake(0, H - expandedH, W, expandedH);
-    self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
+    // 静止态：底边永远贴屏底，高度 = 内容高度 + 上拉增高量，靠 frame 的 top 表达位移
+    //（不用 transform：frame + transform 混用是未定义行为）
+    [self tb_applyFrame];
     self.dimView.alpha = [self dimAlphaForOffset:self.offset];
     self.hairline.frame = CGRectMake(0, 0, W, 1.0 / [UIScreen mainScreen].scale);
+}
+
+#pragma mark - 几何（底边恒定贴屏底）
+
+/// 抽屉当前应有的 frame：
+///   高度 = sheetHeight + extra（上拉增高），top = 屏高 − 高度 + offset（>0 = 往下走）
+/// 因为高度随上拉一起变高、底边不动，所以上拉时下面**不会**露出桌面背景。
+- (CGRect)tb_sheetFrame {
+    CGFloat W = self.view.bounds.size.width;
+    CGFloat H = self.view.bounds.size.height;
+    CGFloat h = self.sheetHeight + self.extra;
+    if (h < 1.0) h = 1.0;
+    return CGRectMake(0, H - h + self.offset, W, h);
+}
+
+- (void)tb_applyFrame {
+    self.sheet.frame = [self tb_sheetFrame];
+}
+
+/// 越过「全屏上限」之后的手感：渐近 30pt（越拉越紧，不会真的继续上移）
+- (CGFloat)tb_rubberOver:(CGFloat)over {
+    if (over <= 0) return 0;
+    const CGFloat L = 30.0;
+    return over * L / (L + over);
 }
 
 /// 排内容（也顺手把每个按钮的 frame 定好），返回内容需要的高度
@@ -707,12 +735,14 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         [TBPrefs setBool:NO forKey:TBKeyUseThemeBadge];
         [TBPrefs notifyChanged];
         [self refreshState];
+        if (self.onCancelApply) self.onCancelApply(self.theme);   // 宿主页弹「已取消」胶囊
         return;
     }
     if (![self tb_themeActive]) return;
     [TBPrefs setString:nil forKey:TBKeyActiveTheme];
     [TBPrefs notifyChanged];
     [self refreshState];
+    if (self.onCancelApply) self.onCancelApply(self.theme);
 }
 
 /// 详情：不做「先收回再 push」的两次动画 —— 直接 dismiss(NO)，再由宿主 push
@@ -746,6 +776,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 
     __weak typeof(self) wself = self;
     [self tb_animateTo:self.sheetHeight
+                 extra:0
               dimAlpha:0
               duration:kTBCloseDuration
                damping:kTBCloseDamping
@@ -803,8 +834,21 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         }
         case UIGestureRecognizerStateChanged: {
             CGFloat raw = self.dragStartOffset + dy;
-            self.offset = [self rubberBand:raw];
-            self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
+            if (raw < 0) {
+                // 上拉：底边始终贴屏底，靠「增高」而不是「上移」——所以下面不会露出桌面背景。
+                // 到高度上限之后改用橡皮筋阻尼（渐近 30pt），不再真的往上走。
+                CGFloat pull = -raw;
+                CGFloat room = MAX(0.0, self.maxSheetHeight - self.sheetHeight);
+                CGFloat grow;
+                if (pull <= room) grow = pull;
+                else               grow = room + [self tb_rubberOver:pull - room];
+                self.offset = 0.0;
+                self.extra = grow;
+            } else {
+                self.offset = [self rubberBand:raw];
+                self.extra = 0.0;
+            }
+            [self tb_applyFrame];
             // dim 跟手淡出（只在拖动时改 alpha，不碰 hidden）
             self.dimView.alpha = [self dimAlphaForOffset:self.offset];
             break;
@@ -826,10 +870,21 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 - (void)tb_freezeToPresentation {
     CALayer *pl = self.sheet.layer.presentationLayer;
     CALayer *dl = self.dimView.layer.presentationLayer;
-    CGFloat visualOffset = pl ? pl.transform.m42 : self.offset;
-    CGFloat visualAlpha  = dl ? dl.opacity : self.dimView.alpha;
-    if (!isfinite(visualOffset)) visualOffset = self.offset;
+    CGFloat visualAlpha = dl ? dl.opacity : self.dimView.alpha;
     if (!isfinite(visualAlpha)) visualAlpha = self.dimView.alpha;
+
+    CGFloat H = self.view.bounds.size.height;
+    CGRect pf = pl ? pl.frame : self.sheet.frame;
+    CGFloat visTop = pf.origin.y;
+    CGFloat visH   = pf.size.height;
+    if (!isfinite(visTop)) visTop = self.sheet.frame.origin.y;
+    if (!isfinite(visH) || visH < 1.0) visH = self.sheetHeight;
+
+    // 从「看得见的位置」反推模型值：高度差 → extra，底边位置差 → offset
+    CGFloat extra  = visH - self.sheetHeight;
+    CGFloat offset = visTop - (H - visH);
+    if (offset < -0.5) { extra += -offset; offset = 0.0; }
+    if (extra < 0) extra = 0.0;
 
     if (self.animator) {
         [self.animator stopAnimation:NO];      // 不跳到终点，停在当前位置
@@ -838,8 +893,9 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     [self.sheet.layer removeAllAnimations];
     [self.dimView.layer removeAllAnimations];
 
-    self.offset = visualOffset;
-    self.sheet.transform = CGAffineTransformMakeTranslation(0, visualOffset);
+    self.extra = extra;
+    self.offset = MAX(0.0, offset);
+    [self tb_applyFrame];
     self.dimView.alpha = visualAlpha;
 }
 
@@ -852,6 +908,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     }
     self.anchorIndex = idx;
     [self tb_animateTo:self.anchors[idx].doubleValue
+                 extra:0
               dimAlpha:-1
               duration:kTBSettleDuration
                damping:kTBSettleDamping
@@ -865,6 +922,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 /// 位移与 dim 在**同一个** animations block 里，时长/阻尼由调用方给死：
 ///   打开 0.36 / 0.88、关闭 0.30 / 0.90、拖动收尾 0.34 / 0.88
 - (void)tb_animateTo:(CGFloat)to
+               extra:(CGFloat)toExtra
             dimAlpha:(CGFloat)dimAlpha
             duration:(NSTimeInterval)duration
              damping:(CGFloat)damping
@@ -897,7 +955,8 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         __strong typeof(self) s = wself;
         if (!s) return;
         s.offset = to;
-        s.sheet.transform = CGAffineTransformMakeTranslation(0, to);
+        s.extra = MAX(0.0, toExtra);
+        [s tb_applyFrame];       // 底边贴屏底 + 高度随 extra 变化，一个动画块里走完
         s.dimView.alpha = (dimAlpha < 0) ? [s dimAlphaForOffset:to] : dimAlpha;
     }];
     [an addCompletion:^(UIViewAnimatingPosition position) {
@@ -906,6 +965,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         if (s.animator == an) s.animator = nil;
         if (position != UIViewAnimatingPositionEnd) return;
         s.offset = to;
+        s.extra = MAX(0.0, toExtra);
         s.pendingSheetHeight = 0;
         if (done) done();
     }];
@@ -927,10 +987,12 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     [self.view layoutIfNeeded];       // 先把几何算出来（锚点在这里生成）
     self.appeared = YES;
     self.offset = self.sheetHeight;   // 从屏外开始
-    self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
+    self.extra = 0;
+    [self tb_applyFrame];
     self.dimView.alpha = 0;
     self.anchorIndex = 0;
     [self tb_animateTo:0
+                 extra:0
               dimAlpha:kTBDimMaxAlpha
               duration:kTBOpenDuration
                damping:kTBOpenDamping
@@ -954,15 +1016,17 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         s.offset = 0;
         [s.view setNeedsLayout];
         [s.view layoutIfNeeded];
-        [s tb_animateTo:0 dimAlpha:kTBDimMaxAlpha duration:0.2 damping:0.9 velocity:0 completion:nil];
+        [s tb_animateTo:0 extra:0 dimAlpha:kTBDimMaxAlpha duration:0.2 damping:0.9 velocity:0 completion:nil];
     }];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     // 从后台回来 / 系统打断了动画的兜底：位置不正就吸回展开态
-    if (!self.closing && !self.animator && self.appeared && fabs(self.offset) > 0.5) {
+    if (!self.closing && !self.animator && self.appeared &&
+        (fabs(self.offset) > 0.5 || self.extra > 0.5)) {
         self.offset = 0;
+        self.extra = 0;
         [self.view setNeedsLayout];
     }
 }
@@ -1006,20 +1070,9 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 }
 
 - (void)tb_pickMaskFile {
-    UIDocumentPickerViewController *picker = nil;
-    @try {
-        if (@available(iOS 14.0, *)) {
-            picker = [[UIDocumentPickerViewController alloc]
-                      initForOpeningContentTypes:@[UTTypePNG, UTTypeJPEG] asCopy:YES];
-        } else {
-            picker = [[UIDocumentPickerViewController alloc]
-                      initWithDocumentTypes:@[@"public.png", @"public.jpeg"]
-                                     inMode:UIDocumentPickerModeImport];
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[ThemeBoard] 遮罩 picker 创建失败: %@", e.reason);
-        picker = nil;
-    }
+    // 与导入主题同一个访问层：iOS14+ = initForOpeningContentTypes:asCopy:YES，老系统 = Import 模式
+    UIDocumentPickerViewController *picker =
+        TBNewImportPicker(@[ UTTypePNG, UTTypeJPEG ], @[ @"public.png", @"public.jpeg" ]);
     if (!picker) { [self tb_alert:@"打不开" message:@"系统没有可用的图片选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
@@ -1093,16 +1146,16 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 }
 
 - (void)tb_writeMaskFromURL:(NSURL *)url toPaths:(NSArray<NSString *> *)paths {
-    BOOL scoped = [url startAccessingSecurityScopedResource];
-    NSData *raw = [NSData dataWithContentsOfURL:url options:0 error:NULL];
-    if (scoped) [url stopAccessingSecurityScopedResource];
+    // iCloud 未下载的图片是占位文件：必须走 NSFileCoordinator 让系统先下载再读
+    NSError *readErr = nil;
+    NSData *raw = TBReadCoordinatedData(url, &readErr);
 
     if (raw.length == 0) {
-        [self tb_alert:@"导入失败" message:@"读不到选中的图片文件"];
+        [self tb_alert:@"导入失败" message:TBImportFailureMessage(url, readErr, @"读不到选中的图片文件")];
         return;
     }
     UIImage *img = [[UIImage alloc] initWithData:raw];
-    NSData *png = TBMaskPNGDataFromImage(img);
+    NSData *png = img ? TBMaskPNGDataFromImage(img) : nil;
     if (png.length == 0) {
         [self tb_alert:@"导入失败" message:@"这张图没法解析成遮罩（换一张 PNG/JPG 再试）"];
         return;

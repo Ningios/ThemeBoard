@@ -5,22 +5,7 @@
 #import "TBTableViewController.h"
 #import "TBEngineInstaller.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-// 统一的文件夹选择器：iOS14+ 走 UTType，老系统回退；任何异常都不让它崩
-static UIDocumentPickerViewController *TBNewFolderPicker(void) {
-    @try {
-        // 用旧的 Import 模式：系统会先把文件完整下载并复制到 App 的临时目录
-        UIDocumentPickerViewController *p =
-            [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.zip-archive", @"public.folder"]
-                                                                    inMode:UIDocumentPickerModeImport];
-        p.allowsMultipleSelection = NO;
-        return p;
-    } @catch (NSException *e) {
-        NSLog(@"[ThemeBoard] picker 创建失败: %@", e.reason);
-        return nil;
-    }
-}
-
-#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import "TBDocImport.h"
 
 @interface TBSettingsController () <UIDocumentPickerDelegate>
 @property (nonatomic, strong) NSArray<NSArray<NSDictionary *> *> *model;
@@ -236,7 +221,9 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
     if (!act) return;
 
     if ([act isEqualToString:@"import"]) {
-        UIDocumentPickerViewController *picker = TBNewFolderPicker();
+        // 与主题列表页同一个选择器：iOS14+ = initForOpeningContentTypes:asCopy:YES
+        UIDocumentPickerViewController *picker =
+            TBNewImportPicker(@[ UTTypeFolder, UTTypeZIP ], @[ @"public.folder", @"public.zip-archive" ]);
         if (!picker) { [self alert:@"打不开" msg:@"系统没有可用的文件夹选择器"]; return; }
         picker.delegate = self;
         [self presentViewController:picker animated:YES completion:nil];
@@ -347,12 +334,11 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
 didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *url = urls.firstObject;
     if (!url) return;
-    BOOL scoped = [url startAccessingSecurityScopedResource];
     NSError *err = nil;
-    NSString *dst = [TBThemeScanner importFromAnyURL:url error:&err];
-    if (scoped) [url stopAccessingSecurityScopedResource];
+    NSString *dst = [TBThemeScanner importFromAnyURL:url error:&err];   // 内部走文件协调器
     if (dst) [self alert:@"导入完成" msg:dst];
-    else [self alert:@"导入失败" msg:err.localizedDescription ?: @"未知错误"];
+    else [self alert:@"导入失败" msg:(err.localizedDescription
+                                  ?: TBImportFailureMessage(url, nil, @"未知错误"))];
 }
 
 - (void)alert:(NSString *)title msg:(NSString *)msg {

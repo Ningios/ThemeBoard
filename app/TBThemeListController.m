@@ -6,27 +6,16 @@
 #import "TBGlass.h"
 #import "TBBottomSheetController.h"
 #import "TBTableViewController.h"
-#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-// 统一的文件夹选择器：iOS14+ 走 UTType，老系统回退；任何异常都不让它崩
-static UIDocumentPickerViewController *TBNewFolderPicker(void) {
-    @try {
-        // 用旧的 Import 模式：系统会先把文件完整下载并复制到 App 的临时目录
-        UIDocumentPickerViewController *p =
-            [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.zip-archive", @"public.folder"]
-                                                                    inMode:UIDocumentPickerModeImport];
-        p.allowsMultipleSelection = NO;
-        return p;
-    } @catch (NSException *e) {
-        NSLog(@"[ThemeBoard] picker 创建失败: %@", e.reason);
-        return nil;
-    }
-}
-
+#import "TBDocImport.h"
+#import "TBToast.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 @interface TBThemeListController () <UISearchResultsUpdating, UIDocumentPickerDelegate>
 @property (nonatomic, strong) NSArray<TBTheme *> *themes;
 @property (nonatomic, strong) NSArray<TBTheme *> *filtered;
+/// 分组后：主题包（有应用图标）/ 素材包（遮罩·边框·阴影·角标）
+@property (nonatomic, strong) NSArray<TBTheme *> *themePacks;
+@property (nonatomic, strong) NSArray<TBTheme *> *assetPacks;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, assign) NSInteger sortMode;   // 0 名称 1 图标数
 @end
@@ -138,14 +127,26 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
         }];
         base = [base filteredArrayUsingPredicate:p];
     }
+    NSArray *sorted = base;
     if (self.sortMode == 1) {
-        base = [base sortedArrayUsingComparator:^NSComparisonResult(TBTheme *a, TBTheme *b) {
+        sorted = [base sortedArrayUsingComparator:^NSComparisonResult(TBTheme *a, TBTheme *b) {
             [a loadIndex]; [b loadIndex];
             if (a.iconCount == b.iconCount) return [a.name caseInsensitiveCompare:b.name];
             return a.iconCount > b.iconCount ? NSOrderedAscending : NSOrderedDescending;
         }];
     }
-    self.filtered = base;
+    self.filtered = sorted;
+
+    // 分组：主题包（有 IconBundles/<反向域名>.png 等应用图标）/ 素材包（只有遮罩、边框、阴影、角标）
+    NSMutableArray<TBTheme *> *packs = [NSMutableArray array];
+    NSMutableArray<TBTheme *> *assets = [NSMutableArray array];
+    for (TBTheme *t in sorted) {
+        if (t.isAssetPack) [assets addObject:t];
+        else               [packs addObject:t];
+    }
+    self.themePacks = packs;
+    self.assetPacks = assets;
+
     [self.tableView reloadData];
 }
 
@@ -171,7 +172,10 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 #pragma mark - 导入
 
 - (void)importTapped {
-    UIDocumentPickerViewController *picker = TBNewFolderPicker();
+    // iOS14+：initForOpeningContentTypes:asCopy:YES（系统先把文件/目录复制进 App 临时区）
+    // 老系统：initWithDocumentTypes:inMode:UIDocumentPickerModeImport
+    UIDocumentPickerViewController *picker =
+        TBNewImportPicker(@[ UTTypeFolder, UTTypeZIP ], @[ @"public.folder", @"public.zip-archive" ]);
     if (!picker) { [self alertTitle:@"打不开" message:@"系统没有可用的文件夹选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
@@ -183,10 +187,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *url = urls.firstObject;
     if (!url) return;
 
-    BOOL scoped = [url startAccessingSecurityScopedResource];
+    // 真正的读取/复制在 TBThemeScanner 里用 NSFileCoordinator 做（会触发 iCloud 下载）
     NSError *err = nil;
     NSString *dst = [TBThemeScanner importFromAnyURL:url error:&err];
-    if (scoped) [url stopAccessingSecurityScopedResource];
 
     if (dst) {
         [self reload];
@@ -195,8 +198,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:ac animated:YES completion:nil];
     } else {
+        NSString *msg = err.localizedDescription
+            ?: TBImportFailureMessage(url, nil, @"导入失败：读不到选中的内容");
         UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"导入失败"
-            message:err.localizedDescription ?: @"未知错误" preferredStyle:UIAlertControllerStyleAlert];
+            message:msg preferredStyle:UIAlertControllerStyleAlert];
         [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:ac animated:YES completion:nil];
     }
@@ -303,28 +308,38 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     return [TBPrefs stringForKey:TBKeyActiveTheme];
 }
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 3; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 4; }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if (section == 0) return @"当前使用";
     if (section == 1) return nil;
-    return @"已安装主题";
+    if (section == 2) return self.themePacks.count ? @"主题" : nil;      // 组 1：有应用图标的主题包
+    return self.assetPacks.count ? @"素材" : nil;                        // 组 2：素材包
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    if (section != 2) return nil;
+    if (section != 3) return nil;
     if (self.themes.count == 0) {
         NSArray *roots = [TBThemeScanner themeRoots];
         NSString *where = roots.count ? [roots componentsJoinedByString:@"\n"] : @"（没有可用的主题目录）";
         return [NSString stringWithFormat:@"还没有主题。点上面的「导入主题」，或把包含 IconBundles 的文件夹放到：\n%@", where];
     }
-    return [NSString stringWithFormat:@"共 %lu 个 · 兼容 SnowBoard / Anemone 的 IconBundles 结构",
-            (unsigned long)self.filtered.count];
+    return [NSString stringWithFormat:@"共 %lu 个（主题 %lu · 素材 %lu）· 兼容 SnowBoard / Anemone 的 IconBundles 结构",
+            (unsigned long)self.filtered.count,
+            (unsigned long)self.themePacks.count,
+            (unsigned long)self.assetPacks.count];
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (section == 0) return 1;
     if (section == 1) return 1;
-    return section == 0 ? 1 : self.filtered.count;
+    if (section == 2) return self.themePacks.count;
+    return self.assetPacks.count;
+}
+
+/// 当前 section 对应的数据源（2=主题包，3=素材包）
+- (NSArray<TBTheme *> *)themesInSection:(NSInteger)section {
+    return section == 2 ? self.themePacks : self.assetPacks;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -390,7 +405,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if (indexPath.section == 2) {
-        TBTheme *t = self.filtered[indexPath.row];
+        NSArray<TBTheme *> *list = self.themePacks;
+        if (indexPath.row >= (NSInteger)list.count) return cell;
+        TBTheme *t = list[indexPath.row];
         [t loadIndex];
         cell.textLabel.text = t.name;
         cell.textLabel.textColor = [UIColor labelColor];
@@ -400,8 +417,30 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         cell.accessoryType = [[self activeThemeName] isEqualToString:t.name]
             ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else {
+        NSArray<TBTheme *> *list = self.assetPacks;
+        if (indexPath.row >= (NSInteger)list.count) return cell;
+        TBTheme *t = list[indexPath.row];
+        cell.textLabel.text = t.name;
+        cell.textLabel.textColor = [UIColor labelColor];
+        // 副标题只列这个人素材包实际提供的项：遮罩 / 边框 / 阴影 / 角标
+        cell.detailTextLabel.text = [self tb_assetSubtitleFor:t];
+        cell.imageView.image = [self thumbFor:t];
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
     }
     return cell;
+}
+
+/// 素材包副标题：「遮罩 · 边框 · 阴影 · 角标」里实际有的项
+- (NSString *)tb_assetSubtitleFor:(TBTheme *)t {
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (NSDictionary *it in [t availableAssetItems]) {
+        NSString *title = it[@"title"];
+        if (title.length) [names addObject:title];
+    }
+    if (!names.count) return @"素材包";
+    return [names componentsJoinedByString:@" · "];
 }
 
 - (UIImage *)thumbFor:(TBTheme *)theme {
@@ -433,8 +472,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         }
         return;
     }
-    // 第 2 段「已安装主题」：点主题行 → 弹自定义底部抽屉（详情入口在抽屉里）
-    t = (indexPath.row < (NSInteger)self.filtered.count) ? self.filtered[indexPath.row] : nil;
+    // 组 1「主题」/ 组 2「素材」：点行 → 弹自定义底部抽屉（详情入口在抽屉里）
+    NSArray<TBTheme *> *list = [self themesInSection:indexPath.section];
+    t = (indexPath.row < (NSInteger)list.count) ? list[indexPath.row] : nil;
     if (!t) return;
     // 崩溃诊断：把异常原因直接弹出来（这段时间点卡片若闪退，这里能抓到真凶）
     @try {
@@ -456,8 +496,13 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         __strong typeof(self) s = weakSelf;
         if (!s) return;
         [s.tableView reloadData];            // 刷新「当前使用」和右侧 ✓
-        [s alertTitle:@"已应用"
-               message:@"设置已写入。引擎生效后桌面会立即换图。"];
+        [TBToast showAppliedIn:s];           // 玻璃胶囊 toast（无按钮，1.5s 自动收起）
+    };
+    sheet.onCancelApply = ^(TBTheme *t) {
+        __strong typeof(self) s = weakSelf;
+        if (!s) return;
+        [s.tableView reloadData];
+        [TBToast showCancelledIn:s];         // 「已取消」同一套胶囊
     };
     sheet.onDetail = ^(TBTheme *t) {
         __strong typeof(self) s = weakSelf;
@@ -532,8 +577,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
 trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section != 2) return nil;
-    TBTheme *t = self.filtered[indexPath.row];
+    if (indexPath.section != 2 && indexPath.section != 3) return nil;
+    NSArray<TBTheme *> *list = [self themesInSection:indexPath.section];
+    if (indexPath.row >= (NSInteger)list.count) return nil;
+    TBTheme *t = list[indexPath.row];
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                                      title:@"删除"
                                                                    handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
