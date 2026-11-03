@@ -4,6 +4,7 @@
 #import "TBThemeScanner.h"
 #import "TBPrefs.h"
 #import "TBGlass.h"
+#import "TBBottomSheetController.h"
 #import "TBTableViewController.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 // 统一的文件夹选择器：iOS14+ 走 UTType，老系统回退；任何异常都不让它崩
@@ -420,13 +421,38 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (indexPath.section == 1) return;   // 按钮行
     TBTheme *t = nil;
     if (indexPath.section == 0) {
+        // 「当前使用」保持原样：直接进详情页（这一版不动它）
         NSString *active = [self activeThemeName];
         t = active ? [TBThemeScanner themeNamed:active] : nil;
         if (!t) return;
-    } else {
-        t = self.filtered[indexPath.row];
+        [self.navigationController pushViewController:[[TBThemeDetailController alloc] initWithTheme:t] animated:YES];
+        return;
     }
-    [self.navigationController pushViewController:[[TBThemeDetailController alloc] initWithTheme:t] animated:YES];
+    // 第 2 段「已安装主题」：点主题行 → 弹自定义底部抽屉（详情入口在抽屉里）
+    t = self.filtered[indexPath.row];
+    [self presentSheetForTheme:t];
+}
+
+#pragma mark - 底部抽屉
+
+/// 点主题卡片：弹出抽屉（遮罩三选一 + 应用主题 + 详情）
+- (void)presentSheetForTheme:(TBTheme *)theme {
+    if (!theme) return;
+    TBBottomSheetController *sheet = [[TBBottomSheetController alloc] initWithTheme:theme];
+    __weak typeof(self) weakSelf = self;
+    sheet.onApply = ^(TBTheme *t) {
+        __strong typeof(self) s = weakSelf;
+        if (!s) return;
+        [s.tableView reloadData];            // 刷新「当前使用」和右侧 ✓
+        [s alertTitle:@"已应用"
+               message:@"设置已写入。引擎生效后桌面会立即换图。"];
+    };
+    sheet.onDetail = ^(TBTheme *t) {
+        __strong typeof(self) s = weakSelf;
+        if (!s) return;
+        [s.navigationController pushViewController:[[TBThemeDetailController alloc] initWithTheme:t] animated:YES];
+    };
+    [sheet presentOver:self];
 }
 
 #pragma mark - 删除
