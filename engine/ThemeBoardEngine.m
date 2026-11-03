@@ -899,6 +899,17 @@ static NSString *gMaskThemeKey;      // 缓存对应的主题名
 static BOOL gMaskThemeChecked;
 static UIImage *TBThemeMaskImage(void) {
     if (TBSafeMode() || !TBEnabled()) return nil;
+    // 素材包（独立素材）优先：CustomMaskPath
+    id cmp = TBPref(@"CustomMaskPath");
+    if ([cmp isKindOfClass:[NSString class]] && [(NSString *)cmp length]) {
+        NSString *k = [@"cmask:" stringByAppendingString:(NSString *)cmp];
+        if (gMaskThemeChecked && gMaskThemeKey && [gMaskThemeKey isEqualToString:k]) return gMaskThemeImg;
+        gMaskThemeKey = k; gMaskThemeChecked = YES;
+        gMaskThemeImg = [[UIImage alloc] initWithContentsOfFile:(NSString *)cmp];
+        TBLogOnce(k, @"遮罩：用独立素材 %@（%.0fx%.0f）", [(NSString *)cmp lastPathComponent],
+                  gMaskThemeImg.size.width, gMaskThemeImg.size.height);
+        return gMaskThemeImg;
+    }
     NSString *theme = TBActiveTheme();
     if (!theme.length) return nil;
     if (gMaskThemeChecked && gMaskThemeKey && [gMaskThemeKey isEqualToString:theme]) return gMaskThemeImg;
@@ -951,8 +962,45 @@ static UIImage *TBThemeMaskImage(void) {
 
 /// 用主题遮罩图裁素材：遮罩图缩放到素材尺寸 → DestinationIn 只留遮罩不透明处
 /// （和 TBMaskWithSystemShape 同一套做法，只是把"系统遮罩模板"换成"主题遮罩图"）
+/// 遮罩图只取「形状」：把很淡的玻璃遮罩（alpha 0.1~0.5）二值化成 0/1。
+/// 不处理的话 DestinationIn 会按 alpha 相乘 → 整个图标被压淡，就是用户说的「看不清」。
+static UIImage *TBMaskShapeOnly(UIImage *mask) {
+    if (!mask || !mask.CGImage) return mask;
+    const size_t W = CGImageGetWidth(mask.CGImage), H = CGImageGetHeight(mask.CGImage);
+    if (W < 8 || H < 8 || W > 1600 || H > 1600) return mask;
+    size_t bpr = W * 4;
+    unsigned char *buf = calloc(H * bpr, 1);
+    if (!buf) return mask;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, bpr, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return mask; }
+    CGContextDrawImage(ctx, CGRectMake(0, 0, W, H), mask.CGImage);
+    size_t solid = 0;
+    for (size_t i = 0; i < W * H; i++) if (buf[i * 4 + 3] > 200) solid++;
+    if ((double)solid / (double)(W * H) > 0.85) {        // 本来就是硬边形状遮罩 → 原样用
+        CGContextRelease(ctx); free(buf);
+        return mask;
+    }
+    for (size_t i = 0; i < W * H; i++) {
+        unsigned char a = buf[i * 4 + 3], na = 0;
+        if (a >= 18) na = 255;                            // ≥0.07 视为形状内部
+        else if (a > 5) na = (unsigned char)((a - 5) * 255 / 13);   // 窄羽化
+        buf[i * 4 + 0] = na; buf[i * 4 + 1] = na; buf[i * 4 + 2] = na;
+        buf[i * 4 + 3] = na;
+    }
+    CGImageRef out = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx); free(buf);
+    if (!out) return mask;
+    UIImage *im = [UIImage imageWithCGImage:out scale:(mask.scale > 0.5 ? mask.scale : 3.0)
+                                 orientation:mask.imageOrientation];
+    CGImageRelease(out);
+    return im ?: mask;
+}
+
 static UIImage *TBMaskWithThemeMask(UIImage *art, UIImage *mask) {
     if (!art || !mask) return art;
+    mask = TBMaskShapeOnly(mask);                  // ★ 只取形状，避免把图标压淡
     CGSize pt = art.size;
     if (pt.width < 1 || pt.height < 1) return art;
     if (mask.size.width < 1 || mask.size.height < 1) return art;
@@ -1090,6 +1138,8 @@ static UIImage *TBApplyIconShape(UIImage *img, BOOL skipIfRounded) {
     return TBRoundedCornerImage(img, MIN(pt.width, pt.height) * 0.2237);  // ⑤ 兜底（现状）
 }
 
+static UIImage *TBGlobalEffectImage(UIImage *src, NSString *bid);   // 前置：缓存写入端要用
+
 static UIImage *TBIconRoundedImage(UIImage *img) {
     return TBApplyIconShape(img, YES);   // 图标：保留"已是圆角素材就跳过"保护
 }
@@ -1104,6 +1154,17 @@ static NSString *gFxKey[2];
 static BOOL gFxChecked[2];
 static UIImage *TBThemeFxImage(int slot, NSString *base) {
     if (TBSafeMode() || !TBEnabled()) return nil;
+    // 素材包（独立素材）优先：CustomOverlayPath / CustomShadowPath
+    id cp = TBPref(slot == 0 ? @"CustomOverlayPath" : @"CustomShadowPath");
+    if ([cp isKindOfClass:[NSString class]] && [(NSString *)cp length]) {
+        NSString *ck = [(slot == 0 ? @"ovl:" : @"shd:") stringByAppendingString:(NSString *)cp];
+        if (gFxChecked[slot] && gFxKey[slot] && [gFxKey[slot] isEqualToString:ck]) return gFxImg[slot];
+        gFxKey[slot] = ck; gFxChecked[slot] = YES;
+        gFxImg[slot] = [[UIImage alloc] initWithContentsOfFile:(NSString *)cp];
+        if (gFxImg[slot]) TBLogOnce(ck, @"特效：用独立素材 %@（%.0fx%.0f）", [(NSString *)cp lastPathComponent],
+                                    gFxImg[slot].size.width, gFxImg[slot].size.height);
+        return gFxImg[slot];
+    }
     NSString *theme = TBActiveTheme();
     if (!theme.length) return nil;
     if (gFxChecked[slot] && gFxKey[slot] && [gFxKey[slot] isEqualToString:theme]) return gFxImg[slot];
@@ -1448,9 +1509,50 @@ static id tb_cacheImageForIcon(id self, SEL _cmd, id image, id icon) {
                 TBLogOnce([@"cachewrite|" stringByAppendingString:bid], @"cachewrite %@", bid);
                 return o_cacheImageForIcon ? o_cacheImageForIcon(self, _cmd, mine, icon) : nil;
             }
+            // 主题没覆盖 → 全局效果：把系统图加工后再落缓存
+            UIImage *g = TBGlobalEffectImage(image, bid);
+            if (g && g != image) {
+                TBLogOnce([@"cachewriteG|" stringByAppendingString:bid], @"cachewrite(全局) %@", bid);
+                return o_cacheImageForIcon ? o_cacheImageForIcon(self, _cmd, g, icon) : nil;
+            }
         }
     } @catch (NSException *e) { }
     return o_cacheImageForIcon ? o_cacheImageForIcon(self, _cmd, image, icon) : nil;
+}
+
+/// 全局效果（默认开）：主题没覆盖的 App，拿系统自己的图标图，套上同一套
+/// 形状（遮罩/自定义圆角）与边框/阴影 —— 这样整个桌面观感统一。
+static BOOL TBGlobalEffectOn(void) {
+    id v = TBPref(@"GlobalIconEffect");
+    return v ? [v boolValue] : YES;
+}
+static NSMutableDictionary *gGlobalImgCache;
+static NSString *gGlobalCacheTheme;
+static UIImage *TBGlobalEffectImage(UIImage *src, NSString *bid) {
+    if (!src || !bid.length) return src;
+    if (!TBGlobalEffectOn() || TBSafeMode() || !TBEnabled()) return src;
+    // 时钟/日历是动态合成图标，不套
+    if ([bid isEqualToString:@"com.apple.mobiletimer"] ||
+        [bid isEqualToString:@"com.apple.mobilecal"]) return src;
+    BOOL anyFx = (TBUseThemeIconMask() || TBMaskCornerRadiusOn() ||
+                  TBUseThemeIconOverlay() || TBUseThemeIconShadow());
+    if (!anyFx) return src;
+    if (src.size.width < 16 || src.size.height < 16) return src;
+    NSString *theme = TBActiveTheme() ?: @"";
+    if (!gGlobalImgCache || ![gGlobalCacheTheme isEqualToString:theme]) {
+        gGlobalImgCache = [NSMutableDictionary dictionary];
+        gGlobalCacheTheme = [theme copy];
+    }
+    NSString *key = [NSString stringWithFormat:@"%@|%.0fx%.0f", bid, src.size.width, src.size.height];
+    UIImage *hit = gGlobalImgCache[key];
+    if (hit) return hit;
+    UIImage *square = TBArtSquareFilled(src);          // 系统图自带圆角 → 先补方角，形状才听我们的
+    UIImage *shaped = TBApplyIconShape(square, NO);
+    UIImage *out = TBApplyIconEffects(shaped) ?: shaped;
+    if (!out) return src;
+    gGlobalImgCache[key] = out;
+    TBLogOnce([@"globalfx|" stringByAppendingString:bid], @"全局效果：%@ 已套形状/特效", bid);
+    return out;
 }
 
 typedef id (*FnInfoImage)(id, SEL, TBImageInfo);
@@ -1462,6 +1564,10 @@ static id tb_iconImageWithInfo(id self, SEL _cmd, TBImageInfo info) {
         NSString *bid = TBBIDFromIcon(self);
         UIImage *img = TBImageForBundle(bid);
         if (img) { gServe++; TBLogOnce([@"iconInfo|" stringByAppendingString:bid ?: @"?"], @"serve iconImageWithInfo %@", bid); return img; }
+        UIImage *sys = o_iconImageWithInfo ? o_iconImageWithInfo(self, _cmd, info) : nil;
+        UIImage *g = TBGlobalEffectImage(sys, bid);
+        if (g && g != sys) { gServe++; return g; }
+        return sys;
     }
     return o_iconImageWithInfo ? o_iconImageWithInfo(self, _cmd, info) : nil;
 }
@@ -1471,6 +1577,10 @@ static id tb_unmaskedIconImageWithInfo(id self, SEL _cmd, TBImageInfo info) {
         NSString *bid = TBBIDFromIcon(self);
         UIImage *img = TBImageForBundle(bid);
         if (img) { gServe++; TBLogOnce([@"iconInfoU|" stringByAppendingString:bid ?: @"?"], @"serve unmaskedIconImageWithInfo %@", bid); return img; }
+        UIImage *sys = o_unmaskedIconImageWithInfo ? o_unmaskedIconImageWithInfo(self, _cmd, info) : nil;
+        UIImage *g = TBGlobalEffectImage(sys, bid);
+        if (g && g != sys) { gServe++; return g; }
+        return sys;
     }
     return o_unmaskedIconImageWithInfo ? o_unmaskedIconImageWithInfo(self, _cmd, info) : nil;
 }
@@ -3477,6 +3587,7 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
     // 遮罩图是按「主题名」缓存的：设置一变（例如 App 刚导入遮罩）就允许重扫，
     // 否则导入完必须换主题 / 重启才看得到新形状
     gMaskThemeChecked = NO;
+    gGlobalImgCache = nil;      // 设置变更 → 全局效果的缓存一起清
     gMaskThemeKey = nil;
     gMaskThemeImg = nil;
     // 同理：叠加层 / 阴影素材也是按主题名缓存的

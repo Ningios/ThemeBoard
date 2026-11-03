@@ -22,6 +22,9 @@ static const CGFloat kTBSideInset    = 16.0;   // 左右内缩
 #pragma mark - 方形卡片 cell（双列网格的通用卡片）
 
 @interface TBSquareCardCell : UICollectionViewCell
+@property (nonatomic, assign) BOOL compact;          // 四功能小卡
+@property (nonatomic, strong) NSArray *compactCons;
+@property (nonatomic, strong) NSArray *gridCons;
 @property (nonatomic, strong) UIView *card;
 @property (nonatomic, strong) UIImageView *icon;
 @property (nonatomic, strong) UILabel *titleLabel;
@@ -68,22 +71,46 @@ static const CGFloat kTBSideInset    = 16.0;   // 左右内缩
         _captionLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
         [_card addSubview:_captionLabel];
 
-        [NSLayoutConstraint activateConstraints:@[
-            [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:12],
-            [_titleLabel.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:8],
-            [_titleLabel.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-8],
+        NSLayoutConstraint *titleL = [_titleLabel.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:8];
+        NSLayoutConstraint *titleR = [_titleLabel.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-8];
+        NSLayoutConstraint *capL = [_captionLabel.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:8];
+        NSLayoutConstraint *capR = [_captionLabel.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-8];
+        NSLayoutConstraint *iconX = [_icon.centerXAnchor constraintEqualToAnchor:_card.centerXAnchor];
 
-            [_icon.centerXAnchor constraintEqualToAnchor:_card.centerXAnchor],
-            [_icon.centerYAnchor constraintEqualToAnchor:_card.centerYAnchor constant:-4],
-            [_icon.widthAnchor constraintEqualToAnchor:_card.widthAnchor multiplier:0.46],
+        // 图标卡：卡片只比图标大一点点（上标题 / 中图标 / 下名字，紧凑竖排）
+        _gridCons = @[
+            [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:6],
+            iconX,
+            [_icon.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:6],
+            [_icon.widthAnchor constraintEqualToAnchor:_card.widthAnchor multiplier:0.80],
             [_icon.heightAnchor constraintEqualToAnchor:_icon.widthAnchor],
-
-            [_captionLabel.bottomAnchor constraintEqualToAnchor:_card.bottomAnchor constant:-12],
-            [_captionLabel.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:8],
-            [_captionLabel.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-8],
-        ]];
+            [_captionLabel.topAnchor constraintEqualToAnchor:_icon.bottomAnchor constant:4],
+            [_captionLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_card.bottomAnchor constant:-6],
+        ];
+        // 功能卡：小方卡（概览 / 应用主题 / 取消应用 / 导出）
+        _compactCons = @[
+            [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:11],
+            iconX,
+            [_icon.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:5],
+            [_icon.widthAnchor constraintEqualToConstant:24],
+            [_icon.heightAnchor constraintEqualToConstant:24],
+            [_captionLabel.topAnchor constraintEqualToAnchor:_icon.bottomAnchor constant:5],
+            [_captionLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_card.bottomAnchor constant:-9],
+        ];
+        [NSLayoutConstraint activateConstraints:@[titleL, titleR, capL, capR]];
+        [NSLayoutConstraint activateConstraints:_gridCons];
     }
     return self;
+}
+
+- (void)setCompact:(BOOL)compact {
+    if (_compact == compact) return;
+    _compact = compact;
+    [NSLayoutConstraint deactivateConstraints:(compact ? _gridCons : _compactCons)];
+    [NSLayoutConstraint activateConstraints:(compact ? _compactCons : _gridCons)];
+    _titleLabel.font = [UIFont systemFontOfSize:(compact ? 12.5 : 13) weight:UIFontWeightSemibold];
+    _captionLabel.font = [UIFont systemFontOfSize:(compact ? 10 : 11)];
+    _captionLabel.numberOfLines = compact ? 3 : 2;
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
@@ -499,15 +526,24 @@ heightForHeaderInSection:(NSInteger)s {
   sizeForItemAtIndexPath:(NSIndexPath *)ip {
     CGFloat W = cv.bounds.size.width;
     if (W < 1) W = [UIScreen mainScreen].bounds.size.width;
-    CGFloat side = floor((W - kTBSideInset * 2 - kTBCardGap) / 2.0);   // 两列 + 正方形
-    if (side < 120) side = 120;
-    return CGSizeMake(side, side);
+    if (ip.section == 0) {                      // 四个功能卡：小方卡（原来是大正方形，太空）
+        CGFloat two = floor((W - kTBSideInset * 2 - kTBCardGap) / 2.0);
+        if (two < 120) two = 120;
+        return CGSizeMake(two, 96);
+    }
+    // 图标卡：三列，卡片只比图标大一点（图标 = 卡宽 × 0.80，下面留给文字）
+    CGFloat col = floor((W - kTBSideInset * 2 - kTBCardGap * 2) / 3.0);
+    if (col < 88) col = 88;
+    CGFloat iconH = floor(col * 0.80);
+    // 高度 = 图标 + 上标题 + 下名字（两行）留出的空间，卡片刚好把图标包住
+    return CGSizeMake(col, iconH + 66.0);
 }
 
 - (UICollectionViewCell *)collectionView:(UICollectionView *)cv
                   cellForItemAtIndexPath:(NSIndexPath *)ip {
     TBSquareCardCell *cell = [cv dequeueReusableCellWithReuseIdentifier:@"card" forIndexPath:ip];
     cell.icon.tintColor = [UIColor secondaryLabelColor];
+    cell.compact = (ip.section == 0);
 
     if (ip.section == 0) {
         NSString *sym = nil;
@@ -518,7 +554,7 @@ heightForHeaderInSection:(NSInteger)s {
             default: sym = @"square.and.arrow.up"; break;
         }
         UIImageSymbolConfiguration *sc =
-            [UIImageSymbolConfiguration configurationWithPointSize:34 weight:UIFontWeightRegular];
+            [UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIFontWeightRegular];
         cell.icon.image = [[UIImage systemImageNamed:sym withConfiguration:sc]
                            imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
         cell.icon.contentMode = UIViewContentModeCenter;
