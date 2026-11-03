@@ -9,6 +9,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// App 侧日志：追加写 /var/mobile/Library/ThemeBoard/app.log（实现在 TBPanelController.m）
+void TBLog2(NSString *fmt, ...);
+
 /// 统一文件选择器：
 ///   iOS14+  → initForOpeningContentTypes:asCopy:YES（系统先把文件/目录复制进 App 的临时区）
 ///   老系统  → initWithDocumentTypes:inMode:UIDocumentPickerModeImport

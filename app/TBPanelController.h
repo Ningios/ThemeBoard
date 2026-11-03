@@ -2,6 +2,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// App 侧日志：追加写 /var/mobile/Library/ThemeBoard/app.log（实现在 TBPanelController.m）
+void TBLog2(NSString *fmt, ...);
+
 /// 通用玻璃选择面板（替代系统 action sheet）：
 /// 标题 + 说明 + 若干等宽玻璃按钮 + 取消。
 /// handler 的 index 与 optionTitles 对应；点取消/点背景回调 -1。
@@ -37,7 +40,52 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)presentOver:(UIViewController *)host;
 
+@property (nonatomic, copy, nullable) NSString *cancelTitle;   // 第三个按钮的标题（默认「取消」）
 @end
+
+/// 单按钮提示弹窗（替代系统 UIAlertController alert）：标题 + 正文 + 「好」。
+/// 圆角玻璃卡片、自绘淡入，与抽屉里的按钮同款样式。
+@interface TBAlertPanelController : TBGlassPanelBase
+
+@property (nonatomic, copy, nullable) NSString *titleText;
+@property (nonatomic, copy, nullable) NSString *message;
+@property (nonatomic, copy, nullable) NSString *doneTitle;      // 默认「好」
+
++ (instancetype)panelWithTitle:(nullable NSString *)title
+                       message:(nullable NSString *)message
+                     doneTitle:(nullable NSString *)doneTitle;
+
+- (void)presentOver:(UIViewController *)host;
+
+@end
+
+/// 两按钮确认弹窗（替代系统 UIAlertController alert）：取消 + 确认（可红字）。
+@interface TBConfirmPanelController : TBGlassPanelBase
+
+@property (nonatomic, copy, nullable) NSString *titleText;
+@property (nonatomic, copy, nullable) NSString *message;
+@property (nonatomic, copy, nullable) NSString *cancelTitle;    // 默认「取消」
+@property (nonatomic, copy, nullable) NSString *confirmTitle;   // 默认「确定」
+@property (nonatomic, assign) BOOL destructive;                 // YES → 确认按钮红字
+@property (nonatomic, copy, nullable) void (^handler)(BOOL confirmed);
+
++ (instancetype)panelWithTitle:(nullable NSString *)title
+                       message:(nullable NSString *)message
+                   cancelTitle:(nullable NSString *)cancelTitle
+                  confirmTitle:(nullable NSString *)confirmTitle
+                   destructive:(BOOL)destructive
+                       handler:(nullable void (^)(BOOL confirmed))handler;
+
+- (void)presentOver:(UIViewController *)host;
+
+@end
+
+/// 便捷函数：一行替换系统弹窗
+void TBPresentAlert(UIViewController *host, NSString *title, NSString *message);
+
+void TBPresentConfirm(UIViewController *host, NSString *title, NSString *message,
+                      NSString *cancelTitle, NSString *confirmTitle, BOOL destructive,
+                      void (^handler)(BOOL confirmed));
 
 /// 自定义圆角面板：输入框（数字键盘）+ 滑块双向联动，自动避开键盘
 @interface TBRadiusPanelController : TBGlassPanelBase

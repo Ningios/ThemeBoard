@@ -1,3 +1,4 @@
+#import "TBPanelController.h"
 #import <objc/runtime.h>
 #import "TBThemeListController.h"
 #import "TBThemeDetailController.h"
@@ -87,10 +88,7 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
     self.navigationItem.searchController = self.search;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
 
-    UIBarButtonItem *sort = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.arrow.down"]
-                                                            style:UIBarButtonItemStylePlain
-                                                           target:self action:@selector(sortTapped)];
-    self.navigationItem.rightBarButtonItems = @[sort];
+    // 排序按钮已从导航栏挪进列表（「主题」分组标题右侧），见 viewForHeaderInSection:
 
     // 三个操作按钮放在「当前使用」下面（见 tableView:cellForRowAtIndexPath: 第 1 段）
 
@@ -155,18 +153,19 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 }
 
 - (void)sortTapped {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"排序"
-                                                               message:nil
-                                                        preferredStyle:UIAlertControllerStyleActionSheet];
-    [ac addAction:[UIAlertAction actionWithTitle:@"按名称" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        self.sortMode = 0; [self applyFilter];
-    }]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"按图标数量" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        self.sortMode = 1; [self applyFilter];
-    }]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    ac.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItems.firstObject;
-    [self presentViewController:ac animated:YES completion:nil];
+    // 自绘玻璃选择弹窗（TBChoicePanelController），不再用系统 action sheet
+    __weak typeof(self) wself = self;
+    TBChoicePanelController *p = [TBChoicePanelController
+        panelWithTitle:@"排序方式"
+               message:nil
+               options:@[ @"按名称", @"按图标数量" ]
+               handler:^(NSInteger idx) {
+        __strong typeof(self) s = wself;
+        if (!s || idx < 0) return;
+        s.sortMode = (idx == 0) ? 0 : 1;      // 排序逻辑不变
+        [s applyFilter];
+    }];
+    [p presentOver:self];
 }
 
 #pragma mark - 导入
@@ -185,25 +184,21 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
 didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *url = urls.firstObject;
+    TBLog2(@"[导入] 主题列表：选中 %lu 个，第一个=%@", (unsigned long)urls.count, url.absoluteString ?: @"(nil)");
     if (!url) return;
 
     // 真正的读取/复制在 TBThemeScanner 里用 NSFileCoordinator 做（会触发 iCloud 下载）
     NSError *err = nil;
     NSString *dst = [TBThemeScanner importFromAnyURL:url error:&err];
+    TBLog2(@"[导入] 主题列表：结果 dst=%@ err=%@", dst ?: @"(nil)", err.localizedDescription ?: @"-");
 
     if (dst) {
         [self reload];
-        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"导入完成"
-            message:dst preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:ac animated:YES completion:nil];
+        TBPresentAlert(self, @"导入完成", dst);
     } else {
         NSString *msg = err.localizedDescription
             ?: TBImportFailureMessage(url, nil, @"导入失败：读不到选中的内容");
-        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"导入失败"
-            message:msg preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:ac animated:YES completion:nil];
+        TBPresentAlert(self, @"导入失败", msg);
     }
 }
 
@@ -328,6 +323,62 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             (unsigned long)self.filtered.count,
             (unsigned long)self.themePacks.count,
             (unsigned long)self.assetPacks.count];
+}
+
+#pragma mark - 分组标题（「主题」右侧挂排序按钮）
+
+/// 分组标题的左缩进：和玻璃卡片左边对齐（系统内缩 20 + 卡片自身 12）
+static const CGFloat kTBListHeaderInset = 32.0;
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    if (section == 2) return 56.0;   // 「主题」标题 + 右侧排序按钮
+    if (section == 1) return 8.0;    // 按钮行上方的小间距（这一组本来就没有标题）
+    return 34.0;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    CGFloat w = tableView.bounds.size.width;
+    if (w < 1) w = [UIScreen mainScreen].bounds.size.width;
+    CGFloat h = [self tableView:tableView heightForHeaderInSection:section];
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, h)];
+    head.backgroundColor = [UIColor clearColor];
+
+    NSString *title = [self tableView:tableView titleForHeaderInSection:section];
+    if (title.length) {
+        UILabel *lab = [[UILabel alloc] initWithFrame:CGRectZero];
+        lab.text = title;
+        lab.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        lab.textColor = [UIColor secondaryLabelColor];
+        lab.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        if (section == 2) {
+            lab.frame = CGRectMake(kTBListHeaderInset, (h - 20.0) / 2.0,
+                                   w - kTBListHeaderInset * 2 - 64.0, 20.0);
+        } else {
+            lab.frame = CGRectMake(kTBListHeaderInset, h - 20.0 - 4.0, w - kTBListHeaderInset * 2, 20.0);
+        }
+        [head addSubview:lab];
+    }
+
+    if (section == 2) {
+        // 排序按钮：从导航栏挪到这里（「主题」分组标题右侧），
+        // 与「重新扫描 / 导入主题 / 清除主题」同款玻璃（高 44 / 圆角 13 / 白 .62-.14 / 1px 亮边）
+        UIButton *sort = [UIButton buttonWithType:UIButtonTypeSystem];
+        UIImageSymbolConfiguration *sc =
+            [UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIFontWeightRegular];
+        [sort setImage:[UIImage systemImageNamed:@"arrow.up.arrow.down" withConfiguration:sc]
+              forState:UIControlStateNormal];
+        sort.tintColor = [UIColor labelColor];
+        sort.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                              [UIColor colorWithWhite:1 alpha:0.14]);
+        sort.layer.cornerRadius = 13;
+        sort.layer.cornerCurve = kCACornerCurveContinuous;
+        TBApplyRim(sort, 0.55);
+        sort.frame = CGRectMake(w - kTBListHeaderInset - 58.0, (h - 44.0) / 2.0, 58.0, 44.0);
+        sort.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        [sort addTarget:self action:@selector(sortTapped) forControlEvents:UIControlEventTouchUpInside];
+        [head addSubview:sort];
+    }
+    return head;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -577,38 +628,91 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
 trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    // 主题包（section 2）和素材包（section 3）都可以左滑删除
     if (indexPath.section != 2 && indexPath.section != 3) return nil;
     NSArray<TBTheme *> *list = [self themesInSection:indexPath.section];
     if (indexPath.row >= (NSInteger)list.count) return nil;
     TBTheme *t = list[indexPath.row];
+    BOOL isAsset = (indexPath.section == 3) || t.isAssetPack;
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                                      title:@"删除"
                                                                    handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
-        UIAlertController *ac = [UIAlertController alertControllerWithTitle:
-                                 [NSString stringWithFormat:@"删除「%@」？", t.name]
-            message:@"主题文件夹会被直接删除，不可恢复" preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:^(UIAlertAction *x) { done(NO); }]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+        TBPresentConfirm(self, [NSString stringWithFormat:@"删除「%@」？", t.name],
+                         (isAsset ? @"素材包文件夹会被直接删除，不可恢复" : @"主题文件夹会被直接删除，不可恢复"),
+                         @"取消", @"删除", YES, ^(BOOL ok) {
+            if (!ok) { done(NO); return; }
+            TBLog2(@"[删除] 用户确认删除「%@」（%@）path=%@", t.name, isAsset ? @"素材包" : @"主题包", t.path);
             NSError *err = nil;
-            BOOL ok = [TBThemeScanner deleteTheme:t error:&err];
-            if (ok) {
+            BOOL deleted = [TBThemeScanner deleteTheme:t error:&err];
+            TBLog2(@"[删除] 结果 ok=%d err=%@（%@）", deleted, err.domain ?: @"-",
+                   err.localizedDescription ?: @"-");
+            if (deleted) {
+                [self tb_clearPrefsPointingInto:t.path];
                 NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
                 if ([active isEqualToString:t.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
+                [TBPrefs notifyChanged];
                 [self reload];
+            } else {
+                // 失败必须有明确提示，不能静默（原来是 done(NO) 什么都不说）
+                NSString *msg = err.localizedDescription.length ? err.localizedDescription
+                    : [NSString stringWithFormat:@"没法删除这个%@目录：\n%@\n\n可能是权限或路径问题。",
+                       isAsset ? @"素材包" : @"主题", t.path ?: @"(path 为空)"];
+                TBPresentAlert(self, @"删除失败", msg);
             }
-            done(ok);
-        }]];
-        [self presentViewController:ac animated:YES completion:nil];
+            done(deleted);
+        });
     }];
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 
+/// 删除后：把指向这个目录里的 Custom*Path 清掉并把对应开关关掉（否则设置里留着死路径）
+- (void)tb_clearPrefsPointingInto:(NSString *)dir {
+    if (!dir.length) return;
+    NSString *prefix = [dir hasSuffix:@"/"] ? dir : [dir stringByAppendingString:@"/"];
+    NSArray<NSArray<NSString *> *> *table = @[ @[@"CustomMaskPath", TBKeyUseThemeIconMask],
+                                               @[@"CustomOverlayPath", TBKeyUseThemeIconOverlay],
+                                               @[@"CustomShadowPath", TBKeyUseThemeIconShadow],
+                                               @[@"CustomBadgePath", TBKeyUseThemeBadge] ];
+    for (NSArray<NSString *> *row in table) {
+        NSString *cur = [TBPrefs stringForKey:row[0]];
+        if (cur.length && [cur hasPrefix:prefix]) {
+            TBLog2(@"[删除] 清理偏好 %@（原值 %@）", row[0], cur);
+            [TBPrefs setString:nil forKey:row[0]];
+            [TBPrefs setBool:NO forKey:row[1]];
+        }
+    }
+}
+
+
+/// 主题包（2）和素材包（3）都可删除；其它行（当前使用 / 按钮行）不可
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
+    return (indexPath.section == 2 || indexPath.section == 3);
+}
+
+/// 系统「编辑模式」的删除入口（当前 UI 走左滑，这里兜底，保证两条路都能删素材包）
+- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
+                                            forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (editingStyle != UITableViewCellEditingStyleDelete) return;
+    if (indexPath.section != 2 && indexPath.section != 3) return;
+    NSArray<TBTheme *> *list = [self themesInSection:indexPath.section];
+    if (indexPath.row >= (NSInteger)list.count) return;
+    TBTheme *t = list[indexPath.row];
+    NSError *err = nil;
+    BOOL ok = [TBThemeScanner deleteTheme:t error:&err];
+    TBLog2(@"[删除][编辑模式] 「%@」ok=%d err=%@", t.name, ok, err.localizedDescription ?: @"-");
+    if (ok) {
+        [self tb_clearPrefsPointingInto:t.path];
+        NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
+        if ([active isEqualToString:t.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
+        [TBPrefs notifyChanged];
+        [self reload];
+    } else {
+        [self alertTitle:@"删除失败" message:(err.localizedDescription ?: @"未知原因")];
+    }
+}
 
 - (void)alertTitle:(NSString *)title message:(NSString *)msg {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title message:msg
-                                                        preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
+    TBPresentAlert(self, title, msg);      // 自绘玻璃提示弹窗
 }
 
 @end

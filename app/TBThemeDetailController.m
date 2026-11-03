@@ -1,3 +1,4 @@
+#import "TBPanelController.h"
 #import "TBThemeDetailController.h"
 #import "TBAppInfo.h"
 #import "TBThemeScanner.h"
@@ -87,15 +88,15 @@ static const CGFloat kTBSideInset    = 16.0;   // 左右内缩
             [_captionLabel.topAnchor constraintEqualToAnchor:_icon.bottomAnchor constant:4],
             [_captionLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_card.bottomAnchor constant:-6],
         ];
-        // 功能卡：小方卡（概览 / 应用主题 / 取消应用 / 导出）
+        // 功能卡：更小一档的小方卡（概览 / 应用主题 / 取消应用 / 导出），图标 20pt
         _compactCons = @[
-            [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:11],
+            [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:10],
             iconX,
-            [_icon.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:5],
-            [_icon.widthAnchor constraintEqualToConstant:24],
-            [_icon.heightAnchor constraintEqualToConstant:24],
-            [_captionLabel.topAnchor constraintEqualToAnchor:_icon.bottomAnchor constant:5],
-            [_captionLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_card.bottomAnchor constant:-9],
+            [_icon.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:4],
+            [_icon.widthAnchor constraintEqualToConstant:20],
+            [_icon.heightAnchor constraintEqualToConstant:20],
+            [_captionLabel.topAnchor constraintEqualToAnchor:_icon.bottomAnchor constant:4],
+            [_captionLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_card.bottomAnchor constant:-8],
         ];
         [NSLayoutConstraint activateConstraints:@[titleL, titleR, capL, capR]];
         [NSLayoutConstraint activateConstraints:_gridCons];
@@ -124,6 +125,96 @@ static const CGFloat kTBSideInset    = 16.0;   // 左右内缩
     self.icon.image = nil;
     self.titleLabel.text = nil;
     self.captionLabel.text = nil;
+}
+
+@end
+
+#pragma mark - 预览合并卡（遮罩预览 + 前几个图标，一张卡内 2×3 并排）
+
+static const CGFloat kTBPreviewPad  = 14.0;
+static const CGFloat kTBPreviewGap  = 12.0;
+static const CGFloat kTBPreviewImgH = 76.0;
+static const CGFloat kTBPreviewCapH = 26.0;
+
+/// 合并预览卡的高度（宽度 = 卡宽）。卡内是 3 列 × 2 行，第 0 格是遮罩预览。
+static CGFloat TBPreviewCardHeight(CGFloat width) {
+    CGFloat innerW = width - kTBPreviewPad * 2.0;
+    CGFloat slotW = (innerW - kTBPreviewGap * 2.0) / 3.0;
+    CGFloat imgH = MIN(kTBPreviewImgH, MAX(40.0, slotW));
+    return kTBPreviewPad * 2.0 + (imgH + 4.0 + kTBPreviewCapH) * 2.0 + kTBPreviewGap;
+}
+
+@interface TBPreviewCardCell : UICollectionViewCell
+@property (nonatomic, strong) UIView *card;
+@property (nonatomic, strong) NSMutableArray<UIImageView *> *slots;
+@property (nonatomic, strong) NSMutableArray<UILabel *> *caps;
+@end
+
+@implementation TBPreviewCardCell
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.backgroundColor = [UIColor clearColor];
+        self.contentView.backgroundColor = [UIColor clearColor];
+
+        _card = TBGlassCard(kTBCardRadius);       // 一张卡装下全部预览
+        _card.clipsToBounds = YES;
+        [self.contentView addSubview:_card];
+
+        _slots = [NSMutableArray array];
+        _caps = [NSMutableArray array];
+        for (NSInteger i = 0; i < 6; i++) {
+            UIImageView *iv = [[UIImageView alloc] init];
+            iv.contentMode = UIViewContentModeScaleAspectFit;
+            iv.clipsToBounds = NO;
+            iv.hidden = YES;
+            [_card addSubview:iv];
+            [_slots addObject:iv];
+
+            UILabel *cl = [[UILabel alloc] init];
+            cl.font = [UIFont systemFontOfSize:9.5];
+            cl.textColor = [UIColor secondaryLabelColor];
+            cl.textAlignment = NSTextAlignmentCenter;
+            cl.numberOfLines = 2;
+            cl.lineBreakMode = NSLineBreakByTruncatingTail;
+            cl.hidden = YES;
+            [_card addSubview:cl];
+            [_caps addObject:cl];
+        }
+    }
+    return self;
+}
+
+/// 第 0 格 = 遮罩预览（配说明），后面依次是主题里的前几个图标
+- (void)setPreviewImages:(NSArray *)images captions:(NSArray<NSString *> *)captions {
+    for (NSInteger i = 0; i < (NSInteger)self.slots.count; i++) {
+        UIImageView *iv = self.slots[i];
+        UILabel *cap = self.caps[i];
+        id o = (i < (NSInteger)images.count) ? images[i] : nil;
+        UIImage *im = [o isKindOfClass:[UIImage class]] ? o : nil;
+        NSString *tx = (i < (NSInteger)captions.count) ? captions[i] : nil;
+        if (!tx.length) tx = nil;
+        iv.image = im;
+        cap.text = tx;
+        iv.hidden = (im == nil);
+        cap.hidden = (tx == nil);
+    }
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGRect b = self.contentView.bounds;
+    self.card.frame = b;
+    CGFloat innerW = b.size.width - kTBPreviewPad * 2.0;
+    CGFloat slotW = (innerW - kTBPreviewGap * 2.0) / 3.0;
+    CGFloat imgH = MIN(kTBPreviewImgH, MAX(40.0, slotW));
+    for (NSInteger i = 0; i < (NSInteger)self.slots.count; i++) {
+        NSInteger row = i / 3, col = i % 3;
+        CGFloat x = kTBPreviewPad + col * (slotW + kTBPreviewGap);
+        CGFloat y = kTBPreviewPad + row * (imgH + 4.0 + kTBPreviewCapH + kTBPreviewGap);
+        self.slots[i].frame = CGRectMake(x, y, slotW, imgH);
+        self.caps[i].frame = CGRectMake(x - 2, y + imgH + 4.0, slotW + 4, kTBPreviewCapH);
+    }
 }
 
 @end
@@ -270,6 +361,8 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
     self.collectionView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
     [self.collectionView registerClass:[TBSquareCardCell class]
             forCellWithReuseIdentifier:@"card"];
+    [self.collectionView registerClass:[TBPreviewCardCell class]
+            forCellWithReuseIdentifier:@"preview"];
     [self.collectionView registerClass:[TBSectionHeaderView class]
             forSupplementaryViewOfKind:UICollectionElementKindSectionHeader
                    withReuseIdentifier:@"header"];
@@ -423,16 +516,14 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
 - (void)cancelApplyTapped {
     NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
     if (![active isEqualToString:self.theme.name]) return;
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"取消应用？"
-        message:@"桌面图标会恢复系统原样，主题文件夹不会被删除" preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消应用" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    TBPresentConfirm(self, @"取消应用？", @"桌面图标会恢复系统原样，主题文件夹不会被删除",
+                     @"取消", @"取消应用", YES, ^(BOOL ok) {
+        if (!ok) return;
         [TBPrefs setString:nil forKey:TBKeyActiveTheme];
         [TBPrefs notifyChanged];
         [self refreshApplyState];
         [TBToast showCancelledIn:self];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
+    });
 }
 
 - (void)exportTapped {
@@ -463,10 +554,7 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
 
     NSString *msg = [NSString stringWithFormat:@"已导出 %lu 个图标，缺失 %lu 个（清单在同目录）\n\n%@",
                      (unsigned long)copied, (unsigned long)missing.count, root];
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"导出完成" message:msg
-                                                       preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
+    TBPresentAlert(self, @"导出完成", msg);
 }
 
 - (void)missingTapped {
@@ -498,7 +586,7 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
 
 - (NSInteger)collectionView:(UICollectionView *)cv numberOfItemsInSection:(NSInteger)s {
     if (s == 0) return 4;                       // 概览 / 应用 / 取消应用 / 导出
-    if (s == 1) return 1 + self.previewBids.count;   // 遮罩预览 + 图标预览
+    if (s == 1) return 1;                       // 合并成一张预览卡
     return self.bids.count;
 }
 
@@ -526,25 +614,46 @@ heightForHeaderInSection:(NSInteger)s {
   sizeForItemAtIndexPath:(NSIndexPath *)ip {
     CGFloat W = cv.bounds.size.width;
     if (W < 1) W = [UIScreen mainScreen].bounds.size.width;
-    if (ip.section == 0) {                      // 四个功能卡：小方卡（原来是大正方形，太空）
+    if (ip.section == 0) {                      // 四个功能卡：再小一档（78 高）
         CGFloat two = floor((W - kTBSideInset * 2 - kTBCardGap) / 2.0);
         if (two < 120) two = 120;
-        return CGSizeMake(two, 96);
+        return CGSizeMake(two, 78);
     }
-    // 图标卡：三列，卡片只比图标大一点（图标 = 卡宽 × 0.80，下面留给文字）
-    CGFloat col = floor((W - kTBSideInset * 2 - kTBCardGap * 2) / 3.0);
-    if (col < 88) col = 88;
+    if (ip.section == 1) {                      // 预览：一张卡（卡内 2×3）
+        CGFloat w = W - kTBSideInset * 2;
+        if (w < 160) w = 160;
+        return CGSizeMake(w, TBPreviewCardHeight(w));
+    }
+    // 全部图标：四列，图标 = 卡宽 × 0.80，高度 = 图标 + 名字（2 行小字）
+    CGFloat col = floor((W - kTBSideInset * 2 - kTBCardGap * 3) / 4.0);
+    if (col < 56) col = 56;
     CGFloat iconH = floor(col * 0.80);
-    // 高度 = 图标 + 上标题 + 下名字（两行）留出的空间，卡片刚好把图标包住
-    return CGSizeMake(col, iconH + 66.0);
+    return CGSizeMake(col, iconH + 52.0);
 }
 
 - (UICollectionViewCell *)collectionView:(UICollectionView *)cv
                   cellForItemAtIndexPath:(NSIndexPath *)ip {
+    // 预览分区：一张卡里并排显示「遮罩预览 + 前几个图标」
+    if (ip.section == 1) {
+        TBPreviewCardCell *pc = [cv dequeueReusableCellWithReuseIdentifier:@"preview" forIndexPath:ip];
+        NSMutableArray *imgs = [NSMutableArray array];
+        NSMutableArray *caps = [NSMutableArray array];
+        [imgs addObject:self.maskPreviewImage ?: [NSNull null]];
+        [caps addObject:(self.maskPreviewCaption.length ? self.maskPreviewCaption : @"遮罩预览")];
+        for (NSString *bid in self.previewBids) {
+            UIImage *im = [self.theme imageForBundleID:bid];
+            [imgs addObject:im ?: [NSNull null]];
+            NSString *dn = [TBAppInfo displayNameForBundleID:bid];
+            [caps addObject:(dn.length ? dn : [[bid componentsSeparatedByString:@"."] lastObject])];
+        }
+        [pc setPreviewImages:imgs captions:caps];
+        return pc;
+    }
+
     TBSquareCardCell *cell = [cv dequeueReusableCellWithReuseIdentifier:@"card" forIndexPath:ip];
     cell.icon.tintColor = [UIColor secondaryLabelColor];
     cell.compact = (ip.section == 0);
-
+    cell.captionLabel.hidden = NO;
     if (ip.section == 0) {
         NSString *sym = nil;
         switch (ip.item) {
@@ -554,7 +663,7 @@ heightForHeaderInSection:(NSInteger)s {
             default: sym = @"square.and.arrow.up"; break;
         }
         UIImageSymbolConfiguration *sc =
-            [UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIFontWeightRegular];
+            [UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIFontWeightRegular];
         cell.icon.image = [[UIImage systemImageNamed:sym withConfiguration:sc]
                            imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
         cell.icon.contentMode = UIViewContentModeCenter;
@@ -578,37 +687,19 @@ heightForHeaderInSection:(NSInteger)s {
         return cell;
     }
 
-    if (ip.section == 1) {
-        if (ip.item == 0) {                      // 遮罩预览卡
-            cell.icon.contentMode = UIViewContentModeScaleAspectFit;
-            cell.icon.alpha = 1.0;
-            cell.icon.image = self.maskPreviewImage;
-            cell.titleLabel.text = @"遮罩预览";
-            cell.titleLabel.textColor = [UIColor labelColor];
-            cell.captionLabel.text = self.maskPreviewCaption;
-            return cell;
-        }
-        NSString *bid = self.previewBids[ip.item - 1];
-        cell.icon.contentMode = UIViewContentModeScaleAspectFit;
-        cell.icon.alpha = 1.0;
-        cell.icon.image = [self.theme imageForBundleID:bid];
-        cell.titleLabel.textColor = [UIColor labelColor];
-        NSString *dn = [TBAppInfo displayNameForBundleID:bid];
-        cell.titleLabel.text = dn.length ? dn : [[bid componentsSeparatedByString:@"."] lastObject];
-        cell.captionLabel.text = bid;
-        return cell;
-    }
-
-    // 全部图标（两列方形卡）
+    // 全部图标（四列方形卡：图标 = 卡宽 × 0.80，名字小字 2 行截断）
     NSString *bid = self.bids[ip.item];
     cell.icon.contentMode = UIViewContentModeScaleAspectFit;
     cell.icon.alpha = 1.0;
     cell.icon.image = [self.theme imageForBundleID:bid];
     cell.titleLabel.textColor = [UIColor labelColor];
+    cell.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    cell.titleLabel.numberOfLines = 2;
+    cell.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     NSString *dn = [TBAppInfo displayNameForBundleID:bid];
     cell.titleLabel.text = dn.length ? dn : [[bid componentsSeparatedByString:@"."] lastObject];
-    NSString *tail = [bid componentsSeparatedByString:@"."].lastObject;
-    cell.captionLabel.text = tail.length ? tail : bid;
+    cell.captionLabel.hidden = YES;          // 四列空间紧，只留名字（2 行截断）
+    cell.captionLabel.text = nil;
     return cell;
 }
 
@@ -628,14 +719,7 @@ heightForHeaderInSection:(NSInteger)s {
     }
     // 图标卡：保留原来的「复制文件名」入口
     NSString *bid = self.bids[ip.item];
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:
-                             [TBAppInfo displayNameForBundleID:bid] ?: bid message:bid
-                             preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"复制文件名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [UIPasteboard generalPasteboard].string = [NSString stringWithFormat:@"%@.png", bid];
-    }]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
+    TBPresentAlert(self, [TBAppInfo displayNameForBundleID:bid] ?: bid, [NSString stringWithFormat:@"%@.png", bid]);
 }
 
 @end

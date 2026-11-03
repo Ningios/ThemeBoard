@@ -272,6 +272,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     self.titleLabel.text = self.theme.name.length ? self.theme.name : (self.isAssetPack ? @"素材" : @"主题");
     self.offset = 10000.0;      // 出场前先藏在屏外，首帧不会闪（位置在 layout 里用 frame 算）
 
+    [self tb_syncPendingAssetsFromApplied];   // 素材包：勾选先还原成「当前已启用」
     [self refreshState];
     [self tb_refreshDynamicColors];
 }
@@ -518,6 +519,39 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     return YES;
 }
 
+/// 素材包：任意一项在用 → 「取消应用」就该显示（原来要全部启用才显示）
+- (BOOL)tb_assetPackAnyApplied {
+    NSArray *items = [self.theme availableAssetItems];
+    if (!items.count) return NO;
+    for (NSDictionary *it in items) {
+        if ([self tb_assetItemActive:it]) return YES;
+    }
+    return NO;
+}
+
+/// 把「当前已启用的项」同步成勾选集合（打开面板时先还原现状，应用时再以勾选为准）
+- (void)tb_syncPendingAssetsFromApplied {
+    if (!self.isAssetPack) return;
+    [self.pendingAssets removeAllObjects];
+    NSArray *items = [self.theme availableAssetItems];
+    for (NSInteger i = 0; i < (NSInteger)items.count; i++) {
+        if ([self tb_assetItemActive:items[i]]) [self.pendingAssets addObject:@(i)];
+    }
+}
+
+/// 素材包四种 kind → @[kind, Custom*Path 键, 开关键]
+/// （应用时「以勾选为准」要遍历全部四种：没勾的 kind 一律清掉）
+static NSArray<NSArray<NSString *> *> *TBAssetKindTable(void) {
+    static NSArray *t = nil;
+    if (!t) {
+        t = @[ @[@"mask",    @"CustomMaskPath",    TBKeyUseThemeIconMask],
+               @[@"overlay", @"CustomOverlayPath", TBKeyUseThemeIconOverlay],
+               @[@"shadow",  @"CustomShadowPath",  TBKeyUseThemeIconShadow],
+               @[@"badge",   @"CustomBadgePath",   TBKeyUseThemeBadge] ];
+    }
+    return t;
+}
+
 - (void)refreshState {
     BOOL activeTheme = [self tb_themeActive];
 
@@ -607,13 +641,14 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
             [b setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
         }
         BOOL applied = [self tb_assetPackApplied];
+        BOOL anyApplied = [self tb_assetPackAnyApplied];
         BOOL pendAny = (self.pendingAssets.count > 0);
         [self.applyButton setTitle:(pendAny ? @"应用" : (applied ? @"正在使用" : @"应用"))
                           forState:UIControlStateNormal];
         [self tb_stylePrimary:self.applyButton];
         self.applyButton.alpha = (pendAny || !applied) ? 1.0 : 0.55;
         self.applyButton.hidden = NO;
-        self.cancelApplyButton.hidden = !applied;
+        self.cancelApplyButton.hidden = !anyApplied;      // 任意一项在用就显示
 
         NSMutableArray *names = [NSMutableArray array];
         for (NSDictionary *it in items) [names addObject:it[@"title"]];
@@ -704,29 +739,40 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 - (void)applyTapped {
     if (self.isAssetPack) {
         NSArray<NSDictionary *> *all = [self.theme availableAssetItems];
-        if (self.pendingAssets.count) {           // 只应用勾选的那些
-            for (NSNumber *n in self.pendingAssets) {
-                NSInteger i = n.integerValue;
-                if (i < 0 || i >= (NSInteger)all.count) continue;
-                NSDictionary *it = all[i];
-                [TBPrefs setString:it[@"path"] forKey:it[@"key"]];
-                [TBPrefs setBool:YES forKey:[self tb_switchKeyForKind:it[@"kind"]]];
-                if ([it[@"kind"] isEqualToString:@"mask"]) {
-                    [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];   // 遮罩优先，别和圆角打架
-                }
-            }
-            [self.pendingAssets removeAllObjects];
-            [TBPrefs notifyChanged];
-            [self refreshState];
-            [TBToast showAppliedIn:self];
-            return;
+        // 「以当前勾选为准」：
+        //   勾选的 kind → 写入 Custom*Path + 开关 YES
+        //   没勾选的 kind（遮罩/边框/阴影/角标）→ 清掉 Custom*Path + 开关 NO
+        // 这样换素材时上一个会自动取消，不会叠加。
+        NSMutableSet<NSString *> *checkedKinds = [NSMutableSet set];
+        for (NSNumber *n in self.pendingAssets) {
+            NSInteger i = n.integerValue;
+            if (i < 0 || i >= (NSInteger)all.count) continue;
+            NSString *kind = all[i][@"kind"];
+            if (kind.length) [checkedKinds addObject:kind];
         }
-        for (NSDictionary *it in [self.theme availableAssetItems]) {
+        for (NSDictionary *it in all) {
+            NSString *kind = it[@"kind"];
+            if (!kind.length || ![checkedKinds containsObject:kind]) continue;
             [TBPrefs setString:it[@"path"] forKey:it[@"key"]];
-            [TBPrefs setBool:YES forKey:[self tb_switchKeyForKind:it[@"kind"]]];
+            [TBPrefs setBool:YES forKey:[self tb_switchKeyForKind:kind]];
+            if ([kind isEqualToString:@"mask"]) {
+                [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];   // 遮罩优先，别和圆角打架
+            }
+        }
+        NSMutableArray<NSString *> *cleared = [NSMutableArray array];
+        for (NSArray<NSString *> *kt in TBAssetKindTable()) {
+            if ([checkedKinds containsObject:kt[0]]) continue;
+            if ([TBPrefs stringForKey:kt[1]].length > 0) [cleared addObject:kt[0]];
+            [TBPrefs setString:nil forKey:kt[1]];
+            [TBPrefs setBool:NO forKey:kt[2]];
         }
         [TBPrefs notifyChanged];
+        [self tb_syncPendingAssetsFromApplied];
         [self refreshState];
+        if (checkedKinds.count) [TBToast showAppliedIn:self];
+        if (cleared.count) {
+            TBLog2(@"[素材包] 已按勾选清掉未选中的 kind: %@", [cleared componentsJoinedByString:@"/"]);
+        }
         return;   // 素材包不关抽屉：用户可以继续微调
     }
     if (self.pendingChoice >= 0) {            // 先把选中的形状落到设置
@@ -768,6 +814,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
         [TBPrefs setBool:NO forKey:TBKeyUseThemeIconOverlay];
         [TBPrefs setBool:NO forKey:TBKeyUseThemeIconShadow];
         [TBPrefs setBool:NO forKey:TBKeyUseThemeBadge];
+        [self.pendingAssets removeAllObjects];      // 勾选也一并清空
         [TBPrefs notifyChanged];
         [self refreshState];
         if (self.onCancelApply) self.onCancelApply(self.theme);   // 宿主页弹「已取消」胶囊
@@ -1069,10 +1116,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 #pragma mark - 弹窗
 
 - (void)tb_alert:(NSString *)title message:(NSString *)msg {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title message:msg
-                                                       preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
+    TBPresentAlert(self, title, msg);      // 自绘玻璃提示弹窗（不再用系统 UIAlertController）
 }
 
 #pragma mark - 导入遮罩（先弹自绘面板 → 文件选择器 / Filza）

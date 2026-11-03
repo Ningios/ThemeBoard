@@ -883,6 +883,64 @@ static NSString *TBFindBestScaledPNG(NSString *dir, NSString *prefix) {
     return best;
 }
 
+/// 遮罩图 alpha 分布统计（全部 0~1）：
+///   p90 = 90 分位；solid = alpha>200 的占比；cov = alpha>=18 的占比（二值化后会保留的面积）
+///   core = alpha >= 峰值一半 的占比（"核心"面积）
+/// 用来区分「很淡的玻璃/渐变遮罩」和「真实形状遮罩」（0.15.47 一刀切二值化把两类都搞坏了）
+typedef struct { double p90, solid, cov, core; } TBMaskStats;
+
+static TBMaskStats TBMaskAlphaStats(UIImage *mask) {
+    TBMaskStats st = { 1.0, 1.0, 1.0, 1.0 };
+    if (!mask) return st;
+    const size_t W = 64, H = 64;
+    unsigned char *buf = calloc(W * H * 4, 1);
+    if (!buf) return st;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return st; }
+    UIGraphicsPushContext(ctx);
+    [mask drawInRect:CGRectMake(0, 0, W, H)];
+    UIGraphicsPopContext();
+    CGContextRelease(ctx);
+
+    int hist[256] = {0};
+    const int total = (int)(W * H);
+    int solid = 0, cov = 0, peak = 0;
+    for (int i = 0; i < total; i++) {
+        unsigned char a = buf[i * 4 + 3];
+        hist[a]++;
+        if (a > peak) peak = a;
+        if (a > 200) solid++;
+        if (a >= 18) cov++;
+    }
+    int core = 0;
+    for (int a = peak / 2; a < 256; a++) core += hist[a];
+    int acc = 0, p90 = 255;
+    for (int a = 0; a < 256; a++) {
+        acc += hist[a];
+        if (acc * 10 >= total * 9) { p90 = a; break; }
+    }
+    free(buf);
+    st.p90   = p90 / 255.0;
+    st.solid = (double)solid / total;
+    st.cov   = (double)cov / total;
+    st.core  = (double)core / total;
+    return st;
+}
+
+/// 「很淡」= 整体 alpha 偏低（p90 < 0.45）或几乎没有实心区（实心占比 < 0.5）
+static BOOL TBMaskStatsLookFaint(TBMaskStats st) {
+    return (st.p90 < 0.45) || (st.solid < 0.5);
+}
+
+/// 「淡玻璃 / 渐变玻璃层」——**不是形状遮罩**，应该当叠加层用。
+/// 比 faint 更严一点，避免把"形状只占画布一小块"的真形状遮罩误判：
+///   p90 < 0.45，或者（几乎没有实心区 且 p90 也不高）
+static BOOL TBMaskStatsLookGlass(TBMaskStats st) {
+    return (st.p90 < 0.45) || (st.solid < 0.15 && st.p90 < 0.75);
+}
+
 /// 主题自带遮罩图（大小写不敏感，按顺序命中第一个）。
 /// 前三个是经典 Anemone / WinterBoard 的遮罩命名（真实主题里就是这个），
 /// 我们自己的 IconMask.png 系列保留为最低优先级兜底：
@@ -897,6 +955,41 @@ static NSString *TBFindBestScaledPNG(NSString *dir, NSString *prefix) {
 static UIImage *gMaskThemeImg;
 static NSString *gMaskThemeKey;      // 缓存对应的主题名
 static BOOL gMaskThemeChecked;
+static UIImage *gMaskGlassImg;       // 淡玻璃遮罩（不当形状用，改当叠加层用）
+static NSString *gMaskGlassKey;
+
+/// 判定一张遮罩图到底是「形状」还是「淡玻璃层」：
+///   淡玻璃/渐变玻璃 → 返回 nil（不当形状用），同时把它记到 gMaskGlassImg 给叠加层用；
+///   真实形状（硬边 / 柔边都算）→ 原样返回。
+static UIImage *TBGlassMaskOrShape(UIImage *img, NSString *key, NSString *label) {
+    gMaskGlassImg = nil;
+    gMaskGlassKey = nil;
+    if (!img) return nil;
+    TBMaskStats st = TBMaskAlphaStats(img);
+    if (TBMaskStatsLookGlass(st)) {
+        gMaskGlassImg = img;
+        gMaskGlassKey = key;
+        TBLogOnce([@"glassmask|" stringByAppendingString:key],
+                  @"遮罩：%@ 偏淡/是渐变玻璃层（p90=%.2f 实心占比=%.2f 覆盖=%.2f）"
+                  @"→ 不当形状遮罩用，改按玻璃叠加层处理（形状回落到自定义圆角 / 系统形状）",
+                  label, st.p90, st.solid, st.cov);
+        return nil;
+    }
+    TBLogOnce([@"shapemask|" stringByAppendingString:key],
+              @"遮罩：%@ 用作形状遮罩（p90=%.2f 实心占比=%.2f 覆盖=%.2f 核心=%.2f）",
+              label, st.p90, st.solid, st.cov, st.core);
+    return img;
+}
+
+/// 淡玻璃遮罩改当玻璃叠加层：画在图标之上，alpha 乘 GlassOverlayStrength
+static UIImage *TBThemeGlassFromFaintMask(void) {
+    if (TBSafeMode() || !TBEnabled()) return nil;
+    if (!TBUseThemeIconMask()) return nil;   // 只有在「遮罩」模式 / 素材包遮罩开关打开时才用
+    if (!gMaskGlassImg || !gMaskGlassKey || !gMaskThemeKey) return nil;
+    if (![gMaskGlassKey isEqualToString:gMaskThemeKey]) return nil;   // 缓存对不上就不冒险
+    return gMaskGlassImg;
+}
+
 static UIImage *TBThemeMaskImage(void) {
     if (TBSafeMode() || !TBEnabled()) return nil;
     // 素材包（独立素材）优先：CustomMaskPath
@@ -908,6 +1001,7 @@ static UIImage *TBThemeMaskImage(void) {
         gMaskThemeImg = [[UIImage alloc] initWithContentsOfFile:(NSString *)cmp];
         TBLogOnce(k, @"遮罩：用独立素材 %@（%.0fx%.0f）", [(NSString *)cmp lastPathComponent],
                   gMaskThemeImg.size.width, gMaskThemeImg.size.height);
+        gMaskThemeImg = TBGlassMaskOrShape(gMaskThemeImg, k, [(NSString *)cmp lastPathComponent]);
         return gMaskThemeImg;
     }
     NSString *theme = TBActiveTheme();
@@ -947,12 +1041,13 @@ static UIImage *TBThemeMaskImage(void) {
         // 必须用 init：imageWithContentsOfFile: 已被本引擎 hook（递归会爆栈）
         UIImage *img = [[UIImage alloc] initWithContentsOfFile:path];
         if (img) {
-            gMaskThemeImg = img;
             TBLogOnce([@"thememask|" stringByAppendingString:theme],
                       @"图标形状：用主题遮罩图 %@（%.0fx%.0f pt）",
                       [path stringByReplacingOccurrencesOfString:dir withString:@""],
                       img.size.width, img.size.height);
-            return img;
+            gMaskThemeImg = TBGlassMaskOrShape(img, theme,
+                                               [path stringByReplacingOccurrencesOfString:dir withString:@""]);
+            return gMaskThemeImg;
         }
     }
     TBLogOnce([@"thememask|none|" stringByAppendingString:theme],
@@ -976,13 +1071,45 @@ static UIImage *TBMaskShapeOnly(UIImage *mask) {
     CGColorSpaceRelease(cs);
     if (!ctx) { free(buf); return mask; }
     CGContextDrawImage(ctx, CGRectMake(0, 0, W, H), mask.CGImage);
-    size_t solid = 0;
-    for (size_t i = 0; i < W * H; i++) if (buf[i * 4 + 3] > 200) solid++;
-    if ((double)solid / (double)(W * H) > 0.85) {        // 本来就是硬边形状遮罩 → 原样用
+
+    // ---- 先统计 alpha 分布，决定"要不要归一化" ----
+    // 0.15.47 一刀切二值化把两类都搞坏了：
+    //   ① 真实形状/软边遮罩（「虚化蒙版」）被压成满幅实心方块 → 看起来"没生效/形状坏了"
+    //   ② 渐变玻璃遮罩（「透明遮罩」，下半部更淡）下半部被判成透明 → 图标下半截消失
+    // 现在：只有"很淡的玻璃遮罩"才归一化；有大幅柔和渐变的（虚化）原样保留柔边。
+    int hist[256] = {0};
+    const size_t total = W * H;
+    size_t solid = 0, cov = 0;
+    int peak = 0;
+    for (size_t i = 0; i < total; i++) {
+        unsigned char a = buf[i * 4 + 3];
+        hist[a]++;
+        if (a > peak) peak = a;
+        if (a > 200) solid++;
+        if (a >= 18) cov++;
+    }
+    size_t core = 0;
+    for (int a = peak / 2; a < 256; a++) core += hist[a];
+    size_t acc = 0; int p90 = 255;
+    for (int a = 0; a < 256; a++) { acc += hist[a]; if (acc * 10 >= total * 9) { p90 = a; break; } }
+    double dp90 = p90 / 255.0, dsolid = (double)solid / total, dcov = (double)cov / total;
+    BOOL faint = (dp90 < 0.45) || (dsolid < 0.5);
+    // 二值化会大幅放大覆盖面积 → 说明这张图靠"大范围柔和渐变"定义外形（虚化/模糊），
+    // 二值化会把柔边吃掉 → 原样返回，保留它自己的圆角与柔边。
+    BOOL wideGradient = ((dcov - (double)core / total) > 0.25);
+    if (!faint || wideGradient) {
+        TBLogOnce([@"maskkeep|" stringByAppendingFormat:@"%.2f|%.2f|%d", dp90, dsolid, (int)wideGradient],
+                  @"遮罩：原样使用（不当形状二值化）p90=%.2f 实心占比=%.2f 覆盖=%.2f 核心=%.2f → %@",
+                  dp90, dsolid, dcov, (double)core / total,
+                  (!faint ? @"真实形状/软边遮罩，保留它自己的圆角与柔边"
+                          : @"有大幅柔和渐变（虚化/模糊遮罩），保留柔边"));
         CGContextRelease(ctx); free(buf);
         return mask;
     }
-    for (size_t i = 0; i < W * H; i++) {
+    TBLogOnce([@"maskbin|" stringByAppendingFormat:@"%.2f", dp90],
+              @"遮罩：很淡的玻璃遮罩 → 二值化成形状 p90=%.2f 实心占比=%.2f 覆盖=%.2f",
+              dp90, dsolid, dcov);
+    for (size_t i = 0; i < total; i++) {
         unsigned char a = buf[i * 4 + 3], na = 0;
         if (a >= 18) na = 255;                            // ≥0.07 视为形状内部
         else if (a > 5) na = (unsigned char)((a - 5) * 255 / 13);   // 窄羽化
@@ -1195,25 +1322,141 @@ static UIImage *TBThemeFxImage(int slot, NSString *base) {
 static UIImage *TBThemeOverlayImage(void) { return TBThemeFxImage(0, @"iPhoneOverlay"); }
 static UIImage *TBThemeShadowImage(void)  { return TBThemeFxImage(1, @"iPhoneShadow"); }
 
-/// 特效合成：阴影垫在图标下方 → 图标 → 叠加层盖在图标之上（都按图标尺寸缩放对齐）
+/// 玻璃叠加层（iPhoneOverlay）强度：0 = 完全不画，1 = 原样叠加。默认 0.35。
+static double TBGlassOverlayStrength(void) {
+    id v = TBPref(@"GlassOverlayStrength");
+    double s = v ? [v doubleValue] : 0.35;
+    if (!(s >= 0.0)) s = 0.0;
+    if (s > 1.0) s = 1.0;
+    return s;
+}
+
+/// 把 overlay 按图标的最终形状裁一刀：DestinationIn 取图标自身的 alpha。
+/// 不裁的话，遮罩与玻璃层圆角不匹配时玻璃层会在边角溢出色块（"边角露出来"）。
+/// iconRect = 图标在合成画布里的位置（有阴影时图标会缩小居中，这里要跟着走）。
+static UIImage *TBMaskOverlayToIconAlpha(UIImage *overlay, UIImage *icon, CGRect iconRect) {
+    if (!overlay || !icon) return overlay;
+    CGSize pt = iconRect.size;
+    if (pt.width < 1 || pt.height < 1) return overlay;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = icon.scale > 0.5 ? icon.scale : 3.0;
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGRect rect = CGRectMake(0, 0, pt.width, pt.height);
+        [overlay drawInRect:rect];
+        [icon drawInRect:rect blendMode:kCGBlendModeDestinationIn alpha:1.0];
+    }];
+}
+
+/// 量出图里"有内容"的区域（单位坐标 0~1）。失败返回 NO。
+/// 阴影素材自带很大边距（实测「立体玻璃-遮罩B」：画布 340×340，可见云团只占 48%×51%），
+/// 不量的话把整张素材按图标 rect 画，云团只有图标宽度的 48%，全被图标盖住。
+static BOOL TBImageContentBBox(UIImage *img, CGRect *out) {
+    if (!img) return NO;
+    const size_t W = 64, H = 64;
+    unsigned char *buf = calloc(W * H * 4, 1);
+    if (!buf) return NO;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return NO; }
+    UIGraphicsPushContext(ctx);
+    [img drawInRect:CGRectMake(0, 0, W, H)];
+    UIGraphicsPopContext();
+    CGContextRelease(ctx);
+
+    int minx = (int)W, maxx = -1, miny = (int)H, maxy = -1;
+    for (int y = 0; y < (int)H; y++) {
+        for (int x = 0; x < (int)W; x++) {
+            if (buf[((size_t)y * W + x) * 4 + 3] < 8) continue;
+            if (x < minx) minx = x;
+            if (x > maxx) maxx = x;
+            if (y < miny) miny = y;
+            if (y > maxy) maxy = y;
+        }
+    }
+    free(buf);
+    if (maxx < 0 || maxy < 0) return NO;
+    if (out) *out = CGRectMake((double)minx / W, (double)miny / H,
+                               (double)(maxx - minx + 1) / W, (double)(maxy - miny + 1) / H);
+    return YES;
+}
+
+// 有阴影时图标在合成画布里的占比 / 阴影可见云团相对图标的倍数
+static const CGFloat kTBShadowIconScale   = 0.80;   // 图标缩到画布的 80% 居中（图标在格子里略小一点）
+static const CGFloat kTBShadowCloudToIcon = 1.22;   // 阴影可见云团 = 图标的 1.22 倍 → 柔边露在图标外
+
+/// 阴影素材在画布里的绘制 rect：把"可见云团"铺到 图标的 kTBShadowCloudToIcon 倍并居中。
+/// 量不出可见区域时退化成"整张素材放大到 2 倍画布居中"（按素材有一半是边距处理）。
+static CGRect TBShadowArtRect(UIImage *shadow, CGRect canvas, CGRect iconRect) {
+    CGSize art = shadow.size;
+    if (art.width < 1 || art.height < 1) return canvas;
+    CGSize cloud = CGSizeMake(iconRect.size.width * kTBShadowCloudToIcon,
+                              iconRect.size.height * kTBShadowCloudToIcon);
+    CGRect bb;
+    if (!TBImageContentBBox(shadow, &bb) || bb.size.width < 0.02 || bb.size.height < 0.02) {
+        CGRect r = canvas;
+        r.origin.x -= r.size.width * 0.5;
+        r.origin.y -= r.size.height * 0.5;
+        r.size.width *= 2.0; r.size.height *= 2.0;
+        return r;
+    }
+    CGRect r;
+    r.size.width  = cloud.width  / bb.size.width;
+    r.size.height = cloud.height / bb.size.height;
+    r.origin.x = canvas.size.width  / 2.0 - r.size.width  / 2.0;
+    r.origin.y = canvas.size.height / 2.0 - r.size.height / 2.0;
+    return r;
+}
+
+/// 特效合成：阴影垫在图标下方 → 图标 → 叠加层盖在图标之上。
+/// 画布尺寸保持 = 图标尺寸（不改尺寸 → 下游 TBFitCached / 系统缓存不会把阴影又缩回图标格）；
+/// 有阴影时把图标缩到 kTBShadowIconScale 居中、阴影云团放到图标的 1.22 倍，
+/// 这样阴影柔边落在图标之外，真的看得见（图标在格子里会略小一点，Anemone 经典观感）。
 static UIImage *TBApplyIconEffects(UIImage *img) {
     if (!img) return img;
     CGSize pt = img.size;
     if (pt.width < 1 || pt.height < 1) return img;
     UIImage *shadow  = TBUseThemeIconShadow()  ? TBThemeShadowImage()  : nil;
     UIImage *overlay = TBUseThemeIconOverlay() ? TBThemeOverlayImage() : nil;
-    if (!shadow && !overlay) return img;      // 没开 / 主题里没素材 → 原样返回
+    if (!overlay) overlay = TBThemeGlassFromFaintMask();   // 淡玻璃遮罩 → 在这里当玻璃层画
+    double strength = TBGlassOverlayStrength();
+    if (overlay && strength <= 0.001) overlay = nil;       // 0 = 不用玻璃层
+    if (!overlay && !shadow) return img;      // 没开 / 主题里没素材 → 原样返回
+
+    CGRect canvas = CGRectMake(0, 0, pt.width, pt.height);
+    CGFloat iconScale = shadow ? kTBShadowIconScale : 1.0;
+    CGRect iconRect = CGRectInset(canvas, pt.width * (1.0 - iconScale) / 2.0,
+                                          pt.height * (1.0 - iconScale) / 2.0);
+    if (overlay) overlay = TBMaskOverlayToIconAlpha(overlay, img, iconRect);   // 按图标形状裁，别出边
 
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
     fmt.scale = img.scale > 0.5 ? img.scale : 3.0;
     fmt.opaque = NO;
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt];
-    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        CGRect rect = CGRectMake(0, 0, pt.width, pt.height);
-        if (shadow) [shadow drawInRect:rect blendMode:kCGBlendModeNormal alpha:1.0];
-        [img drawInRect:rect];
-        if (overlay) [overlay drawInRect:rect blendMode:kCGBlendModeNormal alpha:1.0];
+    UIImage *out = [[[UIGraphicsImageRenderer alloc] initWithSize:pt format:fmt]
+        imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        if (shadow) {
+            CGRect sr = TBShadowArtRect(shadow, canvas, iconRect);
+            [shadow drawInRect:sr blendMode:kCGBlendModeNormal alpha:strength];
+        }
+        [img drawInRect:iconRect];
+        if (overlay) [overlay drawInRect:iconRect blendMode:kCGBlendModeNormal alpha:strength];
     }];
+    if (shadow) {
+        CGRect sr = TBShadowArtRect(shadow, canvas, iconRect);
+        TBLogOnce([@"shadowfx|" stringByAppendingFormat:@"%.0fx%.0f", pt.width, pt.height],
+                  @"阴影：素材 %.0fx%.0f · 画布 %.0fx%.0f · K(图标占比)=%.2f · 云团=图标×%.2f → 绘制 rect %.0fx%.0f "
+                  @"@(%.0f,%.0f) · 强度 %.2f（画布尺寸不变，图标略小）",
+                  shadow.size.width, shadow.size.height, pt.width, pt.height, iconScale,
+                  kTBShadowCloudToIcon, sr.size.width, sr.size.height, sr.origin.x, sr.origin.y, strength);
+    }
+    if (overlay) {
+        TBLogOnce([@"glassstrength|" stringByAppendingFormat:@"%.2f", strength],
+                  @"玻璃层：强度 %.2f（0=不画）· 已按图标形状裁过 · 源=%@", strength,
+                  TBUseThemeIconOverlay() ? @"AnemoneEffects/iPhoneOverlay" : @"淡玻璃遮罩");
+    }
+    return out;
 }
 
 /// 图标最终出图：① 按形状裁（主题遮罩 / 自定义圆角 / 系统形状）② 再叠特效（阴影在下、叠加层在上）
@@ -2458,10 +2701,83 @@ static BOOL TBUIKitIconEnabled(void) {
     return TBApplyEnabled(@"ApplySettings") || TBApplyEnabled(@"ApplyNotification");
 }
 
+/// UIKit 私有 format 参数里能识别的「请求尺寸」。只用于系统原实现没给图时的兜底，
+/// 而且只会用来把主题图缩小，绝不会放大 —— 宁可小一点，也不能再出现"图标巨大"。
+static CGFloat TBAppIconPointsForFormat(int format) {
+    switch (format & 0xFF) {
+        case 1:  return 29.0;    // 设置 / 通知中心这类列表用的小图标
+        case 2:  return 40.0;    // 分享面板 / 搜索结果
+        case 3:  return 60.0;    // 主屏图标尺寸
+        default: return 0.0;     // 0 = 默认大图，不猜（交给系统原实现给尺寸）
+    }
+}
+
+/// format → 请求尺寸（pt）缓存，避免每次调用都跑一遍系统原实现。
+static NSMutableDictionary *gUIFmtSize;
+
+/// 把主题图按「调用方请求的尺寸」重绘。
+/// 之前直接把主题原图（180×180 / 1024×1024）返回，UIKit 只按自己的期望布局缩放、
+/// 或者根本不缩放 → 别的 App 列表里图标巨大。这里解析请求尺寸并重绘：
+///   ① 系统原实现返回图的尺寸（最可靠：那就是调用方要的尺寸）
+///   ② :scale: 变体传进来的 scale
+///   ③ format 兜底表（只搬小不搬大）
+/// 三者都拿不到 → 返回 nil，调用方原样返回主题图（保持旧行为，不冒险）。
+static UIImage *TBUIKitSizedThemeIcon(UIImage *theme, id self, SEL _cmd, id identifier,
+                                      int format, double scale, BOOL hasScale) {
+    if (!theme) return nil;
+    CGSize want = CGSizeZero;
+    CGFloat wantScale = hasScale ? scale : 0;
+
+    // ① 先看缓存
+    if (!gUIFmtSize) gUIFmtSize = [NSMutableDictionary dictionary];
+    NSString *fkey = [NSString stringWithFormat:@"%d|%d", format, hasScale ? 1 : 0];
+    NSValue *cv = gUIFmtSize[fkey];
+    if (cv) {
+        want = cv.CGSizeValue;
+    } else {
+        @try {
+            UIImage *sys = hasScale
+                ? (o_appIconScale ? o_appIconScale(self, _cmd, identifier, format, scale) : nil)
+                : (o_appIcon      ? o_appIcon(self, _cmd, identifier, format)         : nil);
+            if ([sys isKindOfClass:[UIImage class]] && sys.size.width >= 1 && sys.size.height >= 1) {
+                want = sys.size;
+                if (sys.scale > 0.5) wantScale = sys.scale;
+                gUIFmtSize[fkey] = [NSValue valueWithCGSize:want];
+            }
+        } @catch (NSException *e) { }
+    }
+
+    // ③ format 兜底（拿不到系统图时）
+    if (want.width < 1 || want.height < 1) {
+        CGFloat side = TBAppIconPointsForFormat(format);
+        if (side > 0) want = CGSizeMake(side, side);
+    }
+    if (want.width < 1 || want.height < 1) return nil;         // 真拿不到 → 交回原图
+    if (wantScale < 0.5) wantScale = theme.scale > 0.5 ? theme.scale : 3.0;
+
+    // 主题图本来就比请求尺寸小 → 不必重绘（也避免无意义的重绘）
+    if (theme.size.width <= want.width + 0.6 && theme.size.height <= want.height + 0.6) return theme;
+
+    TBInfo info = { want, wantScale, 0 };
+    UIImage *out = TBFitCached(theme, info, ([identifier isKindOfClass:[NSString class]] ? identifier : nil));
+    TBLogOnce([@"uikiticonsize|" stringByAppendingFormat:@"%d|%@", format, identifier ?: @"?"],
+              @"UIKit 应用图标尺寸适配：fmt=%d scale=%.1f 请求 %.0fx%.0fpt ← 主题图 %.0fx%.0fpt → %@",
+              format, wantScale, want.width, want.height,
+              theme.size.width, theme.size.height, (out && out != theme ? @"已重绘" : @"保持原图"));
+    return out ?: theme;
+}
+
 static UIImage *tb_appIconImageForBID(id self, SEL _cmd, id identifier, int format) {
     if (TBUIKitIconEnabled() && [identifier isKindOfClass:[NSString class]] && [identifier length]) {
         UIImage *img = TBImageForBundle(identifier);
-        if (img) { gServe++; TBLog(@"serve 应用图标 %@ fmt=%d", identifier, format); return img; }
+        if (img) {
+            gServe++;
+            UIImage *sized = TBUIKitSizedThemeIcon(img, self, _cmd, identifier, format, 0, NO) ?: img;
+            TBLogOnce([@"uikiticon|" stringByAppendingFormat:@"%@|%d", identifier, format],
+                      @"serve 应用图标 %@ fmt=%d → %.0fx%.0fpt", identifier, format,
+                      sized.size.width, sized.size.height);
+            return sized;
+        }
     }
     return o_appIcon ? o_appIcon(self, _cmd, identifier, format) : nil;
 }
@@ -2469,7 +2785,14 @@ static UIImage *tb_appIconImageForBID(id self, SEL _cmd, id identifier, int form
 static UIImage *tb_appIconImageForBIDScale(id self, SEL _cmd, id identifier, int format, double scale) {
     if (TBUIKitIconEnabled() && [identifier isKindOfClass:[NSString class]] && [identifier length]) {
         UIImage *img = TBImageForBundle(identifier);
-        if (img) { gServe++; TBLog(@"serve 应用图标 %@ fmt=%d scale=%.0f", identifier, format, scale); return img; }
+        if (img) {
+            gServe++;
+            UIImage *sized = TBUIKitSizedThemeIcon(img, self, _cmd, identifier, format, scale, YES) ?: img;
+            TBLogOnce([@"uikiticons|" stringByAppendingFormat:@"%@|%d", identifier, format],
+                      @"serve 应用图标 %@ fmt=%d scale=%.1f → %.0fx%.0fpt", identifier, format, scale,
+                      sized.size.width, sized.size.height);
+            return sized;
+        }
     }
     return o_appIconScale ? o_appIconScale(self, _cmd, identifier, format, scale) : nil;
 }
@@ -2964,31 +3287,71 @@ static UIImage *TBThemeBadgeImage(void) {
     return a;
 }
 /// 深度遍历：盘子可能不在第一层，也可能直接画在 layer.contents 上
+/// 面积（用来挑「底板」：底面积最大的那个 UIImageView）
+static CGFloat TBBadgeViewArea(UIView *v) {
+    CGRect b = v.bounds;
+    return b.size.width * b.size.height;
+}
+
+/// 子树里有没有 UILabel —— 有就绝不碰这一层的 layer.contents
+/// （UILabel 的文字就是画在自己的 layer.contents 上的，换掉 = 数字消失）
+static BOOL TBBadgeHasLabel(UIView *v, int depth) {
+    if (depth > 5) return NO;
+    if ([v isKindOfClass:[UILabel class]]) return YES;
+    for (UIView *c in v.subviews) if (TBBadgeHasLabel(c, depth + 1)) return YES;
+    return NO;
+}
+
+/// 深度遍历：每层只替换「面积最大的那个 UIImageView」（底板）。
+/// 其它 UIImageView 与所有 UILabel 一律不动 —— 旧实现递归把所有 UIImageView.image
+/// 和带 CGImage 的 layer.contents 全换成角标图，把数字（UILabel 的文字位图）也盖掉了。
 static void TBBadgePaint(UIView *v, UIImage *badge, int depth, int *hits, NSMutableString *dump,
                          int *dumpNodes) {
     if (depth > 4) return;
     if (!dumpNodes) {
-        // 正常替换：图片视图换图；直接把图写进 layer 的也换掉
-        if ([v isKindOfClass:[UIImageView class]]) {
-            UIImageView *iv = (UIImageView *)v;
-            iv.image = badge;
-            iv.contentMode = UIViewContentModeScaleToFill;
-            (*hits)++;
+        UIImageView *plate = nil;
+        CGFloat best = 0;
+        for (UIView *sv in v.subviews) {
+            if (![sv isKindOfClass:[UIImageView class]]) continue;
+            CGFloat a = TBBadgeViewArea(sv);
+            if (a > best) { best = a; plate = (UIImageView *)sv; }
         }
-        id contents = v.layer.contents;
-        if (contents && ![contents isKindOfClass:[UIImage class]] &&
-            CFGetTypeID((__bridge CFTypeRef)contents) == CGImageGetTypeID()) {
-            v.layer.contents = (__bridge id)badge.CGImage;
-            (*hits)++;
-        }
-        // 红底：SBIconBadgeView 体系里个别版本用背景色画红，直接抹掉
-        UIColor *bg = v.backgroundColor;
-        if (bg) {
+        static int plateLogged = 0;
+        BOOL verbose = (plateLogged < 30);
+        if (plate) {
+            if (verbose) TBLog(@"角标替换[前]：L%d 底板=%@ frame=%@ 原图=%@",
+                               depth, NSStringFromClass([plate class]),
+                               NSStringFromCGRect(CGRectIntegral(plate.frame)),
+                               plate.image ? NSStringFromCGSize(plate.image.size) : @"(无)");
+            plate.image = badge;
+            plate.contentMode = UIViewContentModeScaleToFill;
+            plate.clipsToBounds = YES;
+            if (verbose) { plateLogged++; TBLog(@"角标替换[后]：L%d %@ frame=%@ 新图=%@",
+                                                depth, NSStringFromClass([plate class]),
+                                                NSStringFromCGRect(CGRectIntegral(plate.frame)),
+                                                NSStringFromCGSize(badge.size)); }
+            // 底板自己画的红底 → 抹掉（只动底板，不碰数字和其它 view）
+            UIColor *bg = plate.backgroundColor;
             CGFloat r = 0, g = 0, b = 0, a = 0;
-            if ([bg getRed:&r green:&g blue:&b alpha:&a] && a > 0.2 && r > 0.45 && r > g * 1.6 && r > b * 1.6) {
-                v.backgroundColor = [UIColor clearColor];
-                (*hits)++;
+            if (bg && [bg getRed:&r green:&g blue:&b alpha:&a] &&
+                a > 0.2 && r > 0.45 && r > g * 1.6 && r > b * 1.6) {
+                plate.backgroundColor = [UIColor clearColor];
             }
+            (*hits)++;
+        } else if (!TBBadgeHasLabel(v, 0) && v.layer.contents &&
+                   CFGetTypeID((__bridge CFTypeRef)v.layer.contents) == CGImageGetTypeID() &&
+                   ![v.layer.contents isKindOfClass:[UIImage class]]) {
+            // 这一层没有 UIImageView 底板，子树里也没有 UILabel（不会盖掉数字）
+            // → 底板是直接画在 layer.contents 上的，只换它
+            if (verbose) TBLog(@"角标替换[前]：L%d %@ layer.contents 底板 %@", depth,
+                               NSStringFromClass([v class]),
+                               NSStringFromCGSize(CGSizeMake(CGImageGetWidth((__bridge CGImageRef)v.layer.contents) / 3.0,
+                                                             CGImageGetHeight((__bridge CGImageRef)v.layer.contents) / 3.0)));
+            v.layer.contents = (__bridge id)badge.CGImage;
+            if (verbose) { plateLogged++; TBLog(@"角标替换[后]：L%d %@ layer.contents → %@", depth,
+                                                NSStringFromClass([v class]),
+                                                NSStringFromCGSize(badge.size)); }
+            (*hits)++;
         }
     } else if (*dumpNodes < 12) {
         (*dumpNodes)++;

@@ -32,3 +32,11 @@ UIView *TBGlassCellBG(CGFloat inset);
 
 /// 表格统一外观：透明底、透明 cell、无分隔线
 void TBGlassTable(UITableView *tv);
+
+/// 自绘毛玻璃搜索框：干掉系统灰底，在输入框底下垫一层
+/// SystemThinMaterial + 白 0.55/0.12 填充 + 1px 亮边，圆角 = 高/2。
+void TBStyleSearchBarGlass(UISearchBar *sb);
+
+/// 全局安装：swizzle UISearchBar 的 layoutSubviews，任何页面的搜索框（详情页/
+/// 主题页/设置页）只要一布局就自动套上上面这套玻璃外观，且缩放/旋转后仍然贴合。
+void TBInstallGlassSearchBars(void);

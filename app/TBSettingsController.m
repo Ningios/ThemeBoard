@@ -1,3 +1,4 @@
+#import "TBPanelController.h"
 #import "TBSettingsController.h"
 #import "TBPrefs.h"
 #import "TBThemeScanner.h"
@@ -28,7 +29,9 @@
            @{@"t": @"自定义图标圆角", @"k": @"MaskCornerRadiusOn", @"v": @NO,
              @"d": @"开启后按 CustomCornerRadius 算法（默认 13.42）裁圆角"},
            @{@"t": @"图标圆角半径", @"k": @"MaskCornerRadius", @"v": @13.42, @"num": @YES,
-             @"d": @"CustomCornerRadius，60 ≈ 满圆角，默认 13.42"} ],
+             @"d": @"CustomCornerRadius，60 ≈ 满圆角，默认 13.42"},
+           @{@"t": @"透明玻璃强度", @"k": TBKeyGlassOverlayStrength, @"v": @0.35, @"slider": @YES,
+             @"d": @"玻璃叠加层（iPhoneOverlay）的浓淡，默认 35%；0 = 不用玻璃层"} ],
         @[ @{@"t": @"程序坞", @"k": TBKeyApplyDock, @"v": @YES},
            @{@"t": @"文件夹预览", @"k": TBKeyApplyFolder, @"v": @YES},
            @{@"t": @"App 切换器", @"k": TBKeyApplySwitcher, @"v": @YES},
@@ -50,6 +53,7 @@
         @"重启桌面": @"arrow.clockwise.circle",
         @"启用引擎": @"power", @"程序坞": @"dock.rectangle", @"文件夹预览": @"folder",
         @"用主题遮罩图": @"square.dashed", @"自定义图标圆角": @"circle.dashed", @"图标圆角半径": @"ruler",
+        @"透明玻璃强度": @"drop",
         @"App 切换器": @"rectangle.stack", @"设置页图标": @"gearshape", @"分享面板": @"square.and.arrow.up",
         @"通知中心": @"bell.badge",
         @"导入主题…": @"square.and.arrow.down", @"在文件管理器中打开主题目录": @"folder.badge.gearshape",
@@ -131,7 +135,20 @@
         cell.imageView.tintColor = [UIColor secondaryLabelColor];
     }
 
-    if (row[@"num"]) {
+    if (row[@"slider"]) {
+        // 「透明玻璃强度」：0~100% 滑块，实时写入偏好（0 = 完全不画玻璃层）
+        double cur = [TBPrefs doubleForKey:row[@"k"] defaultValue:[row[@"v"] doubleValue]];
+        if (!(cur >= 0.0) || cur > 1.0) cur = [row[@"v"] doubleValue];
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%.0f%%（0 = 不用玻璃层）", cur * 100.0];
+        UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 150, 32)];
+        sl.minimumValue = 0.0;
+        sl.maximumValue = 1.0;
+        sl.value = (float)cur;
+        sl.tag = indexPath.section * 100 + indexPath.row;
+        [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = sl;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (row[@"num"]) {
         // 数值行（MaskCornerRadius）：右侧可编辑的输入框，失焦/点"完成"时写回偏好
         if (row[@"d"]) cell.detailTextLabel.text = row[@"d"];
         UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 88, 32)];
@@ -199,6 +216,21 @@
     }
 }
 
+/// 滑块行（透明玻璃强度）：拖动即实时写入偏好 + 通知引擎
+- (void)sliderChanged:(UISlider *)sl {
+    NSInteger section = sl.tag / 100, row = sl.tag % 100;
+    if (section < 0 || section >= (NSInteger)self.model.count) return;
+    if (row < 0 || row >= (NSInteger)self.model[section].count) return;
+    NSDictionary *item = self.model[section][row];
+    NSString *k = item[@"k"];
+    if (!k.length) return;
+    [TBPrefs setDouble:(double)sl.value forKey:k];
+    [TBPrefs notifyChanged];        // 实时生效：引擎收到 Darwin 通知后重画
+    NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
+    UITableViewCell *c = [self.tableView cellForRowAtIndexPath:ip];
+    c.detailTextLabel.text = [NSString stringWithFormat:@"%.0f%%（0 = 不用玻璃层）", sl.value * 100.0];
+}
+
 /// 数值行编辑结束：写回偏好（非法输入回默认值）
 - (void)numberChanged:(UITextField *)tf {
     NSInteger section = tf.tag / 100, row = tf.tag % 100;
@@ -228,16 +260,14 @@
         picker.delegate = self;
         [self presentViewController:picker animated:YES completion:nil];
     } else if ([act isEqualToString:@"respring"]) {
-        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"重启桌面？"
-            message:@"屏幕会黑一下然后回到桌面，正在运行的应用会被关闭。装完新引擎后用一次即可。"
-            preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"重启" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        TBPresentConfirm(self, @"重启桌面？",
+                         @"屏幕会黑一下然后回到桌面，正在运行的应用会被关闭。装完新引擎后用一次即可。",
+                         @"取消", @"重启", YES, ^(BOOL ok) {
+            if (!ok) return;
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                                  (__bridge CFStringRef)@"com.ning.themeboard.respring",
                                                  NULL, NULL, true);
-        }]];
-        [self presentViewController:ac animated:YES completion:nil];
+        });
     } else if ([act isEqualToString:@"open"]) {
         [self openThemeFolder];
     } else if ([act isEqualToString:@"rescan"]) {
@@ -260,46 +290,42 @@
 - (void)installEngineTapped {
     NSError *err = nil;
     if ([TBEngineInstaller dynamicLibrariesDir] == nil) {
-        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"这台设备要用引擎包安装"
-            message:@"RootHide 把注入目录对 App 隐藏了，App 无法直接写入。\n在 Sileo 里装「ThemeBoard 引擎」即可，装完重启一次桌面，以后不用再管。"
-            preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"复制包名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [UIPasteboard generalPasteboard].string = @"com.ning.themeboard.engine";
-        }]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"去 Sileo" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            if (![TBEngineInstaller openSileoForEngine]) {
-                [self alert:@"打不开 Sileo" msg:@"请手动在 Sileo 搜索 ThemeBoard 引擎"];
+        TBChoicePanelController *p = [TBChoicePanelController
+            panelWithTitle:@"这台设备要用引擎包安装"
+                   message:@"RootHide 把注入目录对 App 隐藏了，App 无法直接写入。\n在 Sileo 里装「ThemeBoard 引擎」即可，装完重启一次桌面，以后不用再管。"
+                   options:@[@"复制包名", @"去 Sileo"]
+                   handler:^(NSInteger idx) {
+            if (idx == 0) {
+                [UIPasteboard generalPasteboard].string = @"com.ning.themeboard.engine";
+            } else if (idx == 1) {
+                if (![TBEngineInstaller openSileoForEngine]) {
+                    [self alert:@"打不开 Sileo" msg:@"请手动在 Sileo 搜索 ThemeBoard 引擎"];
+                }
             }
-        }]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:ac animated:YES completion:nil];
+        }];
+        p.cancelTitle = @"好";
+        [p presentOver:self];
         return;
     }
 
     if ([TBEngineInstaller installEngine:&err]) {
         [self.tableView reloadData];
-        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"引擎已写入"
-            message:@"需要重启一次桌面才会加载。现在就重启吗？\n（只会重启 SpringBoard，不影响其他东西）"
-            preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"稍后" style:UIAlertActionStyleCancel handler:nil]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"立即重启" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [self doRespring];
-        }]];
-        [self presentViewController:ac animated:YES completion:nil];
+        TBPresentConfirm(self, @"引擎已写入",
+                         @"需要重启一次桌面才会加载。现在就重启吗？\n（只会重启 SpringBoard，不影响其他东西）",
+                         @"稍后", @"立即重启", NO, ^(BOOL ok) {
+            if (ok) [self doRespring];
+        });
     } else {
         [self alert:@"安装失败" msg:err.localizedDescription ?: @"未知错误"];
     }
 }
 
 - (void)confirmRespring {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"重启桌面？"
-        message:@"屏幕会黑一下，随后回到桌面，正在运行的 App 会被关闭"
-        preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"重启" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-        [self doRespring];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
+    TBPresentConfirm(self, @"重启桌面？",
+                     @"屏幕会黑一下，随后回到桌面，正在运行的 App 会被关闭",
+                     @"取消", @"重启", YES, ^(BOOL ok) {
+        if (ok) [self doRespring];
+    });
 }
 
 - (void)doRespring {
@@ -333,19 +359,18 @@
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
 didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *url = urls.firstObject;
+    TBLog2(@"[导入] 设置页：选中 %lu 个，第一个=%@", (unsigned long)urls.count, url.absoluteString ?: @"(nil)");
     if (!url) return;
     NSError *err = nil;
     NSString *dst = [TBThemeScanner importFromAnyURL:url error:&err];   // 内部走文件协调器
+    TBLog2(@"[导入] 设置页：结果 dst=%@ err=%@", dst ?: @"(nil)", err.localizedDescription ?: @"-");
     if (dst) [self alert:@"导入完成" msg:dst];
     else [self alert:@"导入失败" msg:(err.localizedDescription
                                   ?: TBImportFailureMessage(url, nil, @"未知错误"))];
 }
 
 - (void)alert:(NSString *)title msg:(NSString *)msg {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title message:msg
-                                                        preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
+    TBPresentAlert(self, title, msg);      // 自绘玻璃提示弹窗
 }
 
 @end

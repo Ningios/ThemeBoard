@@ -27,6 +27,7 @@ extern NSString *const TBKeyCustomMaskPath;        // NSString
 extern NSString *const TBKeyCustomOverlayPath;     // NSString
 extern NSString *const TBKeyCustomShadowPath;      // NSString
 extern NSString *const TBKeyCustomBadgePath;       // NSString 角标底板
+extern NSString *const TBKeyGlassOverlayStrength;  // double 玻璃叠加层强度 0.0~1.0（默认 0.35）
 
 @interface TBPrefs : NSObject
 

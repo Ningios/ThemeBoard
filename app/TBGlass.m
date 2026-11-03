@@ -1,4 +1,5 @@
 #import "TBGlass.h"
+#import <objc/runtime.h>
 
 // 前置声明（这些函数定义在文件后半部分，视图子类要用）
 static UIColor *TBPageTopColor(void);
@@ -277,4 +278,100 @@ void TBGlassTable(UITableView *tv) {
     tv.backgroundColor = [UIColor clearColor];
     tv.separatorStyle = UITableViewCellSeparatorStyleNone;
     tv.backgroundView = nil;
+}
+
+#pragma mark - 毛玻璃搜索框
+
+/// 递归找 UISearchBar 里的输入框（层级随系统版本会变，所以按类找而不是按下标）
+static UIView *TBFindSearchField(UIView *v, NSInteger depth) {
+    if (!v || depth > 6) return nil;
+    NSArray *kids = [[v subviews] copy];
+    for (UIView *s in kids) {
+        if ([s isKindOfClass:[UITextField class]]) return s;
+        UIView *r = TBFindSearchField(s, depth + 1);
+        if (r) return r;
+    }
+    return nil;
+}
+
+static const void *kTBSearchGlassKey = &kTBSearchGlassKey;
+
+void TBStyleSearchBarGlass(UISearchBar *sb) {
+    if (!sb) return;
+    // ① 干掉系统那块灰底（背景图 + material 底）
+    sb.backgroundImage = [UIImage new];
+    sb.searchBarStyle = UISearchBarStyleMinimal;
+    sb.barTintColor = [UIColor clearColor];
+    sb.backgroundColor = [UIColor clearColor];
+
+    UITextField *tf = (UITextField *)TBFindSearchField(sb, 0);
+    if (!tf) return;                       // 还没建出输入框 → 等下一次布局
+    tf.backgroundColor = [UIColor clearColor];
+    tf.borderStyle = UITextBorderStyleNone;
+    tf.textColor = [UIColor labelColor];
+
+    UIView *glass = objc_getAssociatedObject(tf, kTBSearchGlassKey);
+    if (!glass) {
+        // ② 自绘玻璃底：SystemThinMaterial + 白填充 + 1px 亮边（与玻璃卡片同一套观感）
+        glass = [[UIView alloc] initWithFrame:tf.frame];
+        glass.userInteractionEnabled = NO;
+        glass.clipsToBounds = YES;
+        glass.backgroundColor = [UIColor clearColor];
+        glass.layer.cornerCurve = kCACornerCurveContinuous;
+
+        UIVisualEffectView *mat = [[UIVisualEffectView alloc] initWithEffect:
+            [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
+        mat.translatesAutoresizingMaskIntoConstraints = NO;
+        mat.userInteractionEnabled = NO;
+        [glass addSubview:mat];
+
+        UIView *fill = [[UIView alloc] init];
+        fill.translatesAutoresizingMaskIntoConstraints = NO;
+        fill.userInteractionEnabled = NO;
+        fill.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                              [UIColor colorWithWhite:1 alpha:0.12]);
+        [glass addSubview:fill];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [mat.topAnchor constraintEqualToAnchor:glass.topAnchor],
+            [mat.leadingAnchor constraintEqualToAnchor:glass.leadingAnchor],
+            [mat.trailingAnchor constraintEqualToAnchor:glass.trailingAnchor],
+            [mat.bottomAnchor constraintEqualToAnchor:glass.bottomAnchor],
+            [fill.topAnchor constraintEqualToAnchor:glass.topAnchor],
+            [fill.leadingAnchor constraintEqualToAnchor:glass.leadingAnchor],
+            [fill.trailingAnchor constraintEqualToAnchor:glass.trailingAnchor],
+            [fill.bottomAnchor constraintEqualToAnchor:glass.bottomAnchor],
+        ]];
+        TBApplyRim(glass, 0.55);
+        objc_setAssociatedObject(tf, kTBSearchGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (tf.superview) [tf.superview insertSubview:glass belowSubview:tf];
+    }
+    if (tf.superview && glass.superview != tf.superview) {   // 换过父视图 → 跟着搬
+        [glass removeFromSuperview];
+        [tf.superview insertSubview:glass belowSubview:tf];
+    }
+
+    // ③ 每帧贴合输入框：圆角 = 高/2
+    CGRect f = tf.frame;
+    if (f.size.height < 2) return;
+    glass.frame = f;
+    glass.layer.cornerRadius = f.size.height / 2.0;
+    glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+}
+
+static void (*o_searchBarLayout)(id, SEL);
+static void tb_searchBarLayout(id self, SEL _cmd) {
+    if (o_searchBarLayout) o_searchBarLayout(self, _cmd);
+    if ([self isKindOfClass:[UISearchBar class]]) TBStyleSearchBarGlass((UISearchBar *)self);
+}
+
+void TBInstallGlassSearchBars(void) {
+    static BOOL installed = NO;
+    if (installed) return;
+    installed = YES;
+    Method m = class_getInstanceMethod([UISearchBar class], @selector(layoutSubviews));
+    if (m) {
+        o_searchBarLayout = (void (*)(id, SEL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)tb_searchBarLayout);
+    }
 }

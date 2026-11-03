@@ -24,6 +24,7 @@ NSString *const TBKeyCustomMaskPath    = @"CustomMaskPath";
 NSString *const TBKeyCustomOverlayPath = @"CustomOverlayPath";
 NSString *const TBKeyCustomShadowPath  = @"CustomShadowPath";
 NSString *const TBKeyCustomBadgePath   = @"CustomBadgePath";
+NSString *const TBKeyGlassOverlayStrength = @"GlassOverlayStrength";
 
 @implementation TBPrefs
 

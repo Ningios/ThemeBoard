@@ -3,6 +3,7 @@
 #import "TBThemeScanner.h"
 #import "TBTheme.h"
 #import "TBGlass.h"
+#import "TBPanelController.h"
 #import <sys/sysctl.h>
 
 /// 完整机型：hw.machine（如 iPhone15,2）→ 市场名

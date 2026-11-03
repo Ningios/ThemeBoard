@@ -259,7 +259,8 @@ static CGFloat TBTextHeight(NSString *text, UIFont *font, CGFloat width) {
     }
 
     self.cancelButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.cancelButton setTitle:@"取消" forState:UIControlStateNormal];
+    [self.cancelButton setTitle:(self.cancelTitle.length ? self.cancelTitle : @"取消")
+                       forState:UIControlStateNormal];
     self.cancelButton.titleLabel.font = [UIFont systemFontOfSize:16];
     [self.cancelButton setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
     [self.cancelButton addTarget:self action:@selector(tb_cancelTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -319,6 +320,235 @@ static CGFloat TBTextHeight(NSString *text, UIFont *font, CGFloat width) {
 }
 
 @end
+
+#pragma mark - 单按钮提示弹窗（替代系统 UIAlertController）
+
+@interface TBAlertPanelController ()
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *msgLabel;
+@property (nonatomic, strong) UIButton *okButton;
+@property (nonatomic, assign) CGFloat titleH, msgH;
+@end
+
+@implementation TBAlertPanelController
+
++ (instancetype)panelWithTitle:(NSString *)title
+                       message:(NSString *)message
+                     doneTitle:(NSString *)doneTitle {
+    TBAlertPanelController *p = [[TBAlertPanelController alloc] init];
+    p.titleText = title ?: @"";
+    p.message = message ?: @"";
+    p.doneTitle = doneTitle.length ? doneTitle : @"好";
+    return p;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+
+    self.titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    self.titleLabel.textColor = [UIColor labelColor];
+    self.titleLabel.textAlignment = NSTextAlignmentCenter;
+    self.titleLabel.numberOfLines = 0;
+    self.titleLabel.text = self.titleText;
+    [self.cardView addSubview:self.titleLabel];
+
+    self.msgLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.msgLabel.font = [UIFont systemFontOfSize:13];
+    self.msgLabel.textColor = [UIColor secondaryLabelColor];
+    self.msgLabel.numberOfLines = 0;
+    self.msgLabel.text = self.message;
+    self.msgLabel.hidden = (self.message.length == 0);
+    [self.cardView addSubview:self.msgLabel];
+
+    self.okButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.okButton setTitle:self.doneTitle forState:UIControlStateNormal];
+    self.okButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    [self.okButton setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+    self.okButton.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                                   [UIColor colorWithWhite:1 alpha:0.14]);
+    self.okButton.layer.cornerRadius = 13;
+    self.okButton.layer.cornerCurve = kCACornerCurveContinuous;
+    TBApplyRim(self.okButton, 0.55);
+    [self.okButton addTarget:self action:@selector(tb_okTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.cardView addSubview:self.okButton];
+}
+
+- (void)tb_okTapped {
+    [self tb_closeWithCompletion:nil];
+}
+
+- (CGFloat)tb_cardHeightForWidth:(CGFloat)w {
+    CGFloat innerW = w - 40.0;
+    UIFont *tf = self.titleLabel.font ?: [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    UIFont *mf = self.msgLabel.font ?: [UIFont systemFontOfSize:13];
+    self.titleH = TBTextHeight(self.titleText, tf, innerW);
+    self.msgH = self.message.length ? TBTextHeight(self.message, mf, innerW) : 0;
+    CGFloat h = 20.0 + self.titleH;
+    if (self.msgH > 0) h += (self.titleH > 0 ? 8.0 : 0) + self.msgH;
+    h += 16.0 + 46.0 + 20.0;
+    return h;
+}
+
+- (void)tb_layoutCardContent:(CGRect)card {
+    CGFloat pad = 20.0;
+    CGFloat innerW = card.size.width - pad * 2.0;
+    CGFloat y = 20.0;
+    self.titleLabel.frame = CGRectMake(pad, y, innerW, self.titleH);
+    y += self.titleH;
+    if (self.msgH > 0) {
+        if (self.titleH > 0) y += 8.0;
+        self.msgLabel.frame = CGRectMake(pad, y, innerW, self.msgH);
+        y += self.msgH;
+    }
+    y += 16.0;
+    self.okButton.frame = CGRectMake(pad, y, innerW, 46);
+}
+
+- (void)presentOver:(UIViewController *)host {
+    [self tb_presentOver:host];
+}
+
+@end
+
+#pragma mark - 两按钮确认弹窗（替代系统 UIAlertController）
+
+@interface TBConfirmPanelController ()
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *msgLabel;
+@property (nonatomic, strong) UIButton *confirmButton;
+@property (nonatomic, strong) UIButton *cancelButton;
+@property (nonatomic, assign) CGFloat titleH, msgH;
+@end
+
+@implementation TBConfirmPanelController
+
++ (instancetype)panelWithTitle:(NSString *)title
+                       message:(NSString *)message
+                   cancelTitle:(NSString *)cancelTitle
+                  confirmTitle:(NSString *)confirmTitle
+                   destructive:(BOOL)destructive
+                       handler:(void (^)(BOOL))handler {
+    TBConfirmPanelController *p = [[TBConfirmPanelController alloc] init];
+    p.titleText = title ?: @"";
+    p.message = message ?: @"";
+    p.cancelTitle = cancelTitle.length ? cancelTitle : @"取消";
+    p.confirmTitle = confirmTitle.length ? confirmTitle : @"确定";
+    p.destructive = destructive;
+    p.handler = handler;
+    return p;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+
+    self.titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    self.titleLabel.textColor = [UIColor labelColor];
+    self.titleLabel.textAlignment = NSTextAlignmentCenter;
+    self.titleLabel.numberOfLines = 0;
+    self.titleLabel.text = self.titleText;
+    [self.cardView addSubview:self.titleLabel];
+
+    self.msgLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.msgLabel.font = [UIFont systemFontOfSize:12.5];
+    self.msgLabel.textColor = [UIColor secondaryLabelColor];
+    self.msgLabel.numberOfLines = 0;
+    self.msgLabel.text = self.message;
+    self.msgLabel.hidden = (self.message.length == 0);
+    [self.cardView addSubview:self.msgLabel];
+
+    self.confirmButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.confirmButton setTitle:self.confirmTitle forState:UIControlStateNormal];
+    self.confirmButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    [self.confirmButton setTitleColor:(self.destructive ? [UIColor systemRedColor] : [UIColor labelColor])
+                              forState:UIControlStateNormal];
+    self.confirmButton.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                                        [UIColor colorWithWhite:1 alpha:0.14]);
+    self.confirmButton.layer.cornerRadius = 13;
+    self.confirmButton.layer.cornerCurve = kCACornerCurveContinuous;
+    TBApplyRim(self.confirmButton, 0.55);
+    [self.confirmButton addTarget:self action:@selector(tb_confirmTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.cardView addSubview:self.confirmButton];
+
+    self.cancelButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.cancelButton setTitle:self.cancelTitle forState:UIControlStateNormal];
+    self.cancelButton.titleLabel.font = [UIFont systemFontOfSize:16];
+    [self.cancelButton setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+    [self.cancelButton addTarget:self action:@selector(tb_cancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.cardView addSubview:self.cancelButton];
+}
+
+- (void)tb_confirmTapped {
+    void (^h)(BOOL) = self.handler;
+    [self tb_closeWithCompletion:^{
+        if (h) h(YES);
+    }];
+}
+
+- (void)tb_cancelTapped {
+    void (^h)(BOOL) = self.handler;
+    [self tb_closeWithCompletion:^{
+        if (h) h(NO);
+    }];
+}
+
+- (CGFloat)tb_cardHeightForWidth:(CGFloat)w {
+    CGFloat innerW = w - 40.0;
+    UIFont *tf = self.titleLabel.font ?: [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    UIFont *mf = self.msgLabel.font ?: [UIFont systemFontOfSize:12.5];
+    self.titleH = TBTextHeight(self.titleText, tf, innerW);
+    self.msgH = self.message.length ? TBTextHeight(self.message, mf, innerW) : 0;
+    CGFloat h = 20.0 + self.titleH + 4.0;
+    if (self.msgH > 0) h += 8.0 + self.msgH;
+    h += 16.0;
+    h += 46.0;
+    h += 10.0 + 40.0 + 14.0;
+    return h;
+}
+
+- (void)tb_layoutCardContent:(CGRect)card {
+    CGFloat pad = 20.0;
+    CGFloat innerW = card.size.width - pad * 2.0;
+    CGFloat y = 20.0;
+    self.titleLabel.frame = CGRectMake(pad, y, innerW, self.titleH);
+    y += self.titleH + 4.0;
+    if (self.msgH > 0) {
+        y += 8.0;
+        self.msgLabel.frame = CGRectMake(pad, y, innerW, self.msgH);
+        y += self.msgH;
+    }
+    y += 16.0;
+    self.confirmButton.frame = CGRectMake(pad, y, innerW, 46);
+    y += 46.0 + 10.0;
+    self.cancelButton.frame = CGRectMake(pad, y, innerW, 40);
+}
+
+- (void)presentOver:(UIViewController *)host {
+    [self tb_presentOver:host];
+}
+
+@end
+
+#pragma mark - 便捷函数
+
+void TBPresentAlert(UIViewController *host, NSString *title, NSString *message) {
+    if (!host) return;
+    TBAlertPanelController *p = [TBAlertPanelController panelWithTitle:title message:message doneTitle:nil];
+    [p presentOver:host];
+}
+
+void TBPresentConfirm(UIViewController *host, NSString *title, NSString *message,
+                      NSString *cancelTitle, NSString *confirmTitle, BOOL destructive,
+                      void (^handler)(BOOL confirmed)) {
+    if (!host) return;
+    TBConfirmPanelController *p = [TBConfirmPanelController panelWithTitle:title message:message
+                                                             cancelTitle:cancelTitle
+                                                            confirmTitle:confirmTitle
+                                                             destructive:destructive
+                                                                 handler:handler];
+    [p presentOver:host];
+}
 
 #pragma mark - 自定义圆角面板（输入框 + 滑块双向联动）
 

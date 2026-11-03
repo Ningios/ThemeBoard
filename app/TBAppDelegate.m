@@ -55,6 +55,7 @@ static void TBCrashLogInstall(void) {
 - (BOOL)application:(UIApplication *)application
 didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     TBCrashLogInstall();
+    TBInstallGlassSearchBars();   // 所有搜索框统一毛玻璃外观（详情页/主题页/设置页）
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.window.backgroundColor = [UIColor colorWithRed:0.870 green:0.858 blue:0.843 alpha:1];
     self.window.rootViewController = [[TBRootController alloc] init];

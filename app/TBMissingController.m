@@ -1,3 +1,4 @@
+#import "TBPanelController.h"
 #import "TBMissingController.h"
 #import "TBAppInfo.h"
 #import "TBGlass.h"
@@ -63,11 +64,7 @@
     NSDictionary *row = _rows[indexPath.row];
     UIPasteboard *pb = [UIPasteboard generalPasteboard];
     pb.string = [NSString stringWithFormat:@"%@.png", row[@"bid"]];
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已复制文件名"
-        message:[NSString stringWithFormat:@"%@.png", row[@"bid"]]
-        preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
+    TBPresentAlert(self, @"已复制文件名", [NSString stringWithFormat:@"%@.png", row[@"bid"]]);
 }
 
 @end
