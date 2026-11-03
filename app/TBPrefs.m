@@ -13,6 +13,18 @@ NSString *const TBKeyApplyShare     = @"ApplyShare";
 NSString *const TBKeyApplyNotification = @"ApplyNotification";
 NSString *const TBKeyLogEnabled    = @"LogEnabled";
 
+NSString *const TBKeyUseThemeIconMask    = @"UseThemeIconMask";
+NSString *const TBKeyMaskCornerRadiusOn  = @"MaskCornerRadiusOn";
+NSString *const TBKeyMaskCornerRadius    = @"MaskCornerRadius";
+NSString *const TBKeyUseThemeIconOverlay = @"UseThemeIconOverlay";
+NSString *const TBKeyUseThemeIconShadow  = @"UseThemeIconShadow";
+NSString *const TBKeyUseThemeBadge       = @"UseThemeBadge";
+
+NSString *const TBKeyCustomMaskPath    = @"CustomMaskPath";
+NSString *const TBKeyCustomOverlayPath = @"CustomOverlayPath";
+NSString *const TBKeyCustomShadowPath  = @"CustomShadowPath";
+NSString *const TBKeyCustomBadgePath   = @"CustomBadgePath";
+
 @implementation TBPrefs
 
 + (id)_valueForKey:(NSString *)key {

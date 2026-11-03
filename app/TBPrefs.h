@@ -14,6 +14,20 @@ extern NSString *const TBKeyApplyShare;     // BOOL
 extern NSString *const TBKeyApplyNotification; // BOOL 通知中心
 extern NSString *const TBKeyLogEnabled;     // BOOL
 
+// ---- 图标形状 / 特效（引擎与 App 共用，键名不能改）----
+extern NSString *const TBKeyUseThemeIconMask;      // BOOL 用遮罩图当图标形状
+extern NSString *const TBKeyMaskCornerRadiusOn;    // BOOL 用自定义圆角
+extern NSString *const TBKeyMaskCornerRadius;      // double 半径 = (值/60)×图标宽
+extern NSString *const TBKeyUseThemeIconOverlay;   // BOOL 边框（AnemoneEffects 叠加层）
+extern NSString *const TBKeyUseThemeIconShadow;    // BOOL 阴影
+extern NSString *const TBKeyUseThemeBadge;         // BOOL 替换角标底板（SBBadgeBG）
+
+// 独立素材：绝对路径，优先于主题自带的同名素材（换主题也继续生效）
+extern NSString *const TBKeyCustomMaskPath;        // NSString
+extern NSString *const TBKeyCustomOverlayPath;     // NSString
+extern NSString *const TBKeyCustomShadowPath;      // NSString
+extern NSString *const TBKeyCustomBadgePath;       // NSString 角标底板
+
 @interface TBPrefs : NSObject
 
 + (BOOL)boolForKey:(NSString *)key defaultValue:(BOOL)value;

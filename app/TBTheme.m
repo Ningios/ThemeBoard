@@ -1,10 +1,13 @@
 #import "TBTheme.h"
+#import "TBPaths.h"
 
 @interface TBTheme ()
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *index;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, UIImage *> *cache;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *rank;
 @property (nonatomic, assign) BOOL loaded;
+@property (nonatomic, assign) BOOL tbAssetPackChecked;
+@property (nonatomic, assign) BOOL tbAssetPackValue;
 @end
 
 @implementation TBTheme
@@ -200,10 +203,130 @@ static NSString *TBFindBestScaledPNG(NSString *dir, NSString *prefix) {
     return nil;
 }
 
+#pragma mark - 素材包（和主题同层放在同一个主题根目录下）
+
+/// IconBundles 里有没有「反向域名」形式的应用图标
+/// （Icon.png / icon.png / statusbar 之类没有点的素材不算应用图标）
+- (BOOL)tb_hasAppIconFiles {
+    if (!self.iconBundlesPath.length) return NO;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *file in [fm contentsOfDirectoryAtPath:self.iconBundlesPath error:NULL]) {
+        if ([file hasPrefix:@"."]) continue;
+        if (![[file pathExtension].lowercaseString isEqualToString:@"png"]) continue;
+        NSString *bid = TBBundleIDFromFilename(file);
+        if ([bid rangeOfString:@"."].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)isAssetPack {
+    if (self.tbAssetPackChecked) return self.tbAssetPackValue;
+    self.tbAssetPackChecked = YES;
+    self.tbAssetPackValue = NO;
+    if (!self.path.length) return NO;
+    if ([self tb_hasAppIconFiles]) return NO;      // 有真正的应用图标 → 主题包
+    BOOL hasMask    = ([self iconMaskPath].length > 0);
+    BOOL hasOverlay = ([self anemoneEffectPath:@"iPhoneOverlay"].length > 0);
+    BOOL hasShadow  = ([self anemoneEffectPath:@"iPhoneShadow"].length > 0);
+    BOOL hasBadge   = ([self badgePath].length > 0);
+    self.tbAssetPackValue = (hasMask || hasOverlay || hasShadow || hasBadge);
+    return self.tbAssetPackValue;
+}
+
+- (NSString *)assetMaskPath    { return [self iconMaskPath]; }
+- (NSString *)assetOverlayPath { return [self anemoneEffectPath:@"iPhoneOverlay"]; }
+- (NSString *)assetShadowPath  { return [self anemoneEffectPath:@"iPhoneShadow"]; }
+
+- (UIImage *)assetPreviewImage {
+    NSArray *cands = @[ [self assetMaskPath] ?: @"",
+                        [self assetOverlayPath] ?: @"",
+                        [self assetShadowPath] ?: @"" ];
+    for (NSString *p in cands) {
+        if (![p isKindOfClass:[NSString class]] || !p.length) continue;
+        UIImage *img = [UIImage imageWithContentsOfFile:p];
+        if (img) return img;
+    }
+    // 兜底：目录里任意一张 png（素材包通常就一两张图）
+    for (NSString *f in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:self.path error:NULL]) {
+        if (![[f pathExtension].lowercaseString isEqualToString:@"png"]) continue;
+        UIImage *img = [UIImage imageWithContentsOfFile:
+                        [self.path stringByAppendingPathComponent:f]];
+        if (img) return img;
+    }
+    return nil;
+}
+
+- (NSString *)badgePath {
+    if (!self.path.length) return nil;
+    NSArray *names = @[@"SBBadgeBG@3x.png", @"SBBadgeBG@2x.png", @"SBBadgeBG.png"];
+    // ① Bundles/ 根下（素材包 Bundles.zip 就是这个位置）
+    NSString *bundles = TBResolveSubdirCI(self.path, @"Bundles");
+    if (bundles.length) {
+        for (NSString *n in names) {
+            NSString *p = TBFindFileCIInDir(bundles, n);
+            if (p) return p;
+        }
+        // ② Bundles/com.apple.springboard/
+        NSString *sb = TBResolveSubdirCI(bundles, @"com.apple.springboard");
+        if (sb.length) {
+            for (NSString *n in names) {
+                NSString *p = TBFindFileCIInDir(sb, n);
+                if (p) return p;
+            }
+        }
+        // 有些包会放进 Bundles/ 下任意一级子目录
+        NSString *any = TBFindBestScaledPNG(bundles, @"SBBadgeBG");
+        if (any) return any;
+    }
+    // ③ 主题根目录
+    for (NSString *n in names) {
+        NSString *p = TBFindFileCIInDir(self.path, n);
+        if (p) return p;
+    }
+    return TBFindBestScaledPNG(self.path, @"SBBadgeBG");
+}
+
+- (BOOL)inAssetsRoot {
+    NSString *assets = TBAssetsRoot();
+    if (!self.path.length || !assets.length) return NO;
+    NSString *p = [self.path stringByStandardizingPath];
+    NSString *a = [assets stringByStandardizingPath];
+    return [p hasPrefix:[a stringByAppendingString:@"/"]];
+}
+
+/// 素材包能提供的项：遮罩 / 边框 / 阴影（只列真的存在的）
+- (NSArray<NSDictionary<NSString *,NSString *> *> *)availableAssetItems {
+    NSMutableArray *out = [NSMutableArray array];
+    NSString *mask = [self assetMaskPath];
+    if (mask.length) [out addObject:@{ @"kind": @"mask", @"title": @"遮罩", @"path": mask,
+                                       @"key": @"CustomMaskPath" }];
+    NSString *overlay = [self assetOverlayPath];
+    if (overlay.length) [out addObject:@{ @"kind": @"overlay", @"title": @"边框", @"path": overlay,
+                                          @"key": @"CustomOverlayPath" }];
+    NSString *shadow = [self assetShadowPath];
+    if (shadow.length) [out addObject:@{ @"kind": @"shadow", @"title": @"阴影", @"path": shadow,
+                                         @"key": @"CustomShadowPath" }];
+    NSString *badge = [self badgePath];
+    if (badge.length) [out addObject:@{ @"kind": @"badge", @"title": @"角标", @"path": badge,
+                                        @"key": @"CustomBadgePath" }];
+    return out;
+}
+
 - (UIImage *)coverImageWithSize:(CGFloat)size {
     [self loadIndex];
     NSArray<NSString *> *bids = [self bundleIdentifiers];
-    if (bids.count == 0) return nil;
+    if (bids.count == 0) {
+        // 素材包没有应用图标 → 拿素材本身当封面（缩放进方形，别拉伸）
+        UIImage *art = [self assetPreviewImage];
+        if (!art) return nil;
+        UIGraphicsImageRendererFormat *afmt = [UIGraphicsImageRendererFormat defaultFormat];
+        UIGraphicsImageRenderer *ar = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(size, size) format:afmt];
+        return [ar imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+            CGFloat s = MIN(size / MAX(art.size.width, 1.0), size / MAX(art.size.height, 1.0));
+            CGSize d = CGSizeMake(art.size.width * s, art.size.height * s);
+            [art drawInRect:CGRectMake((size - d.width) / 2.0, (size - d.height) / 2.0, d.width, d.height)];
+        }];
+    }
 
     NSArray *prefer = @[@"com.apple.mobilesafari", @"com.tencent.xin", @"com.apple.MobileSMS",
                         @"com.apple.Preferences", @"com.ss.iphone.ugc.Aweme", @"com.taobao.taobao4iphone"];

@@ -2,91 +2,44 @@
 #import "TBPrefs.h"
 #import "TBGlass.h"
 #import "TBTheme.h"
+#import "TBThemeScanner.h"
+#import "TBPanelController.h"
+#import "TBPaths.h"
+#import "TBImageUtil.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-#pragma mark - 遮罩偏好键（键名必须与引擎 / 设置页完全一致）
+#pragma mark - 偏好键（用 TBPrefs.h 里的常量，键名与引擎完全一致）
 
-static NSString *const kTBKeyUseThemeIconMask   = @"UseThemeIconMask";
-static NSString *const kTBKeyMaskCornerRadiusOn = @"MaskCornerRadiusOn";
-static NSString *const kTBKeyMaskCornerRadius   = @"MaskCornerRadius";
-static NSString *const kTBKeyUseThemeIconOverlay = @"UseThemeIconOverlay";
-static NSString *const kTBKeyUseThemeIconShadow  = @"UseThemeIconShadow";
 static const double  kTBDefaultMaskCornerRadius = 13.42;   // 与设置页 / 引擎默认值一致
 
-/// 抽屉里的三个遮罩选项（按钮 tag 就是这个顺序）
+/// 抽屉里的三个形状选项（按钮 tag 就是这个顺序）
 typedef NS_ENUM(NSInteger, TBSheetMaskMode) {
-    TBSheetMaskModeSystem = 0,    // 系统形状：UseThemeIconMask=NO、MaskCornerRadiusOn=NO
-    TBSheetMaskModeThemeMask,     // 主题遮罩图：UseThemeIconMask=YES、MaskCornerRadiusOn=NO
+    TBSheetMaskModeSystem = 0,    // 默认：UseThemeIconMask=NO、MaskCornerRadiusOn=NO
+    TBSheetMaskModeThemeMask,     // 遮罩：UseThemeIconMask=YES、MaskCornerRadiusOn=NO
     TBSheetMaskModeCornerRadius,  // 自定义圆角：MaskCornerRadiusOn=YES、UseThemeIconMask=NO
 };
 
 #pragma mark - 几何 / 手感参数
 
-// 高度：抽屉高度 = 内容实际高度（不再按屏高比例撑开，展开态下方不会再有空白）
 static const CGFloat kTBSheetMaxRatio       = 0.88;  // 内容过高时的上限（相对屏高）
 static const CGFloat kTBSheetTopPad         = 8.0;   // 内容顶部留白
 static const CGFloat kTBSheetBottomPad      = 8.0;   // 内容底部留白（另加安全区）
 static const CGFloat kTBRubberK             = 0.35;  // 橡皮筋阻尼系数（近处斜率 ≈ 0.35）
 static const CGFloat kTBSnapVelocity        = 900.0; // 速度吸附阈值（pt/s）
-static const CGFloat kTBSnapProjection      = 0.20;  // 速度投影时间（秒）：用落点预判吸哪个锚点
-static const CGFloat kTBSpringDamping       = 0.88;  // 收尾弹簧阻尼比（越高越"稳"，不弹）
-static const CGFloat kTBSpringDuration      = 0.34;  // 收尾弹簧时长
+static const CGFloat kTBSnapProjection      = 0.20;  // 速度投影时间（秒）
 static const CGFloat kTBDimMaxAlpha         = 0.42;  // 遮罩最深的不透明度
 static const CGFloat kTBSheetRadius         = 22.0;  // 抽屉顶部圆角
-static const CGFloat kTBSheetPad            = 20.0;  // 左右内缩（与顶部工具条一致）
-static const CGFloat kTBRowHeight           = 44.0;  // 与「重新扫描 / 导入主题 / 清除主题」同高
+static const CGFloat kTBSheetPad            = 20.0;  // 左右内缩
+static const CGFloat kTBRowHeight           = 44.0;  // 与工具条按钮同高
 static const CGFloat kTBRowGap              = 10.0;
 
-/// 把用户选中的图统一重绘成 PNG 当遮罩用：
-///   ① 有透明通道 → 原样保留（SnowBoard 遮罩的标准形态）
-///   ② 完全没有透明像素（JPG、无 alpha 的 PNG）→ 用亮度当 alpha：白留、黑裁，
-///      这样"黑底白形状"的图也能直接当遮罩用
-static NSData *TBThemeMaskPNGDataFromImage(UIImage *src) {
-    if (!src) return nil;
-    CGImageRef cg = src.CGImage;
-    if (!cg) return nil;
-    size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
-    if (w < 1 || h < 1) return nil;
-
-    const size_t kMax = 1024;      // 遮罩不需要大图，顺便限制内存
-    if (w > kMax || h > kMax) {
-        CGFloat s = MIN((CGFloat)kMax / (CGFloat)w, (CGFloat)kMax / (CGFloat)h);
-        w = MAX((size_t)1, (size_t)lround((double)w * s));
-        h = MAX((size_t)1, (size_t)lround((double)h * s));
-    }
-
-    size_t bytes = w * h * 4;
-    uint8_t *buf = (uint8_t *)calloc(bytes, 1);
-    if (!buf) return nil;
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs,
-                                            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    CGColorSpaceRelease(cs);
-    if (!ctx) { free(buf); return nil; }
-    CGContextDrawImage(ctx, CGRectMake(0, 0, (CGFloat)w, (CGFloat)h), cg);
-
-    BOOL anyTransparent = NO;
-    for (size_t i = 0; i < bytes; i += 4) {
-        if (buf[i + 3] < 250) { anyTransparent = YES; break; }
-    }
-    if (!anyTransparent) {
-        for (size_t i = 0; i < bytes; i += 4) {
-            double lum = 0.299 * buf[i] + 0.587 * buf[i + 1] + 0.114 * buf[i + 2];
-            NSInteger a = (NSInteger)lround(lum);
-            if (a < 0) a = 0;
-            if (a > 255) a = 255;
-            buf[i + 3] = (uint8_t)a;
-        }
-    }
-
-    CGImageRef out = CGBitmapContextCreateImage(ctx);
-    CGContextRelease(ctx);
-    if (!out) { free(buf); return nil; }
-    UIImage *img = [UIImage imageWithCGImage:out];
-    CGImageRelease(out);
-    free(buf);
-    return UIImagePNGRepresentation(img);
-}
+// 时长 / 阻尼：打开与关闭各自固定，只有"拖动收尾"用中间那套 + 速度
+static const NSTimeInterval kTBOpenDuration   = 0.36;
+static const CGFloat        kTBOpenDamping    = 0.88;
+static const NSTimeInterval kTBCloseDuration  = 0.30;
+static const CGFloat        kTBCloseDamping   = 0.90;
+static const NSTimeInterval kTBSettleDuration = 0.34;
+static const CGFloat        kTBSettleDamping  = 0.88;
 
 #pragma mark - 同款玻璃按钮
 
@@ -100,46 +53,50 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
                                        [UIColor colorWithWhite:1 alpha:0.14]);
     b.layer.cornerRadius = 13;
     b.layer.cornerCurve = kCACornerCurveContinuous;
+    b.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
+    b.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                         [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
     TBApplyRim(b, 0.55);
 }
 
 @interface TBBottomSheetController () <UIGestureRecognizerDelegate, UIDocumentPickerDelegate>
 
 @property (nonatomic, strong) TBTheme *theme;
+@property (nonatomic, assign) BOOL isAssetPack;
 
-@property (nonatomic, strong) UIView *dimView;      // 半透明黑色遮罩（点它收起）
-@property (nonatomic, strong) UIView *sheet;        // 抽屉本体（位置靠 transform 位移控制）
+// ---- 视图 ----
+@property (nonatomic, strong) UIView *dimView;
+@property (nonatomic, strong) UIView *sheet;
 @property (nonatomic, strong) UIView *sheetFillView;
 @property (nonatomic, strong) UIView *hairline;
-
-@property (nonatomic, strong) UIView *handle;       // 顶部拖拽指示条
+@property (nonatomic, strong) UIView *handle;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *hintLabel;
 
-@property (nonatomic, strong) NSMutableArray<UIButton *> *optionButtons;
-@property (nonatomic, strong) NSMutableArray<UIImageView *> *optionChecks;
-@property (nonatomic, strong) NSMutableArray<UIButton *> *fxButtons;   // 0=叠加层 1=阴影
+@property (nonatomic, strong) NSMutableArray<UIButton *> *choiceButtons;   // 形状三选一 / 素材项
+@property (nonatomic, strong) NSMutableArray<UIImageView *> *choiceChecks;
+@property (nonatomic, strong) NSMutableArray<UIButton *> *fxButtons;       // 边框 / 阴影 / 角标
 @property (nonatomic, strong) NSMutableArray<UIImageView *> *fxChecks;
+@property (nonatomic, strong) NSMutableArray<UIButton *> *actionButtons;   // 导入遮罩 / 应用 / 详情
 @property (nonatomic, strong) UIButton *applyButton;
-@property (nonatomic, strong) UIButton *importMaskButton;
+@property (nonatomic, strong) UIButton *importButton;
 @property (nonatomic, strong) UIButton *detailButton;
+@property (nonatomic, strong) UIButton *cancelApplyButton;
 
 @property (nonatomic, strong) UIPanGestureRecognizer *pan;
+@property (nonatomic, assign) BOOL cancelApplyInActionRow;   // 素材包：取消应用和应用按钮同一行
 
+// ---- 动画状态 ----
 /// 位移（正数 = 往下移；0 = 展开，sheetHeight = 收起）
 @property (nonatomic, assign) CGFloat offset;
 @property (nonatomic, assign) CGFloat dragStartOffset;
 @property (nonatomic, assign) CGFloat sheetHeight;      // 展开态高度（= 内容高度）
-@property (nonatomic, assign) CGFloat contentHeight;    // 内容实际需要的高度
-@property (nonatomic, strong) NSArray<NSNumber *> *anchors;  // 位移锚点（升序：展开/中间/收起）
+@property (nonatomic, assign) CGFloat pendingSheetHeight; // 动画期间算出的新高度，等收尾再落地
+@property (nonatomic, strong) NSArray<NSNumber *> *anchors;   // 位移锚点（升序）
 @property (nonatomic, assign) NSInteger anchorIndex;
 @property (nonatomic, assign) BOOL appeared;
 @property (nonatomic, assign) BOOL closing;
-
 @property (nonatomic, strong) UIViewPropertyAnimator *animator;
-
-/// 等待确认覆盖时暂存的用户选择（import 模式下是沙盒内的临时副本）
-@property (nonatomic, strong) NSURL *pendingMaskURL;
 
 @end
 
@@ -150,12 +107,45 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
 - (instancetype)initWithTheme:(TBTheme *)theme {
     if ((self = [super initWithNibName:nil bundle:nil])) {
         _theme = theme;
-        _optionButtons = [NSMutableArray array];
-        _optionChecks = [NSMutableArray array];
+        _isAssetPack = theme.isAssetPack;
+        _choiceButtons = [NSMutableArray array];
+        _choiceChecks = [NSMutableArray array];
         _fxButtons = [NSMutableArray array];
         _fxChecks = [NSMutableArray array];
+        _actionButtons = [NSMutableArray array];
     }
     return self;
+}
+
+/// 素材类型 → 开关偏好键
+- (NSString *)tb_switchKeyForKind:(NSString *)kind {
+    if ([kind isEqualToString:@"overlay"]) return TBKeyUseThemeIconOverlay;
+    if ([kind isEqualToString:@"shadow"])  return TBKeyUseThemeIconShadow;
+    if ([kind isEqualToString:@"badge"])   return TBKeyUseThemeBadge;
+    return TBKeyUseThemeIconMask;
+}
+
+- (UIButton *)tb_buttonWithTitle:(NSString *)title tag:(NSInteger)tag action:(SEL)action danger:(BOOL)danger {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.tag = tag;
+    [b setTitle:title forState:UIControlStateNormal];
+    TBApplyToolbarGlass(b, danger);
+    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [self.sheet addSubview:b];
+    return b;
+}
+
+- (UIImageView *)tb_attachCheckTo:(UIButton *)b store:(NSMutableArray<UIImageView *> *)store {
+    UIImageView *check = [[UIImageView alloc] initWithImage:
+                          [[UIImage systemImageNamed:@"checkmark"]
+                           imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]];
+    check.tintColor = [UIColor systemBlueColor];
+    check.contentMode = UIViewContentModeScaleAspectFit;
+    check.userInteractionEnabled = NO;
+    check.hidden = YES;
+    [b addSubview:check];
+    if (store) [store addObject:check];
+    return check;
 }
 
 - (void)viewDidLoad {
@@ -167,7 +157,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     self.dimView = [[UIView alloc] initWithFrame:self.view.bounds];
     self.dimView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.dimView.backgroundColor = [UIColor blackColor];
-    self.dimView.alpha = 0;   // 透明度只在动画块里改（拖动过程中不动它）
+    self.dimView.alpha = 0;   // 透明度只在动画块里改
     [self.view addSubview:self.dimView];
     [self.dimView addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self
                                                                               action:@selector(dimTapped)]];
@@ -213,78 +203,69 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     self.hintLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.hintLabel.font = [UIFont systemFontOfSize:12];
     self.hintLabel.textColor = [UIColor secondaryLabelColor];
+    self.hintLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [self.sheet addSubview:self.hintLabel];
 
-    // 5) 三个遮罩选项（同款玻璃按钮，选中态用蓝色描边 + 右侧对勾）
-    NSArray *titles = @[@"系统形状", @"主题遮罩图", @"自定义圆角"];
-    for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
-        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-        b.tag = i;
-        [b setTitle:titles[i] forState:UIControlStateNormal];
-        TBApplyToolbarGlass(b, NO);
-        [b addTarget:self action:@selector(optionTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [self.sheet addSubview:b];
-        [self.optionButtons addObject:b];
+    if (!self.isAssetPack) {
+        // 5) 形状三选一：默认 / 遮罩 / 自定义圆角（三个同款等宽，竖排）
+        NSArray *titles = @[@"默认", @"遮罩", @"自定义圆角"];
+        for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
+            UIButton *b = [self tb_buttonWithTitle:titles[i] tag:i
+                                            action:@selector(choiceTapped:) danger:NO];
+            [self.choiceButtons addObject:b];
+            [self tb_attachCheckTo:b store:self.choiceChecks];
+        }
+        // 5.5) 边框 / 阴影 / 角标：一行三个
+        NSArray *fxTitles = @[@"边框", @"阴影", @"角标"];
+        for (NSInteger i = 0; i < (NSInteger)fxTitles.count; i++) {
+            UIButton *b = [self tb_buttonWithTitle:fxTitles[i] tag:i
+                                            action:@selector(fxTapped:) danger:NO];
+            [self.fxButtons addObject:b];
+            [self tb_attachCheckTo:b store:self.fxChecks];
+        }
+        // 6) 底部一行三个入口：导入遮罩 / 应用主题 / 详情（应用主题是主功能，放中间并高亮）
+        self.importButton = [self tb_buttonWithTitle:@"导入遮罩" tag:0
+                                              action:@selector(importMaskTapped) danger:NO];
+        self.applyButton  = [self tb_buttonWithTitle:@"应用主题" tag:1
+                                              action:@selector(applyTapped) danger:NO];
+        self.detailButton = [self tb_buttonWithTitle:@"详情" tag:2
+                                              action:@selector(detailTapped) danger:NO];
+        [self.actionButtons addObjectsFromArray:@[self.importButton, self.applyButton, self.detailButton]];
 
-        UIImageView *check = [[UIImageView alloc] initWithImage:
-                              [[UIImage systemImageNamed:@"checkmark"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]];
-        check.tintColor = [UIColor systemBlueColor];
-        check.contentMode = UIViewContentModeScaleAspectFit;
-        check.hidden = YES;
-        [b addSubview:check];
-        [self.optionChecks addObject:check];
+        // 正在使用时的「取消应用」（单独一行，红字）
+        self.cancelApplyButton = [self tb_buttonWithTitle:@"取消应用" tag:0
+                                                   action:@selector(cancelApplyTapped) danger:YES];
+        self.cancelApplyButton.hidden = YES;
+    } else {
+        // 素材包：只列它能提供的素材项（遮罩 / 边框 / 阴影 / 角标）
+        NSArray<NSDictionary *> *items = [self.theme availableAssetItems];
+        for (NSInteger i = 0; i < (NSInteger)items.count; i++) {
+            NSDictionary *it = items[i];
+            UIButton *b = [self tb_buttonWithTitle:it[@"title"] tag:i
+                                            action:@selector(assetItemTapped:) danger:NO];
+            [self.choiceButtons addObject:b];
+            [self tb_attachCheckTo:b store:self.choiceChecks];
+        }
+        // 应用 / 正在使用 + 取消应用
+        self.applyButton = [self tb_buttonWithTitle:@"应用" tag:0
+                                             action:@selector(applyTapped) danger:NO];
+        self.cancelApplyButton = [self tb_buttonWithTitle:@"取消应用" tag:0
+                                                   action:@selector(cancelApplyTapped) danger:YES];
+        self.cancelApplyButton.hidden = YES;
+        self.cancelApplyInActionRow = YES;      // 和应用/正在使用同一行
+        [self.actionButtons addObjectsFromArray:@[self.applyButton, self.cancelApplyButton]];
     }
 
-    // 5.5) 两个 AnemoneEffects 开关（叠加层 / 阴影）：同款玻璃按钮 + 开/关状态
-    NSArray *fxTitles = @[@"叠加层", @"阴影"];
-    for (NSInteger i = 0; i < (NSInteger)fxTitles.count; i++) {
-        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-        b.tag = i;
-        [b setTitle:fxTitles[i] forState:UIControlStateNormal];
-        TBApplyToolbarGlass(b, NO);
-        [b addTarget:self action:@selector(fxTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [self.sheet addSubview:b];
-        [self.fxButtons addObject:b];
-
-        UIImageView *check = [[UIImageView alloc] initWithImage:
-                              [[UIImage systemImageNamed:@"checkmark"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]];
-        check.tintColor = [UIColor systemBlueColor];
-        check.contentMode = UIViewContentModeScaleAspectFit;
-        check.hidden = YES;
-        [b addSubview:check];
-        [self.fxChecks addObject:check];
-    }
-
-    // 6) 底部一行三个入口：应用主题 / 导入遮罩 / 详情
-    self.applyButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.applyButton setTitle:@"应用主题" forState:UIControlStateNormal];
-    TBApplyToolbarGlass(self.applyButton, NO);
-    [self.applyButton addTarget:self action:@selector(applyTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.sheet addSubview:self.applyButton];
-
-    self.importMaskButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.importMaskButton setTitle:@"导入遮罩" forState:UIControlStateNormal];
-    TBApplyToolbarGlass(self.importMaskButton, NO);
-    [self.importMaskButton addTarget:self action:@selector(importMaskTapped)
-                            forControlEvents:UIControlEventTouchUpInside];
-    [self.sheet addSubview:self.importMaskButton];
-
-    self.detailButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.detailButton setTitle:@"详情" forState:UIControlStateNormal];
-    TBApplyToolbarGlass(self.detailButton, NO);
-    [self.detailButton addTarget:self action:@selector(detailTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.sheet addSubview:self.detailButton];
-
-    // 7) 拖拽手势：作用在抽屉整块上（落在按钮上也算，拖动会顺手取消按钮的高亮）
+    // 7) 拖拽手势：作用在抽屉整块上
     self.pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
     self.pan.delegate = self;
     [self.sheet addGestureRecognizer:self.pan];
 
-    self.titleLabel.text = self.theme.name.length ? self.theme.name : @"主题";
+    self.titleLabel.text = self.theme.name.length ? self.theme.name : (self.isAssetPack ? @"素材" : @"主题");
     self.offset = 10000.0;      // 出场前先藏在屏外，首帧不会闪
     self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
 
-    [self refreshOptionSelection];
+    [self refreshState];
     [self tb_refreshDynamicColors];
 }
 
@@ -293,7 +274,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     [self tb_refreshDynamicColors];
 }
 
-/// 深浅色切换时重新解一次动态色（按钮底、玻璃填充、指示条等）
+/// 深浅色切换时重新解一次动态色
 - (void)tb_refreshDynamicColors {
     self.sheetFillView.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
                                                         [UIColor colorWithWhite:0.10 alpha:0.62]);
@@ -301,21 +282,25 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
                                                    [UIColor colorWithWhite:1 alpha:0.20]);
     self.handle.backgroundColor = TBDynamicColor([UIColor colorWithWhite:0 alpha:0.18],
                                                  [UIColor colorWithWhite:1 alpha:0.35]);
-    for (UIButton *b in self.optionButtons) TBApplyToolbarGlass(b, NO);
+    for (UIButton *b in self.choiceButtons) TBApplyToolbarGlass(b, NO);
     for (UIButton *b in self.fxButtons) TBApplyToolbarGlass(b, NO);
     TBApplyToolbarGlass(self.applyButton, NO);
-    TBApplyToolbarGlass(self.importMaskButton, NO);
+    TBApplyToolbarGlass(self.importButton, NO);
     TBApplyToolbarGlass(self.detailButton, NO);
-    [self refreshOptionSelection];
+    TBApplyToolbarGlass(self.cancelApplyButton, YES);
+    if (!self.isAssetPack) [self tb_stylePrimary:self.applyButton];
+    [self refreshState];
 }
 
-/// 选中态：亮一点的白玻璃 + 蓝色描边 + 右侧对勾（看得出当前是哪一个）
-- (void)tb_applySelectionStyle:(UIButton *)b selected:(BOOL)selected {
-    UIImageView *check = (b.tag >= 0 && b.tag < (NSInteger)self.optionChecks.count) ? self.optionChecks[b.tag] : nil;
-    [self tb_applySelectedLook:b selected:selected check:check];
+/// 主功能按钮（应用主题 / 应用）：和其它按钮同款玻璃、同高同宽，
+/// 只用「蓝字 + 半粗」强调（位置也在正中间，一眼能看到）
+- (void)tb_stylePrimary:(UIButton *)b {
+    if (!b || b.hidden) return;
+    TBApplyToolbarGlass(b, NO);
+    [b setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
 }
 
-/// 通用"选中"外观（蓝色描边 + 右侧对勾），check 由调用方给
+/// 选中态：亮一点的白玻璃 + 蓝色描边 + 右侧对勾
 - (void)tb_applySelectedLook:(UIButton *)b selected:(BOOL)selected check:(UIImageView *)check {
     if (selected) {
         b.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.88],
@@ -332,7 +317,7 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     check.hidden = !selected;
 }
 
-#pragma mark - 布局
+#pragma mark - 布局（唯一写 sheet 几何的地方）
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
@@ -340,11 +325,43 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     CGFloat H = self.view.bounds.size.height;
     if (W < 1 || H < 1) return;
 
+    // dim 只跟 view 一样大，不参与 sheet 的位移，动画期间改它也不会跳
     self.dimView.frame = self.view.bounds;
 
-    // ---- 内容：按实际控件尺寸紧凑排布，算完得到内容高度 ----
+    // 兜底：动画已被系统打断（切后台 / 被打断）时别把 animator 永远留着，
+    // 否则所有布局都会被 early-return 挡掉，抽屉再也摆不正
+    if (self.animator && self.animator.state != UIViewAnimatingStateActive) {
+        self.animator = nil;
+    }
+
+    // ---- 先把内容按当前宽度排一遍，拿到真实内容高度 ----
+    CGFloat contentH = [self tb_layoutContentWithWidth:W];
+    CGFloat maxH = round(H * kTBSheetMaxRatio);
+    CGFloat expandedH = MIN(round(contentH), maxH);
+    expandedH = MAX(expandedH, 200.0);
+    self.sheetHeight = expandedH;
+    self.anchors = @[ @(0.0), @(round(expandedH * 0.5)), @(expandedH) ];
+
+    // ★ 关键：动画中 / 关闭中，绝不回写 sheet 的 frame / transform / dim.alpha
+    //   （上一版在这里 `self.sheet.frame = ...`，而 sheet 带着非 identity 的 transform，
+    //    给带 transform 的 view 设 frame 是未定义行为 → 关闭时先"弹高一下"）
+    if (self.closing || self.animator) {
+        self.pendingSheetHeight = expandedH;
+        return;
+    }
+
+    // 静止态：先把 transform 归零再设 frame（此时设 frame 才是确定的），最后再套位移
+    self.sheet.transform = CGAffineTransformIdentity;
+    self.sheet.frame = CGRectMake(0, H - expandedH, W, expandedH);
+    self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
+    self.dimView.alpha = [self dimAlphaForOffset:self.offset];
+    self.hairline.frame = CGRectMake(0, 0, W, 1.0 / [UIScreen mainScreen].scale);
+}
+
+/// 排内容（也顺手把每个按钮的 frame 定好），返回内容需要的高度
+- (CGFloat)tb_layoutContentWithWidth:(CGFloat)W {
     CGFloat pad = kTBSheetPad;
-    CGFloat innerW = W - pad * 2;
+    CGFloat innerW = MAX(1.0, W - pad * 2);
     CGFloat y = kTBSheetTopPad;
 
     self.handle.frame = CGRectMake((W - 36) / 2.0, y, 36, 5);
@@ -356,168 +373,601 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     self.hintLabel.frame = CGRectMake(pad, y, innerW, 16);
     y += 20;
 
-    for (UIButton *b in self.optionButtons) {
+    for (UIButton *b in self.choiceButtons) {
         b.frame = CGRectMake(pad, y, innerW, kTBRowHeight);
-        UIImageView *check = self.optionChecks[b.tag];
-        check.frame = CGRectMake(innerW - 30, (kTBRowHeight - 18) / 2.0, 18, 18);
         y += kTBRowHeight + kTBRowGap;
     }
-    y -= kTBRowGap;
-    y += 12;
+    if (self.choiceButtons.count) {
+        y -= kTBRowGap;
+        y += 12;
+    }
 
-    // 叠加层 / 阴影：一行两个，各半宽
-    CGFloat half = (innerW - kTBRowGap) / 2.0;
-    if (self.fxButtons.count >= 2) {
-        for (NSInteger i = 0; i < 2; i++) {
+    if (self.fxButtons.count) {
+        CGFloat third = (innerW - kTBRowGap * 2) / 3.0;
+        for (NSInteger i = 0; i < (NSInteger)self.fxButtons.count; i++) {
             UIButton *b = self.fxButtons[i];
-            b.frame = CGRectMake(pad + i * (half + kTBRowGap), y, half, kTBRowHeight);
-            UIImageView *check = self.fxChecks[i];
-            check.frame = CGRectMake(half - 24, (kTBRowHeight - 18) / 2.0, 18, 18);
+            b.frame = CGRectMake(pad + i * (third + kTBRowGap), y, third, kTBRowHeight);
         }
-        y += kTBRowHeight + kTBRowGap;
+        y += kTBRowHeight + 12;
     }
 
-    CGFloat third = (innerW - kTBRowGap * 2) / 3.0;
-    self.applyButton.frame = CGRectMake(pad, y, third, kTBRowHeight);
-    self.importMaskButton.frame = CGRectMake(pad + third + kTBRowGap, y, third, kTBRowHeight);
-    self.detailButton.frame = CGRectMake(pad + (third + kTBRowGap) * 2, y, third, kTBRowHeight);
-    y += kTBRowHeight;
+    // 底部按钮行：只排可见的，等宽
+    NSMutableArray<UIButton *> *vis = [NSMutableArray array];
+    for (UIButton *b in self.actionButtons) if (!b.hidden) [vis addObject:b];
+    if (vis.count) {
+        CGFloat gap = kTBRowGap;
+        CGFloat w = (innerW - gap * (vis.count - 1)) / MAX(1, (CGFloat)vis.count);
+        for (NSInteger i = 0; i < (NSInteger)vis.count; i++) {
+            vis[i].frame = CGRectMake(pad + i * (w + gap), y, w, kTBRowHeight);
+        }
+        y += kTBRowHeight;
+    }
+
+    if (!self.cancelApplyInActionRow && !self.cancelApplyButton.hidden) {
+        y += kTBRowGap;
+        self.cancelApplyButton.frame = CGRectMake(pad, y, innerW, kTBRowHeight);
+        y += kTBRowHeight;
+    }
+
+    // 对勾贴右边（每个按钮自己的坐标）
+    for (NSInteger i = 0; i < (NSInteger)self.choiceButtons.count; i++) {
+        UIButton *b = self.choiceButtons[i];
+        if (i < (NSInteger)self.choiceChecks.count) {
+            self.choiceChecks[i].frame = CGRectMake(b.bounds.size.width - 30,
+                                                    (b.bounds.size.height - 18) / 2.0, 18, 18);
+        }
+    }
+    for (NSInteger i = 0; i < (NSInteger)self.fxButtons.count; i++) {
+        UIButton *b = self.fxButtons[i];
+        if (i < (NSInteger)self.fxChecks.count) {
+            self.fxChecks[i].frame = CGRectMake(b.bounds.size.width - 26,
+                                                (b.bounds.size.height - 18) / 2.0, 18, 18);
+        }
+    }
 
     CGFloat safeBottom = MAX(self.view.safeAreaInsets.bottom, 10);
-    self.contentHeight = y + safeBottom + kTBSheetBottomPad;
-
-    // ---- 抽屉高度 = 内容高度（不再按屏高比例撑开 → 展开态下方不会剩一大段空白）----
-    CGFloat maxH = round(H * kTBSheetMaxRatio);
-    CGFloat expandedH = MIN(round(self.contentHeight), maxH);
-    expandedH = MAX(expandedH, 200.0);
-    self.sheetHeight = expandedH;
-
-    self.sheet.frame = CGRectMake(0, H - expandedH, W, expandedH);
-    self.hairline.frame = CGRectMake(0, 0, W, 1.0 / [UIScreen mainScreen].scale);
-
-    // 锚点（位移，正数往下）：
-    //   0              展开（抽屉顶贴到内容高度处）—— 就是"缩小后"的常态
-    //   expandedH / 2  中间（只露出内容的一半）
-    //   expandedH      收起（完全推出屏外）
-    self.anchors = @[ @(0.0), @(round(expandedH * 0.5)), @(expandedH) ];
-
-    // 动画中（含收起过程）不做模型回写，避免和弹簧/淡出打架导致闪一下
-    if (self.animator || self.closing) return;
-    if (!self.appeared) self.offset = expandedH;
-    self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
-    self.dimView.alpha = [self dimAlphaForOffset:self.offset];
+    return y + safeBottom + kTBSheetBottomPad;
 }
 
-#pragma mark - 遮罩选项
+/// 从某个位移处逐渐淡入的 dim 透明度
+- (CGFloat)dimAlphaForOffset:(CGFloat)offset {
+    CGFloat hi = MAX(1.0, self.sheetHeight);
+    if (offset >= hi - 0.5) return 0;
+    CGFloat p = 1.0 - MAX(0.0, MIN(1.0, offset / hi));      // 0=收起 1=展开
+    return kTBDimMaxAlpha * (0.55 + 0.45 * p);
+}
 
-/// 当前是哪一个（读偏好，和引擎同一套判断优先级）
+#pragma mark - 状态刷新
+
+- (BOOL)tb_themeActive {
+    NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
+    return active.length && [active isEqualToString:self.theme.name];
+}
+
+- (BOOL)tb_hasMask {
+    return [self.theme iconMaskPath].length > 0 ||
+           [TBPrefs stringForKey:TBKeyCustomMaskPath].length > 0;
+}
+- (BOOL)tb_hasOverlay {
+    return [self.theme anemoneEffectPath:@"iPhoneOverlay"].length > 0 ||
+           [TBPrefs stringForKey:TBKeyCustomOverlayPath].length > 0;
+}
+- (BOOL)tb_hasShadow {
+    return [self.theme anemoneEffectPath:@"iPhoneShadow"].length > 0 ||
+           [TBPrefs stringForKey:TBKeyCustomShadowPath].length > 0;
+}
+- (BOOL)tb_hasBadge {
+    return [self.theme badgePath].length > 0 ||
+           [TBPrefs stringForKey:TBKeyCustomBadgePath].length > 0;
+}
+
+/// 当前形状模式（读偏好，和引擎同一套判断优先级）
 - (TBSheetMaskMode)currentMode {
-    if ([TBPrefs boolForKey:kTBKeyUseThemeIconMask defaultValue:NO]) return TBSheetMaskModeThemeMask;
-    if ([TBPrefs boolForKey:kTBKeyMaskCornerRadiusOn defaultValue:NO]) return TBSheetMaskModeCornerRadius;
+    if ([TBPrefs boolForKey:TBKeyUseThemeIconMask defaultValue:NO]) return TBSheetMaskModeThemeMask;
+    if ([TBPrefs boolForKey:TBKeyMaskCornerRadiusOn defaultValue:NO]) return TBSheetMaskModeCornerRadius;
     return TBSheetMaskModeSystem;
 }
 
-/// 主题里有没有「形状遮罩」（AnemoneEffects 的叠加层/阴影、icon_shortcut_mask 之类不算）
-- (BOOL)tb_themeMaskAvailable {
-    return [self.theme iconMaskPath].length > 0;
+/// 素材包：这一项是否已经指向本包并开启
+- (BOOL)tb_assetItemActive:(NSDictionary *)item {
+    NSString *cur = [TBPrefs stringForKey:item[@"key"]];
+    BOOL on = [TBPrefs boolForKey:[self tb_switchKeyForKind:item[@"kind"]] defaultValue:NO];
+    return on && cur.length && [cur isEqualToString:item[@"path"]];
 }
 
-- (void)refreshOptionSelection {
-    TBSheetMaskMode mode = [self currentMode];
-    BOOL hasMask = [self tb_themeMaskAvailable];
-    for (UIButton *b in self.optionButtons) {
-        BOOL selected = (b.tag == (NSInteger)mode);
-        [self tb_applySelectionStyle:b selected:selected];
-        if (b.tag == (NSInteger)TBSheetMaskModeThemeMask && !hasMask && !selected) {
-            // 主题没自带遮罩 → 这一项灰显（点了会给提示，见 optionTapped:）
-            b.alpha = 0.45;
-            [b setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
-        } else {
-            b.alpha = 1.0;
-            [b setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
-        }
+/// 素材包：所有可用项都已启用 → 视为「正在使用」
+- (BOOL)tb_assetPackApplied {
+    NSArray *items = [self.theme availableAssetItems];
+    if (!items.count) return NO;
+    for (NSDictionary *it in items) {
+        if (![self tb_assetItemActive:it]) return NO;
     }
+    return YES;
+}
 
-    // 叠加层 / 阴影开关：主题里没有素材就灰显（点了会给提示）
-    for (UIButton *b in self.fxButtons) {
-        BOOL isOverlay = (b.tag == 0);
-        NSString *base = isOverlay ? @"iPhoneOverlay" : @"iPhoneShadow";
-        NSString *key = isOverlay ? kTBKeyUseThemeIconOverlay : kTBKeyUseThemeIconShadow;
-        BOOL avail = [[self.theme anemoneEffectPath:base] length] > 0;
-        BOOL on = [TBPrefs boolForKey:key defaultValue:NO];
-        [b setTitle:[NSString stringWithFormat:@"%@：%@", (isOverlay ? @"叠加层" : @"阴影"), (on ? @"开" : @"关")]
-            forState:UIControlStateNormal];
-        UIImageView *check = (b.tag >= 0 && b.tag < (NSInteger)self.fxChecks.count) ? self.fxChecks[b.tag] : nil;
-        if (avail) {
-            [self tb_applySelectedLook:b selected:on check:check];
-            b.alpha = 1.0;
-            [b setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
-        } else {
-            [self tb_applySelectedLook:b selected:NO check:check];
-            b.alpha = 0.45;
-            [b setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+- (void)refreshState {
+    BOOL activeTheme = [self tb_themeActive];
+
+    if (!self.isAssetPack) {
+        TBSheetMaskMode mode = [self currentMode];
+        BOOL hasMask = [self tb_hasMask];
+        for (UIButton *b in self.choiceButtons) {
+            BOOL selected = (b.tag == (NSInteger)mode);
+            UIImageView *check = self.choiceChecks[b.tag];
+            BOOL available = (b.tag != (NSInteger)TBSheetMaskModeThemeMask) || hasMask;
+            if (!available && !selected) {
+                [self tb_applySelectedLook:b selected:NO check:check];
+                b.alpha = 0.45;
+                [b setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+            } else {
+                [self tb_applySelectedLook:b selected:selected check:check];
+                b.alpha = 1.0;
+                [b setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+            }
+            if (b.tag == (NSInteger)TBSheetMaskModeCornerRadius) {
+                double r = [TBPrefs doubleForKey:TBKeyMaskCornerRadius defaultValue:kTBDefaultMaskCornerRadius];
+                NSString *t = selected ? [NSString stringWithFormat:@"自定义圆角 %.2f", r] : @"自定义圆角";
+                [b setTitle:t forState:UIControlStateNormal];
+            }
         }
-    }
 
-    if (mode == TBSheetMaskModeThemeMask && hasMask) {
-        self.hintLabel.text = @"图标遮罩：主题遮罩图中（点一下立即生效）";
-    } else if (mode == TBSheetMaskModeThemeMask && !hasMask) {
-        self.hintLabel.text = @"图标遮罩：主题里没有遮罩图，引擎会落到系统形状";
-    } else if (hasMask) {
-        self.hintLabel.text = @"图标遮罩：主题里已有遮罩图，可切到「主题遮罩图」";
+        // 边框 / 阴影 / 角标
+        for (UIButton *b in self.fxButtons) {
+            NSInteger i = b.tag;
+            NSString *key = (i == 0) ? TBKeyUseThemeIconOverlay : ((i == 1) ? TBKeyUseThemeIconShadow : TBKeyUseThemeBadge);
+            BOOL avail = (i == 0) ? [self tb_hasOverlay] : ((i == 1) ? [self tb_hasShadow] : [self tb_hasBadge]);
+            BOOL on = [TBPrefs boolForKey:key defaultValue:NO];
+            UIImageView *check = (i < (NSInteger)self.fxChecks.count) ? self.fxChecks[i] : nil;
+            [self tb_applySelectedLook:b selected:(avail && on) check:check];
+            if (!avail) {
+                b.alpha = 0.45;
+                [b setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+            } else {
+                b.alpha = 1.0;
+                [b setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+            }
+            [b setTitle:[NSString stringWithFormat:@"%@：%@", @[@"边框", @"阴影", @"角标"][MIN(i, 2)],
+                        (on ? @"开" : @"关")] forState:UIControlStateNormal];
+            if (avail && on) [self tb_styleFxOn:b];
+        }
+
+        // 底部：应用主题 / 正在使用
+        [self.applyButton setTitle:(activeTheme ? @"正在使用" : @"应用主题") forState:UIControlStateNormal];
+        [self tb_stylePrimary:self.applyButton];
+        self.applyButton.alpha = activeTheme ? 0.55 : 1.0;
+        self.cancelApplyButton.hidden = !activeTheme;
+        self.importButton.hidden = NO;
+        self.detailButton.hidden = NO;
+
+        // 说明文字
+        if (mode == TBSheetMaskModeThemeMask) {
+            self.hintLabel.text = hasMask ? @"图标形状：遮罩（主题遮罩图 / 自定义遮罩）"
+                                          : @"图标形状：遮罩（主题里没有遮罩图，引擎会落到系统形状）";
+        } else if (mode == TBSheetMaskModeCornerRadius) {
+            double r = [TBPrefs doubleForKey:TBKeyMaskCornerRadius defaultValue:kTBDefaultMaskCornerRadius];
+            self.hintLabel.text = [NSString stringWithFormat:@"图标形状：自定义圆角 %.2f ≈ 宽度的 %.2f%%",
+                                   r, (r / 60.0) * 100.0];
+        } else {
+            self.hintLabel.text = hasMask ? @"图标形状：默认（系统形状，主题里带遮罩图）"
+                                          : @"图标形状：默认（系统形状）";
+        }
     } else {
-        self.hintLabel.text = @"图标遮罩：点一下立即生效，也可「导入遮罩」";
+        // 素材包：逐项显示是否已启用
+        NSArray<NSDictionary *> *items = [self.theme availableAssetItems];
+        for (NSInteger i = 0; i < (NSInteger)self.choiceButtons.count && i < (NSInteger)items.count; i++) {
+            UIButton *b = self.choiceButtons[i];
+            BOOL on = [self tb_assetItemActive:items[i]];
+            [self tb_applySelectedLook:b selected:on check:self.choiceChecks[i]];
+            [b setTitle:[NSString stringWithFormat:@"%@%@", items[i][@"title"], (on ? @"（已启用）" : @"")]
+              forState:UIControlStateNormal];
+            b.alpha = 1.0;
+            [b setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+        }
+        BOOL applied = [self tb_assetPackApplied];
+        [self.applyButton setTitle:(applied ? @"正在使用" : @"应用") forState:UIControlStateNormal];
+        [self tb_stylePrimary:self.applyButton];
+        self.applyButton.alpha = applied ? 0.55 : 1.0;
+        self.applyButton.hidden = NO;
+        self.cancelApplyButton.hidden = !applied;
+
+        NSMutableArray *names = [NSMutableArray array];
+        for (NSDictionary *it in items) [names addObject:it[@"title"]];
+        self.hintLabel.text = [NSString stringWithFormat:@"素材包 · 可提供：%@", [names componentsJoinedByString:@" / "]];
     }
+
+    // 行数/标题变了 → 重新排一次；动画中 layout 会自己早退，安全
+    [self.view setNeedsLayout];
 }
 
-- (void)optionTapped:(UIButton *)sender {
+/// 「开」状态的玻璃按钮：淡蓝底 + 蓝字（不用描边，和选中态区分）
+- (void)tb_styleFxOn:(UIButton *)b {
+    b.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.16];
+    [b setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+}
+
+#pragma mark - 交互
+
+- (void)choiceTapped:(UIButton *)sender {
+    if (self.isAssetPack) return;
     TBSheetMaskMode mode = (TBSheetMaskMode)sender.tag;
-    if (mode == TBSheetMaskModeThemeMask && ![self tb_themeMaskAvailable]) {
+    if (mode == TBSheetMaskModeThemeMask && ![self tb_hasMask]) {
         [self tb_alert:@"这个主题没有自带遮罩"
-               message:@"它里面没有形状遮罩文件（IconBundles/Icon.png、icon.png、AppIconMask* 等）。\n先点「导入遮罩」选一张图，再切到「主题遮罩图」。"];
+               message:@"它里面没有形状遮罩文件（IconBundles/Icon.png、icon.png、AppIconMask* 等），也没有全局自定义遮罩。\n先点「导入遮罩」选一张图，或从素材包里应用一个遮罩，再切到「遮罩」。"];
         return;
     }
-    switch (mode) {
-        case TBSheetMaskModeSystem:
-            [TBPrefs setBool:NO forKey:kTBKeyUseThemeIconMask];
-            [TBPrefs setBool:NO forKey:kTBKeyMaskCornerRadiusOn];
-            break;
-        case TBSheetMaskModeThemeMask:
-            [TBPrefs setBool:YES forKey:kTBKeyUseThemeIconMask];
-            [TBPrefs setBool:NO forKey:kTBKeyMaskCornerRadiusOn];
-            break;
-        case TBSheetMaskModeCornerRadius: {
-            [TBPrefs setBool:NO forKey:kTBKeyUseThemeIconMask];
-            [TBPrefs setBool:YES forKey:kTBKeyMaskCornerRadiusOn];
-            // 半径必须有合法值，没设过就补默认 13.42（引擎自己会夹到 宽/2）
-            double r = [TBPrefs doubleForKey:kTBKeyMaskCornerRadius defaultValue:kTBDefaultMaskCornerRadius];
-            if (!(r > 0.0)) r = kTBDefaultMaskCornerRadius;
-            [TBPrefs setDouble:r forKey:kTBKeyMaskCornerRadius];
-            break;
-        }
+    if (mode == TBSheetMaskModeCornerRadius) {
+        [self tb_showRadiusPanel];     // 自定义圆角 → 自绘面板（滑块 + 输入框）
+        return;
     }
-    [TBPrefs notifyChanged];      // 立刻通知引擎重画
-    [self refreshOptionSelection];
+    if (mode == TBSheetMaskModeSystem) {
+        [TBPrefs setBool:NO forKey:TBKeyUseThemeIconMask];
+        [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];
+    } else {
+        [TBPrefs setBool:YES forKey:TBKeyUseThemeIconMask];
+        [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];
+        double r = [TBPrefs doubleForKey:TBKeyMaskCornerRadius defaultValue:kTBDefaultMaskCornerRadius];
+        if (!(r > 0.0)) [TBPrefs setDouble:kTBDefaultMaskCornerRadius forKey:TBKeyMaskCornerRadius];
+    }
+    [TBPrefs notifyChanged];
+    [self refreshState];
 }
 
-/// 叠加层 / 阴影开关：主题里真的没有素材就不动偏好，只给提示
+/// 素材包：点一项 = 设全局 Custom*Path + 开对应开关（再点一次关掉）
+- (void)assetItemTapped:(UIButton *)sender {
+    NSArray<NSDictionary *> *items = [self.theme availableAssetItems];
+    NSInteger i = sender.tag;
+    if (i < 0 || i >= (NSInteger)items.count) return;
+    NSDictionary *it = items[i];
+    NSString *key = it[@"key"];
+    NSString *switchKey = [self tb_switchKeyForKind:it[@"kind"]];
+    if ([self tb_assetItemActive:it]) {
+        [TBPrefs setBool:NO forKey:switchKey];
+    } else {
+        [TBPrefs setString:it[@"path"] forKey:key];
+        [TBPrefs setBool:YES forKey:switchKey];
+        if ([it[@"kind"] isEqualToString:@"mask"]) {
+            [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];   // 遮罩优先，别和圆角打架
+        }
+    }
+    [TBPrefs notifyChanged];
+    [self refreshState];
+}
+
 - (void)fxTapped:(UIButton *)sender {
-    BOOL isOverlay = (sender.tag == 0);
-    NSString *base = isOverlay ? @"iPhoneOverlay" : @"iPhoneShadow";
-    NSString *key = isOverlay ? kTBKeyUseThemeIconOverlay : kTBKeyUseThemeIconShadow;
-    if ([[self.theme anemoneEffectPath:base] length] == 0) {
-        [self tb_alert:(isOverlay ? @"这个主题没有叠加层素材" : @"这个主题没有阴影素材")
-               message:[NSString stringWithFormat:
-                        @"它里面没有 AnemoneEffects/%@.png（@3x / @2x / 无后缀都找过了）。\n开启也不会有任何变化，所以没有改动设置。", base]];
+    if (self.isAssetPack) return;
+    NSInteger i = sender.tag;
+    NSString *key = (i == 0) ? TBKeyUseThemeIconOverlay : ((i == 1) ? TBKeyUseThemeIconShadow : TBKeyUseThemeBadge);
+    BOOL avail = (i == 0) ? [self tb_hasOverlay] : ((i == 1) ? [self tb_hasShadow] : [self tb_hasBadge]);
+    NSString *name = (i == 0) ? @"边框" : ((i == 1) ? @"阴影" : @"角标");
+    if (!avail) {
+        NSString *detail = (i == 2)
+            ? @"主题/素材包里没有 Bundles/SBBadgeBG@3x.png、Bundles/com.apple.springboard/SBBadgeBG@3x.png，也没有全局自定义角标。\n开启也不会有任何变化，所以没有改动设置。"
+            : [NSString stringWithFormat:@"它里面没有 AnemoneEffects/%@.png（@3x / @2x / 无后缀都找过了），也没有全局自定义素材。\n开启也不会有任何变化，所以没有改动设置。",
+               (i == 0 ? @"iPhoneOverlay" : @"iPhoneShadow")];
+        [self tb_alert:[NSString stringWithFormat:@"这个主题没有%@素材", name] message:detail];
         return;
     }
     BOOL on = [TBPrefs boolForKey:key defaultValue:NO];
     [TBPrefs setBool:!on forKey:key];
-    [TBPrefs notifyChanged];                 // 引擎立刻重画出图
-    [self refreshOptionSelection];
+    [TBPrefs notifyChanged];
+    [self refreshState];
 }
 
-#pragma mark - 导入遮罩
+/// 自定义圆角：自绘玻璃面板（数值输入框 + 滑块双向联动），不用系统 UIAlertController
+- (void)tb_showRadiusPanel {
+    double cur = [TBPrefs doubleForKey:TBKeyMaskCornerRadius defaultValue:kTBDefaultMaskCornerRadius];
+    if (!(cur >= 0.0) || cur > 30.0) cur = kTBDefaultMaskCornerRadius;
+    __weak typeof(self) wself = self;
+    TBRadiusPanelController *p = [TBRadiusPanelController panelWithValue:cur
+                                                                handler:^(BOOL confirmed, double value) {
+        __strong typeof(self) s = wself;
+        if (!s || !confirmed) return;
+        [TBPrefs setBool:YES forKey:TBKeyMaskCornerRadiusOn];
+        [TBPrefs setBool:NO forKey:TBKeyUseThemeIconMask];
+        [TBPrefs setDouble:value forKey:TBKeyMaskCornerRadius];
+        [TBPrefs notifyChanged];
+        [s refreshState];
+    }];
+    [p presentOver:self];
+}
+
+#pragma mark - 应用 / 取消应用
+
+- (void)applyTapped {
+    if (self.isAssetPack) {
+        for (NSDictionary *it in [self.theme availableAssetItems]) {
+            [TBPrefs setString:it[@"path"] forKey:it[@"key"]];
+            [TBPrefs setBool:YES forKey:[self tb_switchKeyForKind:it[@"kind"]]];
+        }
+        [TBPrefs notifyChanged];
+        [self refreshState];
+        return;   // 素材包不关抽屉：用户可以继续微调
+    }
+    // 与详情页「应用这个主题」完全一致
+    [TBPrefs setString:self.theme.name forKey:TBKeyActiveTheme];
+    [TBPrefs setBool:YES forKey:TBKeyEnabled];
+    [TBPrefs notifyChanged];
+    [self refreshState];
+    __weak typeof(self) wself = self;
+    [self closeThen:^{
+        __strong typeof(self) s = wself;
+        if (s.onApply) s.onApply(s.theme);
+    }];
+}
+
+- (void)cancelApplyTapped {
+    if (self.isAssetPack) {
+        [TBPrefs setString:nil forKey:TBKeyCustomMaskPath];
+        [TBPrefs setString:nil forKey:TBKeyCustomOverlayPath];
+        [TBPrefs setString:nil forKey:TBKeyCustomShadowPath];
+        [TBPrefs setString:nil forKey:TBKeyCustomBadgePath];
+        [TBPrefs setBool:NO forKey:TBKeyUseThemeIconMask];
+        [TBPrefs setBool:NO forKey:TBKeyUseThemeIconOverlay];
+        [TBPrefs setBool:NO forKey:TBKeyUseThemeIconShadow];
+        [TBPrefs setBool:NO forKey:TBKeyUseThemeBadge];
+        [TBPrefs notifyChanged];
+        [self refreshState];
+        return;
+    }
+    if (![self tb_themeActive]) return;
+    [TBPrefs setString:nil forKey:TBKeyActiveTheme];
+    [TBPrefs notifyChanged];
+    [self refreshState];
+}
+
+/// 详情：不做「先收回再 push」的两次动画 —— 直接 dismiss(NO)，再由宿主 push
+- (void)detailTapped {
+    if (self.closing) return;
+    self.closing = YES;                 // 立刻冻结布局回写，避免 dismiss 期间再动 sheet
+    self.view.userInteractionEnabled = NO;
+    __weak typeof(self) wself = self;
+    [self dismissViewControllerAnimated:NO completion:^{
+        __strong typeof(self) s = wself;
+        if (s.onDetail) s.onDetail(s.theme);
+    }];
+}
+
+- (void)dimTapped {
+    [self closeThen:nil];
+}
+
+#pragma mark - 关闭（唯一出口：0.30 / 0.90 + 同一动画块里位移与淡出）
+
+- (void)closeThen:(void (^)(void))then {
+    [self tb_closeWithVelocity:0 then:then];
+}
+
+- (void)tb_closeWithVelocity:(CGFloat)vy then:(void (^)(void))then {
+    if (self.closing) return;
+    // ① 先把「看得见的位置」从 presentationLayer 写回模型，再开始关闭动画
+    [self tb_freezeToPresentation];
+    self.closing = YES;
+    self.view.userInteractionEnabled = NO;
+
+    __weak typeof(self) wself = self;
+    [self tb_animateTo:self.sheetHeight
+              dimAlpha:0
+              duration:kTBCloseDuration
+               damping:kTBCloseDamping
+              velocity:vy
+            completion:^{
+        __strong typeof(self) s = wself;
+        if (!s) return;
+        s.offset = s.sheetHeight;
+        s.dimView.alpha = 0;
+        s.dimView.hidden = YES;
+        [s dismissViewControllerAnimated:NO completion:^{      // 只 dismiss 一次
+            if (then) then();
+        }];
+    }];
+}
+
+#pragma mark - 拖动（橡皮筋 + 速度吸附）
+
+/// 阻尼橡皮筋：越过边界后按 1 - 1/(over*k+1) 衰减
+- (CGFloat)rubberBand:(CGFloat)raw {
+    CGFloat lo = self.anchors.firstObject.doubleValue;   // 展开
+    CGFloat hi = self.anchors.lastObject.doubleValue;    // 收起
+    CGFloat dim = MAX(1.0, self.sheetHeight);
+    if (raw < lo) {
+        CGFloat over = lo - raw;
+        return lo - (over * dim * kTBRubberK) / (dim + kTBRubberK * over);
+    }
+    if (raw > hi) {
+        CGFloat over = raw - hi;
+        return hi + (over * dim * kTBRubberK) / (dim + kTBRubberK * over);
+    }
+    return raw;
+}
+
+- (NSInteger)nearestAnchorForOffset:(CGFloat)offset {
+    NSInteger best = 0;
+    CGFloat bestDist = CGFLOAT_MAX;
+    for (NSInteger i = 0; i < (NSInteger)self.anchors.count; i++) {
+        CGFloat d = fabs(self.anchors[i].doubleValue - offset);
+        if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return best;
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    if (self.closing) return;
+    CGPoint v = [pan velocityInView:self.view];
+    CGFloat dy = [pan translationInView:self.view].y;
+
+    switch (pan.state) {
+        case UIGestureRecognizerStateBegan: {
+            [self tb_freezeToPresentation];     // 动画中途接管：冻结在看得见的位置
+            self.dragStartOffset = self.offset;
+            break;
+        }
+        case UIGestureRecognizerStateChanged: {
+            CGFloat raw = self.dragStartOffset + dy;
+            self.offset = [self rubberBand:raw];
+            self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
+            // dim 跟手淡出（只在拖动时改 alpha，不碰 hidden）
+            self.dimView.alpha = [self dimAlphaForOffset:self.offset];
+            break;
+        }
+        default: {   // ended / cancelled / failed
+            CGFloat vy = v.y;
+            CGFloat projected = self.offset + vy * kTBSnapProjection;   // 用落点预判
+            NSInteger cur = [self nearestAnchorForOffset:self.offset];
+            NSInteger want = [self nearestAnchorForOffset:projected];
+            if (vy > kTBSnapVelocity && want <= cur) want = MIN(cur + 1, (NSInteger)self.anchors.count - 1);
+            if (vy < -kTBSnapVelocity && want >= cur) want = MAX(cur - 1, 0);
+            [self settleToAnchor:want velocity:vy];
+            break;
+        }
+    }
+}
+
+/// 停止在飞的动画，并把模型值对齐到当前视觉位置（避免接管瞬间跳变）
+- (void)tb_freezeToPresentation {
+    CALayer *pl = self.sheet.layer.presentationLayer;
+    CALayer *dl = self.dimView.layer.presentationLayer;
+    CGFloat visualOffset = pl ? pl.transform.m42 : self.offset;
+    CGFloat visualAlpha  = dl ? dl.opacity : self.dimView.alpha;
+    if (!isfinite(visualOffset)) visualOffset = self.offset;
+    if (!isfinite(visualAlpha)) visualAlpha = self.dimView.alpha;
+
+    if (self.animator) {
+        [self.animator stopAnimation:NO];      // 不跳到终点，停在当前位置
+        self.animator = nil;
+    }
+    [self.sheet.layer removeAllAnimations];
+    [self.dimView.layer removeAllAnimations];
+
+    self.offset = visualOffset;
+    self.sheet.transform = CGAffineTransformMakeTranslation(0, visualOffset);
+    self.dimView.alpha = visualAlpha;
+}
+
+/// 吸附到某个锚点；收到「收起」锚点走统一的 close（同 0.30 / 0.90）
+- (void)settleToAnchor:(NSInteger)idx velocity:(CGFloat)vy {
+    idx = MAX(0, MIN(idx, (NSInteger)self.anchors.count - 1));
+    if (idx == (NSInteger)self.anchors.count - 1) {
+        [self tb_closeWithVelocity:vy then:nil];
+        return;
+    }
+    self.anchorIndex = idx;
+    [self tb_animateTo:self.anchors[idx].doubleValue
+              dimAlpha:-1
+              duration:kTBSettleDuration
+               damping:kTBSettleDamping
+              velocity:vy
+            completion:nil];
+}
+
+#pragma mark - 唯一的动画执行器
+
+/// to: 目标位移；dimAlpha < 0 表示按 offset 自动算
+/// 位移与 dim 在**同一个** animations block 里，时长/阻尼由调用方给死：
+///   打开 0.36 / 0.88、关闭 0.30 / 0.90、拖动收尾 0.34 / 0.88
+- (void)tb_animateTo:(CGFloat)to
+            dimAlpha:(CGFloat)dimAlpha
+            duration:(NSTimeInterval)duration
+             damping:(CGFloat)damping
+            velocity:(CGFloat)vy
+          completion:(void (^)(void))done {
+    if (self.animator) {                    // 理论不重入：保险起见只保留最后一个
+        [self.animator stopAnimation:NO];
+        self.animator = nil;
+    }
+    [self.sheet.layer removeAllAnimations];
+    [self.dimView.layer removeAllAnimations];
+
+    CGFloat from = self.offset;
+    CGFloat dist = to - from;
+    CGFloat normalized = 0.0;
+    if (fabs(dist) > 0.5 && fabs(vy) > 1.0) {
+        normalized = vy / fabs(dist);       // 速度归一化：pt/s ÷ 行程 → 行程比例/s
+        normalized = MAX(-6.0, MIN(6.0, normalized));
+    }
+
+    UISpringTimingParameters *spring =
+        [[UISpringTimingParameters alloc] initWithDampingRatio:damping
+                                               initialVelocity:CGVectorMake(0, normalized)];
+    UIViewPropertyAnimator *an = [[UIViewPropertyAnimator alloc] initWithDuration:duration
+                                                                timingParameters:spring];
+    self.animator = an;
+
+    __weak typeof(self) wself = self;
+    [an addAnimations:^{
+        __strong typeof(self) s = wself;
+        if (!s) return;
+        s.offset = to;
+        s.sheet.transform = CGAffineTransformMakeTranslation(0, to);
+        s.dimView.alpha = (dimAlpha < 0) ? [s dimAlphaForOffset:to] : dimAlpha;
+    }];
+    [an addCompletion:^(UIViewAnimatingPosition position) {
+        __strong typeof(self) s = wself;
+        if (!s) return;
+        if (s.animator == an) s.animator = nil;
+        if (position != UIViewAnimatingPositionEnd) return;
+        s.offset = to;
+        s.pendingSheetHeight = 0;
+        if (done) done();
+    }];
+    [an startAnimation];
+}
+
+#pragma mark - 出现
+
+- (void)presentOver:(UIViewController *)host {
+    if (!host || self.presentingViewController || self.presentedViewController) return;
+    self.modalPresentationStyle = UIModalPresentationOverFullScreen;   // 不用 UISheetPresentationController
+    self.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    [host presentViewController:self animated:NO completion:^{         // 系统动画关掉，自己动
+        [self animateIn];
+    }];
+}
+
+- (void)animateIn {
+    [self.view layoutIfNeeded];       // 先把几何算出来（锚点在这里生成）
+    self.appeared = YES;
+    self.offset = self.sheetHeight;   // 从屏外开始
+    self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
+    self.dimView.alpha = 0;
+    self.anchorIndex = 0;
+    [self tb_animateTo:0
+              dimAlpha:kTBDimMaxAlpha
+              duration:kTBOpenDuration
+               damping:kTBOpenDamping
+              velocity:0
+            completion:nil];
+}
+
+#pragma mark - 尺寸变化
+
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    if (self.closing) return;
+    [self tb_freezeToPresentation];
+    __weak typeof(self) wself = self;
+    [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> ctx) {
+        __strong typeof(self) s = wself;
+        if (!s || s.closing) return;
+        // 尺寸变了：回到展开态再重新排，避免用旧高度算出的位移
+        s.appeared = YES;
+        s.offset = 0;
+        [s.view setNeedsLayout];
+        [s.view layoutIfNeeded];
+        [s tb_animateTo:0 dimAlpha:kTBDimMaxAlpha duration:0.2 damping:0.9 velocity:0 completion:nil];
+    }];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // 从后台回来 / 系统打断了动画的兜底：位置不正就吸回展开态
+    if (!self.closing && !self.animator && self.appeared && fabs(self.offset) > 0.5) {
+        self.offset = 0;
+        [self.view setNeedsLayout];
+    }
+}
+
+#pragma mark - 弹窗
 
 - (void)tb_alert:(NSString *)title message:(NSString *)msg {
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:title message:msg
@@ -526,21 +976,36 @@ static void TBApplyToolbarGlass(UIButton *b, BOOL danger) {
     [self presentViewController:ac animated:YES completion:nil];
 }
 
-/// 大小写不敏感地在 base 下找一个已存在的子目录
-static NSString *TBFindExistingSubdirCI(NSString *base, NSString *name) {
-    if (!base.length || !name.length) return nil;
-    NSFileManager *fm = [NSFileManager defaultManager];
-    for (NSString *item in [fm contentsOfDirectoryAtPath:base error:NULL]) {
-        BOOL d = NO;
-        NSString *full = [base stringByAppendingPathComponent:item];
-        if ([fm fileExistsAtPath:full isDirectory:&d] && d &&
-            [item caseInsensitiveCompare:name] == NSOrderedSame) return full;
+#pragma mark - 导入遮罩（先弹自绘面板 → 文件选择器 / Filza）
+
+- (void)importMaskTapped {
+    NSString *dir = self.theme.path;
+    if (!dir.length) {
+        [self tb_alert:@"导入失败" message:@"找不到主题目录，无法写入遮罩"];
+        return;
     }
-    return nil;
+    NSString *msg = [NSString stringWithFormat:@"遮罩会写入这个主题：\n%@\n\n也可以用 Filza 把图片直接放进 IconBundles/Icon.png。", dir];
+    __weak typeof(self) wself = self;
+    TBChoicePanelController *p = [TBChoicePanelController panelWithTitle:@"导入遮罩"
+                                                                 message:msg
+                                                                 options:@[@"选择文件导入", @"跳转 Filza 导入"]
+                                                                 handler:^(NSInteger idx) {
+        __strong typeof(self) s = wself;
+        if (!s || idx < 0) return;
+        if (idx == 0) [s tb_pickMaskFile];
+        else          [s tb_openPathInFilza:dir];
+    }];
+    [p presentOver:self];
 }
 
-/// 点「导入遮罩」：选一张 PNG/JPG → 写进当前主题目录（经典 Anemone/WinterBoard 命名）
-- (void)importMaskTapped {
+- (void)tb_openPathInFilza:(NSString *)path {
+    if (TBOpenPathExternally(path)) return;
+    [UIPasteboard generalPasteboard].string = path ?: @"";
+    [self tb_alert:@"打不开 Filza" message:[NSString stringWithFormat:
+        @"系统里没有装 Filza（也没有可用的文件 App）。\n路径已复制到剪贴板：\n%@", path]];
+}
+
+- (void)tb_pickMaskFile {
     UIDocumentPickerViewController *picker = nil;
     @try {
         if (@available(iOS 14.0, *)) {
@@ -578,45 +1043,44 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         return;
     }
 
-    // 落盘位置：经典 Anemone / WinterBoard 命名（引擎查找链最高优先级）
     NSArray<NSString *> *paths = [self tb_maskDestinationPaths];
     if (paths.count == 0) {
         [self tb_alert:@"导入失败" message:@"主题目录里建不出 IconBundles，无法写入遮罩"];
         return;
     }
 
-    NSString *old = [self.theme iconMaskPath];   // 主题里已有的遮罩（任意一种命名）
-    if (old.length) {                            // 已有旧遮罩 → 先问一句
+    NSString *old = [self.theme iconMaskPath];
+    if (old.length) {
         __weak typeof(self) wself = self;
-        UIAlertController *ac = [UIAlertController
-            alertControllerWithTitle:@"覆盖已有遮罩？"
-            message:[NSString stringWithFormat:@"主题里已经有一个遮罩图：\n%@\n\n继续会覆盖它。", old]
-            preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"覆盖" style:UIAlertActionStyleDestructive
-                                            handler:^(UIAlertAction *a) {
-            __strong typeof(self) sself = wself;
-            if (sself) [sself tb_writeMaskFromURL:url toPaths:paths];
-        }]];
-        [self presentViewController:ac animated:YES completion:nil];
+        TBChoicePanelController *p = [TBChoicePanelController
+            panelWithTitle:@"覆盖已有遮罩？"
+                   message:[NSString stringWithFormat:@"主题里已经有一个遮罩图：\n%@\n\n继续会覆盖它。", old]
+                   options:@[@"覆盖"]
+                   handler:^(NSInteger idx) {
+            __strong typeof(self) s = wself;
+            if (s && idx == 0) [s tb_writeMaskFromURL:url toPaths:paths];
+        }];
+        [p presentOver:self];
         return;
     }
     [self tb_writeMaskFromURL:url toPaths:paths];
 }
 
-/// 导入遮罩的落盘位置（按引擎查找优先级）：
-///   ① <主题>/IconBundles/Icon.png   经典 Anemone/WinterBoard 命名，引擎最高优先级
-///   ② <主题>/IconBundles/icon.png  同上的小写写法，一起写一份更通用
-///   ③ 若主题里已有 Bundles/com.apple.mobileicons.framework/
-///      → 再写一份 AppIconMask@2x~iphone.png（经典 AppIconMask）
+/// 导入遮罩的落盘位置（按引擎查找优先级）
 - (NSArray<NSString *> *)tb_maskDestinationPaths {
     NSString *dir = self.theme.path;
     if (!dir.length) return @[];
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray<NSString *> *out = [NSMutableArray array];
 
-    NSString *ib = TBFindExistingSubdirCI(dir, @"IconBundles");
-    if (!ib.length) {   // 目录不存在就按标准名创建
+    NSString *ib = nil;
+    for (NSString *item in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
+        BOOL d = NO;
+        NSString *full = [dir stringByAppendingPathComponent:item];
+        if ([fm fileExistsAtPath:full isDirectory:&d] && d &&
+            [item caseInsensitiveCompare:@"IconBundles"] == NSOrderedSame) { ib = full; break; }
+    }
+    if (!ib.length) {
         ib = [dir stringByAppendingPathComponent:@"IconBundles"];
         [fm createDirectoryAtPath:ib withIntermediateDirectories:YES attributes:nil error:NULL];
     }
@@ -624,14 +1088,6 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (ib.length && [fm fileExistsAtPath:ib isDirectory:&isDir] && isDir) {
         [out addObject:[ib stringByAppendingPathComponent:@"Icon.png"]];
         [out addObject:[ib stringByAppendingPathComponent:@"icon.png"]];
-    }
-
-    NSString *bundles = TBFindExistingSubdirCI(dir, @"Bundles");
-    if (bundles.length) {
-        NSString *fw = TBFindExistingSubdirCI(bundles, @"com.apple.mobileicons.framework");
-        if (fw.length) {
-            [out addObject:[fw stringByAppendingPathComponent:@"AppIconMask@2x~iphone.png"]];
-        }
     }
     return out;
 }
@@ -645,8 +1101,8 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         [self tb_alert:@"导入失败" message:@"读不到选中的图片文件"];
         return;
     }
-    UIImage *img = [UIImage imageWithData:raw];
-    NSData *png = TBThemeMaskPNGDataFromImage(img);
+    UIImage *img = [[UIImage alloc] initWithData:raw];
+    NSData *png = TBMaskPNGDataFromImage(img);
     if (png.length == 0) {
         [self tb_alert:@"导入失败" message:@"这张图没法解析成遮罩（换一张 PNG/JPG 再试）"];
         return;
@@ -666,14 +1122,12 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         return;
     }
 
-    // 导入成功 → 自动切到「主题遮罩图」（关掉自定义圆角），并通知引擎
-    [TBPrefs setBool:YES forKey:kTBKeyUseThemeIconMask];
-    [TBPrefs setBool:NO forKey:kTBKeyMaskCornerRadiusOn];
+    [TBPrefs setBool:YES forKey:TBKeyUseThemeIconMask];
+    [TBPrefs setBool:NO forKey:TBKeyMaskCornerRadiusOn];
     [TBPrefs notifyChanged];
-    [self refreshOptionSelection];
-    [self tb_refreshDynamicColors];
+    [self refreshState];
 
-    NSMutableString *msg = [NSMutableString stringWithString:@"遮罩已写入当前主题，并已切换为「主题遮罩图」：\n"];
+    NSMutableString *msg = [NSMutableString stringWithString:@"遮罩已写入当前主题，并已切换为「遮罩」：\n"];
     [msg appendString:[ok componentsJoinedByString:@"\n"]];
     if (bad.count) [msg appendFormat:@"\n\n（以下位置写入失败）\n%@", [bad componentsJoinedByString:@"\n"]];
     [self tb_alert:@"导入成功" message:msg];
@@ -681,212 +1135,6 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
     // 用户取消：什么都不做
-}
-
-#pragma mark - 应用 / 详情
-
-- (void)applyTapped {
-    // 与详情页「应用这个主题」完全一致：写主题名 + 总开关，然后通知引擎
-    [TBPrefs setString:self.theme.name forKey:TBKeyActiveTheme];
-    [TBPrefs setBool:YES forKey:TBKeyEnabled];
-    [TBPrefs notifyChanged];
-    __weak typeof(self) wself = self;
-    [self closeThen:^{
-        if (wself.onApply) wself.onApply(wself.theme);
-    }];
-}
-
-- (void)detailTapped {
-    __weak typeof(self) wself = self;
-    [self closeThen:^{
-        if (wself.onDetail) wself.onDetail(wself.theme);
-    }];
-}
-
-- (void)dimTapped {
-    [self closeThen:nil];
-}
-
-/// 收起抽屉（弹簧滑到「收起」锚点，dim 与抽屉同一次动画一起收）→ 动画结束才 dismiss
-- (void)closeThen:(void (^)(void))then {
-    if (self.closing) return;
-    self.closing = YES;
-    __weak typeof(self) wself = self;
-    [self animateToOffset:self.anchors.lastObject.doubleValue velocity:0 completion:^{
-        __strong typeof(self) sself = wself;
-        if (!sself) return;
-        // 动画已经结束：抽屉和 dim 都在同一次动画里到了终点，这里直接摘掉
-        sself.dimView.alpha = 0;
-        sself.dimView.hidden = YES;
-        [sself dismissViewControllerAnimated:NO completion:^{
-            if (then) then();
-        }];
-    }];
-}
-
-#pragma mark - 拖动（橡皮筋 + 速度吸附 + 单一弹簧收尾）
-
-/// 阻尼橡皮筋：越过边界后按经典 1 - 1/(over*k+1) 衰减，
-/// 近处斜率 ≈ k(0.35)，越拖越沉、永远拖不飞
-- (CGFloat)rubberBand:(CGFloat)raw {
-    CGFloat lo = self.anchors.firstObject.doubleValue;   // 展开
-    CGFloat hi = self.anchors.lastObject.doubleValue;    // 收起
-    CGFloat dim = MAX(1.0, self.sheetHeight);
-    if (raw < lo) {
-        CGFloat over = lo - raw;
-        return lo - (over * dim * kTBRubberK) / (dim + kTBRubberK * over);
-    }
-    if (raw > hi) {
-        CGFloat over = raw - hi;
-        return hi + (over * dim * kTBRubberK) / (dim + kTBRubberK * over);
-    }
-    return raw;
-}
-
-- (NSInteger)nearestAnchorForOffset:(CGFloat)offset {
-    NSInteger best = 0;
-    CGFloat bestDist = CGFLOAT_MAX;
-    for (NSInteger i = 0; i < (NSInteger)self.anchors.count; i++) {
-        CGFloat d = fabs(self.anchors[i].doubleValue - offset);
-        if (d < bestDist) { bestDist = d; best = i; }
-    }
-    return best;
-}
-
-/// dim 的不透明度：抽屉越低越淡，完全收起时是 0
-- (CGFloat)dimAlphaForOffset:(CGFloat)offset {
-    CGFloat hi = self.sheetHeight;
-    if (hi < 1) return 0;
-    if (offset >= hi - 0.5) return 0;
-    CGFloat p = 1.0 - MAX(0.0, MIN(1.0, offset / hi));      // 0=收起 1=展开
-    return kTBDimMaxAlpha * (0.55 + 0.45 * p);
-}
-
-- (void)handlePan:(UIPanGestureRecognizer *)pan {
-    CGPoint v = [pan velocityInView:self.view];
-    CGFloat dy = [pan translationInView:self.view].y;
-
-    switch (pan.state) {
-        case UIGestureRecognizerStateBegan: {
-            // 动画中途接管：先冻结在「看得见的那个位置」
-            [self freezeAtVisualOffset];
-            self.dragStartOffset = self.offset;
-            break;
-        }
-        case UIGestureRecognizerStateChanged: {
-            // 跟手阶段只改 transform：不碰 alpha / hidden，也不做 layoutIfNeeded（保帧率）
-            CGFloat raw = self.dragStartOffset + dy;
-            self.offset = [self rubberBand:raw];
-            self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
-            break;
-        }
-        default: {   // ended / cancelled / failed
-            CGFloat vy = v.y;
-            CGFloat projected = self.offset + vy * kTBSnapProjection;   // 用落点预判
-            NSInteger cur = [self nearestAnchorForOffset:self.offset];
-            NSInteger want = [self nearestAnchorForOffset:projected];
-            // 速度大 → 至少顺方向走一格（"甩"出去）；速度小 → 就近吸附
-            if (vy > kTBSnapVelocity && want <= cur) want = MIN(cur + 1, (NSInteger)self.anchors.count - 1);
-            if (vy < -kTBSnapVelocity && want >= cur) want = MAX(cur - 1, 0);
-            [self settleToAnchor:want velocity:vy];
-            break;
-        }
-    }
-}
-
-/// 停止在飞的动画，并把模型值对齐到当前视觉位置（避免接管瞬间跳变）
-- (void)freezeAtVisualOffset {
-    if (self.animator) {
-        [self.animator stopAnimation:NO];
-        self.animator = nil;
-    }
-    CALayer *pl = self.sheet.layer.presentationLayer;
-    CALayer *dl = self.dimView.layer.presentationLayer;
-    CGFloat visualOffset = pl ? pl.transform.m42 : self.offset;
-    CGFloat visualAlpha  = dl ? dl.opacity : self.dimView.alpha;
-
-    self.offset = visualOffset;
-    self.sheet.transform = CGAffineTransformMakeTranslation(0, visualOffset);
-    self.dimView.alpha = visualAlpha;
-    [self.sheet.layer removeAllAnimations];
-    [self.dimView.layer removeAllAnimations];
-}
-
-- (void)settleToAnchor:(NSInteger)idx velocity:(CGFloat)vy {
-    idx = MAX(0, MIN(idx, (NSInteger)self.anchors.count - 1));
-    self.anchorIndex = idx;
-    BOOL collapsing = (idx == (NSInteger)self.anchors.count - 1);
-    __weak typeof(self) wself = self;
-    [self animateToOffset:self.anchors[idx].doubleValue velocity:vy completion:^{
-        __strong typeof(self) sself = wself;
-        if (!sself) return;
-        if (collapsing && !sself.closing) {
-            sself.closing = YES;
-            sself.dimView.alpha = 0;
-            sself.dimView.hidden = YES;
-            [sself dismissViewControllerAnimated:NO completion:nil];   // 拖到底 = 关掉抽屉
-        }
-    }];
-}
-
-/// 收尾：一次弹簧动画（UIViewPropertyAnimator），抽屉位移和背景 alpha 在同一个动画块、
-/// 同一时长、同一曲线 —— 不会出现「抽屉还在、背景已经透明」的一帧。
-- (void)animateToOffset:(CGFloat)to velocity:(CGFloat)vy completion:(void (^)(void))done {
-    if (self.animator) {          // 理论上不会重入，保险起见只保留最后一个
-        [self.animator stopAnimation:NO];
-        self.animator = nil;
-        [self.sheet.layer removeAllAnimations];
-        [self.dimView.layer removeAllAnimations];
-    }
-    CGFloat from = self.offset;
-    CGFloat dist = to - from;
-    CGFloat normalized = (fabs(dist) > 1.0) ? (vy / fabs(dist)) : 0.0;
-    normalized = MAX(-24.0, MIN(24.0, normalized));
-
-    UISpringTimingParameters *spring =
-        [[UISpringTimingParameters alloc] initWithDampingRatio:kTBSpringDamping
-                                               initialVelocity:CGVectorMake(0, normalized)];
-    UIViewPropertyAnimator *an = [[UIViewPropertyAnimator alloc] initWithDuration:kTBSpringDuration
-                                                                timingParameters:spring];
-    self.animator = an;
-    [an addAnimations:^{
-        self.offset = to;
-        self.sheet.transform = CGAffineTransformMakeTranslation(0, to);
-        self.dimView.alpha = [self dimAlphaForOffset:to];
-    }];
-    __weak typeof(self) wself = self;
-    [an addCompletion:^(UIViewAnimatingPosition position) {
-        __strong typeof(self) sself = wself;
-        if (!sself) return;
-        sself.animator = nil;
-        if (position == UIViewAnimatingPositionEnd) {
-            sself.offset = to;
-            if (done) done();
-        }
-    }];
-    [an startAnimation];
-}
-
-#pragma mark - 出现 / 消失
-
-- (void)presentOver:(UIViewController *)host {
-    if (!host) return;
-    self.modalPresentationStyle = UIModalPresentationOverFullScreen;   // 不用 UISheetPresentationController
-    self.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
-    [host presentViewController:self animated:NO completion:^{
-        [self animateIn];
-    }];
-}
-
-- (void)animateIn {
-    [self.view layoutIfNeeded];       // 先把几何算出来（锚点在这里生成）
-    self.appeared = YES;
-    self.offset = self.sheetHeight;   // 从屏外开始
-    self.sheet.transform = CGAffineTransformMakeTranslation(0, self.offset);
-    self.dimView.alpha = 0;
-    // 高度已经压到内容高度，直接落到「展开」锚点就是紧凑的常态
-    self.anchorIndex = 0;
-    [self animateToOffset:[self.anchors.firstObject doubleValue] velocity:0 completion:nil];
 }
 
 @end

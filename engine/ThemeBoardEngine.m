@@ -2371,6 +2371,14 @@ static BOOL TBIsThemedResourceName(NSString *name) {
     //  · 指针/轴心（ClockIcon*Hand / *Dot）→ 不在这里，改由
     //    SBHClockHandsImageSet 注入（见 tb_makeImageSet）
     if ([name hasPrefix:@"ClockIconBackground"]) return YES;
+    // 角标底板（SBBadgeBG@3x.png）：主题/素材包里有就替换（UseThemeBadge / CustomBadgePath）
+    if ([name hasPrefix:@"SBBadgeBG"]) {
+        id ub = TBPref(@"UseThemeBadge");
+        if (ub && [ub boolValue]) return YES;
+        id cb = TBPref(@"CustomBadgePath");
+        if ([cb isKindOfClass:[NSString class]] && [(NSString *)cb length]) return YES;
+        return NO;
+    }
     static NSArray<NSString *> *prefixes = nil;
     if (!prefixes) prefixes = @[@"ANEM", @"CalendarIcon", @"Keypad"];
     for (NSString *p in prefixes) {

@@ -31,6 +31,34 @@
 /// 注意：AnemoneEffects 是"叠加层 / 阴影"，**不是**形状遮罩。
 - (nullable NSString *)anemoneEffectPath:(NSString *)base;
 
+#pragma mark - 素材包（和主题同层放在同一个主题根目录下）
+
+/// 是不是「素材包」：没有任何 IconBundles/<反向域名>.png 形式的应用图标，
+/// 但至少有遮罩 / 边框 / 阴影里的一样素材。
+/// 判定与目录位置无关 —— 只看内容，所以主题根目录下的任意子目录都能识别。
+@property (nonatomic, readonly) BOOL isAssetPack;
+
+/// 素材包里可用的三类素材（绝对路径；没有就返回 nil）
+@property (nonatomic, readonly, nullable) NSString *assetMaskPath;     // IconBundles/Icon.png 等
+@property (nonatomic, readonly, nullable) NSString *assetOverlayPath;  // AnemoneEffects/iPhoneOverlay*
+@property (nonatomic, readonly, nullable) NSString *assetShadowPath;   // AnemoneEffects/iPhoneShadow*
+
+/// 主题自带的角标底板 SBBadgeBG（SpringBoard 通知角标圆形底板）：
+///   ① Bundles/SBBadgeBG@3x.png / @2x / 无后缀       （素材包实际就是这个位置）
+///   ② Bundles/com.apple.springboard/SBBadgeBG*      （经典 Anemone 位置）
+///   ③ 主题根目录 SBBadgeBG*
+/// 找不到返回 nil。
+- (nullable NSString *)badgePath;
+
+/// 素材包缩略图（取第一张能用的素材），给列表当封面用
+- (nullable UIImage *)assetPreviewImage;
+
+/// 这个目录是否在 Assets/ 根下（只用于显示/分组，判定仍以内容为准）
+@property (nonatomic, readonly) BOOL inAssetsRoot;
+
+/// 素材包能提供的项，每项：kind(mask/overlay/shadow) / title(遮罩/边框/阴影) / path / key(偏好键)
+- (NSArray<NSDictionary<NSString *, NSString *> *> *)availableAssetItems;
+
 /// 2x2 拼图封面（用于列表缩略图）
 - (nullable UIImage *)coverImageWithSize:(CGFloat)size;
 
