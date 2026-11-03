@@ -1610,7 +1610,11 @@ static void TBLearnSystemMask(UIImage *sysMasked) {
 static UIImage *TBFitCached(UIImage *img, TBInfo info, NSString *bid) {
     if (!img) return nil;
     if (!bid.length) return TBFitImage(img, info);
-    NSString *k = [NSString stringWithFormat:@"%@|%.0fx%.0f|%.1f", bid, info.size.width, info.size.height, info.scale];
+    // 键里带主题名：换主题瞬间，同 bid 同尺寸的旧键不能命中旧主题的成品图
+    // （bid 变体除外：TBImageForBundle 的图本来就该按 bid 查，不随主题键失效会重复渲染；
+    //   这里统一带上主题最安全 —— 60x60 这类同尺寸键在换主题后必须重画。）
+    NSString *k = [NSString stringWithFormat:@"%@|%@|%.0fx%.0f|%.1f", TBActiveTheme() ?: @"",
+                   bid, info.size.width, info.size.height, info.scale];
     if (!gFitCache) { [gLock lock]; if (!gFitCache) gFitCache = [NSMutableDictionary dictionary]; [gLock unlock]; }
     UIImage *c = gFitCache[k];
     if (c) return c;
@@ -1892,10 +1896,39 @@ static UIImage *TBGlobalEffectImage(UIImage *src, NSString *bid) {
     // 缓存键带「主题 + 特效参数指纹」：参数没变就一直命中，不必每次刷新都重算所有图标
     // （0.15.48 的日志里 TBReload 一晚上跑了 256 次，每次 gGlobalImgCache = nil，
     //  于是几十个图标全部重新套形状+特效 → 主线程被拖死。现在只在参数真的变了才失效。）
-    NSString *fp = [NSString stringWithFormat:@"%@|%d%d%d%d|%.2f", theme,
+    // ★ 指纹必须覆盖【所有会改变出图的输入】：
+    //   - MaskCornerRadius 数值（滑块只改数值不改开关，旧指纹不含它 → 调圆角后全局效果的
+    //     图标一直吃旧形状，要换主题/重启才变）
+    //   - CustomMaskPath / 主题遮罩文件的修改时间（App 导入遮罩后 TBReload 会清 gMaskThemeImg，
+    //     但旧指纹让这里直接命中缓存 → 「已覆盖主题图标的遮罩」永远不更新）
+    NSString *maskPath = nil;
+    {
+        id cmp = TBPref(@"CustomMaskPath");
+        if ([cmp isKindOfClass:[NSString class]]) maskPath = cmp;
+    }
+    NSString *maskSig = @"";
+    NSString *maskFile = maskPath.length ? maskPath : nil;
+    if (!maskFile) {
+        NSString *theme = TBActiveTheme() ?: @"";
+        if (theme.length) {
+            NSString *dir = TBThemeDir(theme);
+            NSString *ib = dir.length ? TBResolveDirCI(dir, @"IconBundles") : nil;
+            maskFile = ib.length ? TBFindFileCI(ib, @"Icon.png") : nil;
+        }
+    }
+    if (maskFile.length) {
+        NSDictionary *at = [[NSFileManager defaultManager] attributesOfItemAtPath:maskFile error:NULL];
+        NSDate *mt = at[NSFileModificationDate];
+        maskSig = [NSString stringWithFormat:@"@%llu", mt ? (unsigned long long)[mt timeIntervalSince1970] : 0];
+    }
+    NSString *fp = [NSString stringWithFormat:@"%@|%d%d%d%d|%.2f|%.2f|%@%@",
+                    theme,
                     TBUseThemeIconMask() ? 1 : 0, TBMaskCornerRadiusOn() ? 1 : 0,
                     TBUseThemeIconOverlay() ? 1 : 0, TBUseThemeIconShadow() ? 1 : 0,
-                    TBGlassOverlayStrength()];
+                    TBGlassOverlayStrength(),
+                    TBMaskCornerRadiusOn() ? TBMaskCornerRadius() : 0.0,
+                    maskPath.length ? maskPath : @"-",
+                    maskSig];
     if (!gGlobalImgCache || ![gGlobalCacheTheme isEqualToString:fp]) {
         gGlobalImgCache = [NSMutableDictionary dictionary];
         gGlobalCacheTheme = [fp copy];
@@ -3417,6 +3450,33 @@ static void TBBadgeCallOrig(id self, SEL _cmd) {
     else if (o_badgeLayout) o_badgeLayout(self, _cmd);
 }
 
+/// 主题角标图缓存：key = 文件路径，换主题整表作废。
+/// ★ 必须缓存：幂等检查（plate.image == e.appliedImage）靠 UIImage 指针相等。
+///   原来 ②③ 分支每次 layout 都 initWithContentsOfFile: 造新实例 ——
+///   系统把底板图写回（image == 系统图）后我们再换一次时，还原表里会叠出
+///   「origImage = 上一次的主题角标」的记录链；TBBadgeRestoreAll 按序还原，
+///   最后一遍恰恰把【旧主题角标】写回底板 = 换主题后旧角标赖着不走。
+///   同一文件返回同一实例后，记录链断掉，还原一定回到系统原图。
+///   （只在主线程 layoutSubviews 里访问，不加锁。）
+static NSMutableDictionary *gBadgeThemeImgCache;
+static NSString *gBadgeThemeImgCacheTheme;
+static UIImage *TBBadgeImageFromFileCached(NSString *path) {
+    if (!path.length) return nil;
+    NSString *theme = TBActiveTheme() ?: @"";
+    if (!gBadgeThemeImgCache || ![gBadgeThemeImgCacheTheme isEqualToString:theme]) {
+        gBadgeThemeImgCache = [NSMutableDictionary dictionary];
+        gBadgeThemeImgCacheTheme = [theme copy];
+    } else if (gBadgeThemeImgCache.count > 8) {
+        [gBadgeThemeImgCache removeAllObjects];   // 上限保护（路径变体不会太多）
+    }
+    UIImage *hit = gBadgeThemeImgCache[path];
+    if (hit) return hit;
+    // 必须用 init：imageWithContentsOfFile: 已被本引擎 hook（递归会爆栈）
+    UIImage *im = [[UIImage alloc] initWithContentsOfFile:path];
+    if (im) gBadgeThemeImgCache[path] = im;
+    return im;
+}
+
 /// 角标素材查找：返回图，并回填它到底来自哪个文件（日志要打完整路径）
 static UIImage *TBThemeBadgeImageWithPath(NSString **outPath) {
     if (outPath) *outPath = nil;
@@ -3455,7 +3515,7 @@ static UIImage *TBThemeBadgeImageWithPath(NSString **outPath) {
     }
     [gLock unlock];
     if (hit.length) {
-        UIImage *im = [[UIImage alloc] initWithContentsOfFile:hit];
+        UIImage *im = TBBadgeImageFromFileCached(hit);
         if (im) { if (outPath) *outPath = hit; return im; }
     }
 
@@ -3469,7 +3529,7 @@ static UIImage *TBThemeBadgeImageWithPath(NSString **outPath) {
             if (!d.length) continue;
             NSString *p = TBFindBestScaledPNG(d, @"SBBadgeBG");
             if (!p) continue;
-            UIImage *im = [[UIImage alloc] initWithContentsOfFile:p];
+            UIImage *im = TBBadgeImageFromFileCached(p);
             if (im) { if (outPath) *outPath = p; return im; }
         }
     }
@@ -3721,6 +3781,14 @@ static void tb_badgeLayout(id self, SEL _cmd) {
     sDepth++;
     UIView *selfView = (UIView *)self;
     @try {
+        // 安全模式 / 总开关关闭：所有新路径（角标/阴影 layer/全局效果）都必须直通原实现。
+        // 原来这里只查 UseThemeBadge —— 安全模式下只要开过角标就会继续换图，违背直通原则。
+        if (TBSafeMode() || !TBEnabled()) {
+            if (gBadgeApplied) TBBadgeRestoreAll(@"安全模式或总开关关闭");
+            TBBadgeCallOrig(self, _cmd);
+            sDepth--;
+            return;
+        }
         id ub = TBPref(@"UseThemeBadge");
         BOOL on = (ub && [ub boolValue]);
         id cb = TBPref(@"CustomBadgePath");
@@ -4499,7 +4567,13 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
     if (!allowPurge) TBLog(@"清缓存开关关闭：跳过逐个清缓存，仍执行图标重取");
 
     [gImageCache removeAllObjects];
-    [gFitCache removeAllObjects];
+    {
+        // gFitCache 是普通 NSMutableDictionary，读端（TBFitCached）只在写入时短暂拿 gLock。
+        // 这里原来裸清：darwin 回调线程正在读/写时并发 removeAllObjects 会偶发崩溃。
+        [gLock lock];
+        [gFitCache removeAllObjects];
+        [gLock unlock];
+    }
 
     // 主线程：先（可选）分批清缓存，再通知图标视图重取，最后让 SpringBoard 重排
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -4507,6 +4581,10 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
         // 都要先把上次换上的底板写回【系统原图】—— 否则旧角标一直赖在图标上，
         // 看起来就像"两个角标叠着"，只有注销才会消失。
         if (gBadgeApplied) TBBadgeRestoreAll(@"设置变更（换主题/开关/取消应用）");
+        // 角标素材图缓存按主题名失效：App 往同一主题里重导/覆盖 SBBadgeBG 素材后，
+        // 旧主题名命中不了变化 —— 这里跟着 TBReload 一起清（主线程，与读端同队列）
+        gBadgeThemeImgCache = nil;
+        gBadgeThemeImgCacheTheme = nil;
 
         NSArray *icons = TBAllIcons();
         NSArray *cacheList = caches;

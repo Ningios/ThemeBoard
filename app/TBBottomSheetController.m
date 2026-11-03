@@ -1185,6 +1185,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     }
 
     if (![kImgExt containsObject:(ext ?: @"")]) {
+        // zip 分支拿到的临时图也要删掉：找不到目标目录 / 判型失败时原代码直接 return，
+        // tbmaskv-* 临时文件会永久留在 /tmp（App 容器 tmp 系统可能清、也可能不清）
+        [TBThemeScanner removeTempMaskImage:url.path];
         [self tb_alert:@"这不是图片"
                message:[NSString stringWithFormat:
                         @"遮罩需要 PNG / JPG 图片，或者一个装着遮罩图的 zip。\n你选的是「%@」。",
@@ -1221,10 +1224,14 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             __strong typeof(self) s = wself;
             if (s && idx == 0) [s tb_writeMaskFromURL:url toPaths:paths];
         }];
+        // 无论用户选「覆盖」还是放弃，zip 解出来的临时图都不能留在 /tmp
+        [TBThemeScanner removeTempMaskImage:url.path];
         [p presentOver:self];
         return;
     }
     [self tb_writeMaskFromURL:url toPaths:paths];
+    // 正常写入完成：临时副本使命结束
+    [TBThemeScanner removeTempMaskImage:url.path];
 }
 
 /// 导入遮罩的落盘位置（按引擎查找优先级）
@@ -1254,17 +1261,18 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 }
 
 - (void)tb_writeMaskFromURL:(NSURL *)url toPaths:(NSArray<NSString *> *)paths {
-    // iCloud 未下载的图片是占位文件：必须走 NSFileCoordinator 让系统先下载再读
     NSError *readErr = nil;
     NSData *raw = TBReadCoordinatedData(url, &readErr);
 
     if (raw.length == 0) {
+        [TBThemeScanner removeTempMaskImage:url.path];   // zip 临时图：失败也要清理
         [self tb_alert:@"导入失败" message:TBImportFailureMessage(url, readErr, @"读不到选中的图片文件")];
         return;
     }
     UIImage *img = [[UIImage alloc] initWithData:raw];
     NSData *png = img ? TBMaskPNGDataFromImage(img) : nil;
     if (png.length == 0) {
+        [TBThemeScanner removeTempMaskImage:url.path];   // zip 临时图：失败也要清理
         [self tb_alert:@"导入失败" message:@"这张图没法解析成遮罩（换一张 PNG/JPG 再试）"];
         return;
     }
@@ -1278,6 +1286,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     }
 
     if (ok.count == 0) {
+        [TBThemeScanner removeTempMaskImage:url.path];   // zip 临时图：失败也要清理
         [self tb_alert:@"导入失败" message:[NSString stringWithFormat:
             @"没法写入主题目录（可能不可写）：\n%@", [bad componentsJoinedByString:@"\n"]]];
         return;

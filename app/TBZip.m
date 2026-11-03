@@ -53,6 +53,15 @@ static uint32_t rd32(const uint8_t *p) {
         if (p + 46 + nameLen > n) break;
 
         NSString *name = [[NSString alloc] initWithBytes:b + p + 46 length:nameLen encoding:NSUTF8StringEncoding];
+        if (!name.length) {
+            // 中文 Windows / 老压缩工具打的 zip 文件名常是 GBK 编码：
+            // UTF-8 解不出来 name 就是 nil → 这一条目被 continue 跳过，
+            // 表现就是「包里明明有 IconBundles/遮罩.png 却提示没有图片」。
+            // 按 GB18030 再解一次（GBK 的超集），解不出来才放弃这一条。
+            NSString *gbk = [[NSString alloc] initWithBytes:b + p + 46 length:nameLen
+                                                   encoding:CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000)];
+            if (gbk.length) name = gbk;
+        }
         p += 46 + nameLen + extraLen + cmtLen;
         if (!name.length) continue;
         if ([name hasPrefix:@"__MACOSX/"]) continue;

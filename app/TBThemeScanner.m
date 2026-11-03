@@ -15,8 +15,12 @@ extern char **environ;
 static void TBRecursiveChmod(NSString *path, mode_t mode) {
     if (!path.length) return;
     NSFileManager *fm = [NSFileManager defaultManager];
-    BOOL isDir = NO;
-    if (![fm fileExistsAtPath:path isDirectory:&isDir]) return;
+    // attributesOfItemAtPath = lstat 语义，不跟随符号链接。
+    // （原来用 fileExistsAtPath:isDirectory:，链接指向 / 或大目录时会把整棵系统树
+    //   chmod 0777 —— 既危险又巨慢。符号链接只 chmod 链接本身，绝不递归进去。）
+    NSDictionary *attr = [fm attributesOfItemAtPath:path error:NULL];
+    if (!attr.count) return;
+    BOOL isDir = [attr[NSFileType] isEqualToString:NSFileTypeDirectory];
     if (chmod(path.fileSystemRepresentation, mode) != 0) {
         TBLog2(@"[删除] chmod %@ 失败 errno=%d", path, errno);
     }
@@ -31,8 +35,14 @@ static void TBRecursiveChmod(NSString *path, mode_t mode) {
 static BOOL TBRemoveContentsThenDir(NSString *path, NSError **outErr, int *errnoOut) {
     if (!path.length) return NO;
     NSFileManager *fm = [NSFileManager defaultManager];
-    BOOL isDir = NO;
-    if (![fm fileExistsAtPath:path isDirectory:&isDir]) return YES;   // 已经没了
+    // 先把这一层目录本身放开写权限：目录不可写时里面的 rename/remove 全会 EACCES，
+    // chmod 了内容却删不动目录就是这个原因（unlink/删除条目检查的是父目录 w 位）
+    if (chmod(path.fileSystemRepresentation, 0777) != 0) {
+        TBLog2(@"[删除] 放开目录本身权限失败 errno=%d：%@", errno, path);
+    }
+    NSDictionary *attr = [fm attributesOfItemAtPath:path error:NULL];
+    BOOL isDir = attr.count && [attr[NSFileType] isEqualToString:NSFileTypeDirectory];
+    if (!attr.count) return YES;   // 已经没了
     if (!isDir) {
         NSError *e = nil;
         BOOL ok = [fm removeItemAtPath:path error:&e];
@@ -803,6 +813,23 @@ static BOOL TBIsThemeLikeDirectory(NSString *dir) {
     }
     TBLog2(@"[导入遮罩][zip] ✅ %@ → %@", zipURL.lastPathComponent ?: @"?", dest);
     return dest;
+}
+
+/// 删掉 extractMaskImageFromZip 返回的临时图片（tbmaskv-*)。
+/// 用完即删：之前正常写入/中途 return 的路径都不删，/tmp 会一直堆文件。
+/// 只认 /tmp 下的 tbmaskv-* 前缀，其它路径一律不动（防误删）。
++ (void)removeTempMaskImage:(NSString *)path {
+    if (!path.length) return;
+    NSString *tmp = [NSTemporaryDirectory() stringByStandardizingPath];
+    NSString *full = [path stringByStandardizingPath];
+    if (!full.length || ![full hasPrefix:tmp]) return;
+    if (![[full lastPathComponent] hasPrefix:@"tbmaskv-"]) return;
+    NSError *err = nil;
+    if ([[NSFileManager defaultManager] removeItemAtPath:full error:&err]) {
+        TBLog2(@"[导入遮罩][zip] 临时图已删：%@", [full lastPathComponent]);
+    } else {
+        TBLog2(@"[导入遮罩][zip] 临时图删除失败（%@）：%@", err.localizedDescription ?: @"-", full);
+    }
 }
 
 + (BOOL)deleteTheme:(TBTheme *)theme error:(NSError **)error {
