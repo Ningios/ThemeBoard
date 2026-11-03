@@ -425,12 +425,24 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         NSString *active = [self activeThemeName];
         t = active ? [TBThemeScanner themeNamed:active] : nil;
         if (!t) return;
-        [self.navigationController pushViewController:[[TBThemeDetailController alloc] initWithTheme:t] animated:YES];
+        @try {
+            [self.navigationController pushViewController:[[TBThemeDetailController alloc] initWithTheme:t] animated:YES];
+        } @catch (NSException *e) {
+            [self alertTitle:[NSString stringWithFormat:@"详情页失败：%@", e.name ?: @"异常"]
+                     message:[NSString stringWithFormat:@"%@", e.reason ?: @"(无原因)"]];
+        }
         return;
     }
     // 第 2 段「已安装主题」：点主题行 → 弹自定义底部抽屉（详情入口在抽屉里）
-    t = self.filtered[indexPath.row];
-    [self presentSheetForTheme:t];
+    t = (indexPath.row < (NSInteger)self.filtered.count) ? self.filtered[indexPath.row] : nil;
+    if (!t) return;
+    // 崩溃诊断：把异常原因直接弹出来（这段时间点卡片若闪退，这里能抓到真凶）
+    @try {
+        [self presentSheetForTheme:t];
+    } @catch (NSException *e) {
+        [self alertTitle:[NSString stringWithFormat:@"打开失败：%@", e.name ?: @"异常"]
+                 message:[NSString stringWithFormat:@"%@", e.reason ?: @"(无原因)"]];
+    }
 }
 
 #pragma mark - 底部抽屉
