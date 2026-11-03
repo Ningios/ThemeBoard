@@ -1611,7 +1611,7 @@ static UIImage *TBFitCached(UIImage *img, TBInfo info, NSString *bid) {
     if (!img) return nil;
     if (!bid.length) return TBFitImage(img, info);
     NSString *k = [NSString stringWithFormat:@"%@|%.0fx%.0f|%.1f", bid, info.size.width, info.size.height, info.scale];
-    if (!gFitCache) gFitCache = [NSMutableDictionary dictionary];
+    if (!gFitCache) { [gLock lock]; if (!gFitCache) gFitCache = [NSMutableDictionary dictionary]; [gLock unlock]; }
     UIImage *c = gFitCache[k];
     if (c) return c;
     UIImage *out = TBFitImage(img, info);
@@ -3404,6 +3404,18 @@ static void (*o_updateClockImages)(id, SEL);
 //      绝不既改 image 又改 layer.contents（那会画两层 = "两个角标叠着"）。
 //   ⑤ 日志必打「角标：命中 <完整路径>」/「角标：没找到素材」（换主题、开机各一次）。
 static void (*o_badgeLayout)(id, SEL);
+static NSMutableDictionary *gBadgeOrig;   // 类名 → 该类自己的原始 layoutSubviews IMP
+
+/// 调「这个类自己的」原始 layoutSubviews（找不到该类的记录时才退回全局 o_badgeLayout）
+static void TBBadgeCallOrig(id self, SEL _cmd) {
+    void (*imp)(id, SEL) = NULL;
+    [gLock lock];
+    NSValue *v = gBadgeOrig[NSStringFromClass([self class])];
+    [gLock unlock];
+    if (v) imp = (void (*)(id, SEL))[v pointerValue];
+    if (imp) imp(self, _cmd);
+    else if (o_badgeLayout) o_badgeLayout(self, _cmd);
+}
 
 /// 角标素材查找：返回图，并回填它到底来自哪个文件（日志要打完整路径）
 static UIImage *TBThemeBadgeImageWithPath(NSString **outPath) {
@@ -3684,16 +3696,26 @@ static void TBBadgeRelayoutVisible(void) {
     } @catch (NSException *e) { }
 }
 
+/// 子树里有没有「这个指针的视图」（0.12s 补刷用：找不到 = 已被复用/销毁，别再贴）
+static BOOL TBBadgeTreeHasOwner(UIView *root, uintptr_t tag, int depth) {
+    if (!root || depth > 8) return NO;
+    if ((uintptr_t)root == tag) return YES;
+    for (UIView *k in root.subviews) {
+        if (TBBadgeTreeHasOwner(k, tag, depth + 1)) return YES;
+    }
+    return NO;
+}
+
 static void tb_badgeLayout(id self, SEL _cmd) {
     if (![self isKindOfClass:[UIView class]]) {
-        if (o_badgeLayout) o_badgeLayout(self, _cmd);
+        TBBadgeCallOrig(self, _cmd);
         return;
     }
     // 父类/子类各挂了一次 hook 时，系统的 [super layoutSubviews] 会把我们拉回来：
     // 只放行最外层那一次，避免同一次布局把角标处理两遍（"两个角标叠着"来源之一）
     static int sDepth = 0;
     if (sDepth > 0) {
-        if (o_badgeLayout) o_badgeLayout(self, _cmd);
+        TBBadgeCallOrig(self, _cmd);
         return;
     }
     sDepth++;
@@ -3712,7 +3734,7 @@ static void tb_badgeLayout(id self, SEL _cmd) {
             return;
         }
 
-        if (o_badgeLayout) o_badgeLayout(self, _cmd);   // 先让系统把底板和数字摆好
+        TBBadgeCallOrig(self, _cmd);   // 先让系统把底板和数字摆好
 
         UIImage *badge = TBThemeBadgeImage();
         if (!badge) { sDepth--; return; }               // 没素材一律不动
@@ -3725,14 +3747,27 @@ static void tb_badgeLayout(id self, SEL _cmd) {
                        NSStringFromClass([self class]), TBActiveTheme() ?: @""],
                       @"角标替换：已换底板（%@，%lu 处）", NSStringFromClass([self class]),
                       (unsigned long)hits);
-            // 系统有时在 layout 之后才把图写回去 → 稍后补一次（同样幂等，不会叠加）
+            // 系统有时在 layout 之后才把图写回去 → 稍后补一次（同样幂等，不会叠加）。
+            // ★ 旧块捕获了「当时的 badge 图」：0.12s 内若换了主题并已还原（TBReload），
+            //   会把【旧主题】的角标贴回去。补两道闸：
+            //   ① owner 必须还在屏幕视图树上（不在 = 已销毁/进复用池）；
+            //   ② 原有 gBadgeApplied / 幂等检查保留。
             __weak UIView *wv = selfView;
+            uintptr_t ownerTag = (uintptr_t)selfView;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 UIView *v = wv;
                 if (!v) return;
                 if (!gBadgeApplied) return;                    // 已经被还原了，不要再贴回去
                 if (TBBadgeAlreadyApplied(v)) return;          // 已经是我们换的图
+                BOOL stillOnScreen = NO;
+                @try {
+                    NSArray *wins = [[UIApplication sharedApplication] windows];
+                    for (UIView *w in wins) {
+                        if (TBBadgeTreeHasOwner(w, ownerTag, 0)) { stillOnScreen = YES; break; }
+                    }
+                } @catch (NSException *e) { }
+                if (!stillOnScreen) return;                    // 不在屏幕上：别把旧主题角标贴回复用池
                 TBBadgeApply(v, badge, NO);
             });
         }
@@ -3951,16 +3986,29 @@ static void TBInstall(void) {
         // 指针一律用系统自己的（黑时针 + 黑分针 + 橙秒针），不注入主题指针。
         // 表盘：hook contentsImage，始终返回当前主题的表盘（换主题后自然就是新表盘）
         TBInstallClockContentsHooks();
+    }
 
-    // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）
+    // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）。
+    // ★ 0.15.51 拷问修复：这个块原来被嵌进了上面 clockView 的 if 里（0.15.49 少一个闭括号），
+    //   桌面上没有时钟图标视图时整个角标 hook 都装不上（替换/还原全失效，表现即 0.15.49 的
+    //   「角标赖着不走 / 变不回来」）。现在独立成块，clockView 有没有都装。
     if (!gDoneBadge) {
         gDoneBadge = YES;
         for (NSString *clsName in @[@"SBIconBadgeView", @"_SBIconBadgeView", @"SBHIconBadgeView"]) {
             Class bc = NSClassFromString(clsName);
             if (!bc) continue;
             if (TBHasMethod(bc, @"layoutSubviews")) {
+                // 每个类存自己的 orig IMP（共用一个全局会让 A 类实例调进 B 类的原始实现）。
+                // 注意：必须在 TBHook 之前取 method_getImplementation —— hook 后 Method 里的 imp
+                // 就被改写成本实现的了。
+                Method bm = class_getInstanceMethod(bc, @selector(layoutSubviews));
+                IMP borig = bm ? method_getImplementation(bm) : NULL;
                 o_badgeLayout = (void (*)(id, SEL))TBHook(bc, @"layoutSubviews",
                                                           (IMP)tb_badgeLayout, "角标视图");
+                if (borig) {
+                    if (!gBadgeOrig) gBadgeOrig = [NSMutableDictionary dictionary];
+                    gBadgeOrig[clsName] = [NSValue valueWithPointer:borig];
+                }
             }
         }
     }
@@ -3973,7 +4021,6 @@ static void TBInstall(void) {
         // 那一层返回的是「表盘+指针」的合成图，接管后系统画的指针会变形
         //（三根一样粗、橙秒针消失）。改由资源重定向提供 ClockIconBackgroundSquare，
         // 让系统自己合成底图与指针 —— 与 SnowBoard 一致。
-    }
 
     // PSSpecifier 设置页图标（iOS 17.2+ 使用此通道）
     if (spec && !gDoneSpecifier) {
@@ -4123,6 +4170,7 @@ static void TBRefreshSpringBoard(NSString *why) {
     dispatch_once(&once, ^{ sLock = [[NSLock alloc] init]; });
 
     const NSTimeInterval kMinInterval = 2.0;
+    static BOOL sFollow = NO;   // 是否已安排「节流收尾刷新」
     [sLock lock];
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     sCalls++;
@@ -4130,9 +4178,23 @@ static void TBRefreshSpringBoard(NSString *why) {
         NSTimeInterval since = now - sLast;
         sThrottled++;
         NSUInteger n = sCalls, t = sThrottled;
+        BOOL needFollow = !sFollow;
+        sFollow = YES;
         [sLock unlock];
         TBLog(@"刷新节流：距上次 SpringBoard 刷新仅 %.2fs（< %.1fs）→ 跳过第 %lu 次请求（已压掉 %lu 次，触发者=%@）",
               since, kMinInterval, (unsigned long)n, (unsigned long)t, why ?: @"?");
+        // ★ 被压掉的请求不再直接丢弃（原注释写「合并成后面的那一次」但实际没有）：
+        //   安排一次收尾刷新，保证最后一次设置变更也能落到桌面。
+        if (needFollow) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kMinInterval * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [sLock lock];
+                sFollow = NO;
+                NSTimeInterval gap = [NSDate timeIntervalSinceReferenceDate] - sLast;
+                [sLock unlock];
+                if (gap >= kMinInterval - 0.05) TBRefreshSpringBoard(@"节流收尾");
+            });
+        }
         return;
     }
     sLast = now;

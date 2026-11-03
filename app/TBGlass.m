@@ -295,16 +295,25 @@ static UIView *TBFindSearchField(UIView *v, NSInteger depth) {
 }
 
 static const void *kTBSearchGlassKey = &kTBSearchGlassKey;
+static const void *kTBSBStyledKey = &kTBSBStyledKey;   // searchBar 级外观只设一次的标记
 
 void TBStyleSearchBarGlass(UISearchBar *sb) {
     if (!sb) return;
-    // ① 干掉系统那块灰底（背景图 + material 底）
-    sb.backgroundImage = [UIImage new];
-    sb.searchBarStyle = UISearchBarStyleMinimal;
-    sb.barTintColor = [UIColor clearColor];
-    sb.backgroundColor = [UIColor clearColor];
-    sb.showsCancelButton = NO;               // ★ 不要系统的「取消」按钮（用户要求删掉）
-    if ([sb respondsToSelector:@selector(setShowsScopeBar:)]) sb.showsScopeBar = NO;
+    // ① 干掉系统那块灰底（背景图 + material 底）。
+    // ★ 改成「变化才写」：本函数由 layoutSubviews swizzle 驱动，每帧都会进来；
+    //   每帧重设 backgroundImage/searchBarStyle 这类属性会让 UISearchBar 在自己的
+    //   layoutSubviews 里再触发布局（聚焦动画宽度变化时轻则抖动，重则布局循环），
+    //   UISearchBar 子类继承 swizzle 后还会被反复放大。背景图没法比较，用关联标记只设一次。
+    NSNumber *styled = objc_getAssociatedObject(sb, kTBSBStyledKey);
+    if (!styled.boolValue) {
+        sb.backgroundImage = [UIImage new];
+        objc_setAssociatedObject(sb, kTBSBStyledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (sb.searchBarStyle != UISearchBarStyleMinimal) sb.searchBarStyle = UISearchBarStyleMinimal;
+    if (![sb.barTintColor isEqual:[UIColor clearColor]]) sb.barTintColor = [UIColor clearColor];
+    if (![sb.backgroundColor isEqual:[UIColor clearColor]]) sb.backgroundColor = [UIColor clearColor];
+    if (sb.showsCancelButton) sb.showsCancelButton = NO;   // ★ 不要系统的「取消」按钮（用户要求删掉；万一系统在聚焦流程里再打开也能随时压回去）
+    if ([sb respondsToSelector:@selector(setShowsScopeBar:)] && sb.showsScopeBar) sb.showsScopeBar = NO;
 
     UITextField *tf = (UITextField *)TBFindSearchField(sb, 0);
     if (!tf) return;                       // 还没建出输入框 → 等下一次布局
@@ -313,10 +322,12 @@ void TBStyleSearchBarGlass(UISearchBar *sb) {
     tf.textColor = [UIColor labelColor];
     // ★ 文字聚焦后"会动/错位"：系统在聚焦时会改 tf 的左右内边距（给取消按钮腾位）。
     //   固定成对称内边距，聚焦前后文字位置一致。
-    tf.leftView = nil;
-    tf.rightView = nil;
-    [tf setValue:@(12.0) forKey:@"paddingLeft"];
-    [tf setValue:@(12.0) forKey:@"paddingRight"];
+    // ★ 保留系统放大镜（leftView）和清除按钮（rightView）：不要每帧强制置 nil——
+    //   那会把系统图标挤没（0.15.50 回归）。存在时只把对应侧内边距调小对齐。
+    CGFloat lpad = (tf.leftView && tf.leftViewMode != UITextFieldViewModeNever) ? 6.0 : 12.0;
+    CGFloat rpad = (tf.rightView && tf.rightViewMode != UITextFieldViewModeNever) ? 6.0 : 12.0;
+    [tf setValue:@(lpad) forKey:@"paddingLeft"];
+    [tf setValue:@(rpad) forKey:@"paddingRight"];
 
     UIView *glass = objc_getAssociatedObject(tf, kTBSearchGlassKey);
     if (!glass) {

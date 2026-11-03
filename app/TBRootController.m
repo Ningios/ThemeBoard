@@ -27,6 +27,7 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
 @property (nonatomic, strong) UIViewPropertyAnimator *pillAnimator;
 @property (nonatomic, assign) BOOL switching;
 @property (nonatomic, assign) BOOL draggingDock;   // 底栏跟手拖动中
+@property (nonatomic, assign) NSTimeInterval dockDragEndTime;  // 最近一次拖动松手时间（吞掉紧跟着的按钮抬起）
 @end
 
 @implementation TBRootController
@@ -90,7 +91,8 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
         vc.view.frame = self.view.bounds;
     }
     // 胶囊色块跟着 dock 的尺寸走（旋转 / 尺寸变化时直接落到当前 Tab，不做动画）
-    if (self.pill && self.dockButtons.count) {
+    // 拖动中不要抢 pill 的 frame（否则布局一刷新胶囊就飞回当前 Tab）
+    if (self.pill && self.dockButtons.count && !self.draggingDock) {
         self.pill.frame = [self pillFrameForTab:self.current];
     }
 }
@@ -194,12 +196,17 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
         ((UILabel *)[b viewWithTag:102]).textColor = c;
         b.alpha = on ? 1.0 : 0.75;
         ((UIImageView *)[b viewWithTag:101]).transform = CGAffineTransformIdentity;
+        // 拖动会临时改图标/文字 alpha，静止态必须归位
+        ((UIImageView *)[b viewWithTag:101]).alpha = 1.0;
+        ((UILabel *)[b viewWithTag:102]).alpha = 1.0;
     }
 }
 
 #pragma mark - Tab 切换（水滴：前沿先到、后沿慢半拍 + 轻微回弹，共 400ms）
 
 - (void)tabTapped:(UIButton *)sender {
+    // 拖动中（第二根手指）或拖动刚松手（cancelsTouchesInView=NO，抬起会同时落进按钮）都不算点击
+    if (self.draggingDock || CACurrentMediaTime() - self.dockDragEndTime < 0.35) return;
     NSInteger idx = sender.tag;
     if (idx == self.current) {
         UINavigationController *nav = (UINavigationController *)self.pages[idx];
@@ -211,36 +218,58 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
 
 - (void)tb_dockPan:(UIPanGestureRecognizer *)g {
     NSInteger n = (NSInteger)self.dockButtons.count;
-    if (n < 1 || self.switching) return;
+    if (n < 1) return;
     CGFloat w = self.dock.bounds.size.width / n;
     CGFloat h = self.dock.bounds.size.height;
     CGPoint p = [g locationInView:self.dock];
 
     if (g.state == UIGestureRecognizerStateBegan) {
+        // 拖动开始：取消在途的水滴胶囊动画，从「看得见的位置」接管（不因 switching 拒绝手势）
         self.draggingDock = YES;
-        [self.pillAnimator stopAnimation:YES];
+        if (self.pillAnimator) {
+            [self.pillAnimator stopAnimation:YES];
+            self.pillAnimator = nil;
+        }
         [self.pill.layer removeAllAnimations];
+        CALayer *pres = self.pill.layer.presentationLayer;
+        self.pill.frame = pres ? pres.frame : [self pillFrameForTab:self.current];
+        self.switching = NO;
     }
-    if (self.draggingDock) {
+    if (!self.draggingDock) return;
+    if (g.state == UIGestureRecognizerStateChanged) {
         CGFloat x = MIN(MAX(p.x - w / 2.0, 0.0), self.dock.bounds.size.width - w);
-        self.pill.frame = CGRectMake(x + 4, 4, w - 8, h - 8);     // 胶囊跟手
+        self.pill.frame = CGRectMake(x + 4, 4, w - 8, h - 8);     // 胶囊跟手（等宽，不做拉伸形变）
         // 图标/文字按与胶囊中心的距离淡入淡出（拖到哪边哪边亮）
         CGFloat pc = CGRectGetMidX(self.pill.frame);
         for (UIButton *b in self.dockButtons) {
-            CGFloat d = fabs((CGRectGetMidX(b.frame)) - pc) / w;   // 0 = 正对，1 = 隔一个
+            CGFloat d = fabs(CGRectGetMidX(b.frame) - pc) / w;    // 0 = 正对，1 = 隔一个
             CGFloat on = MAX(0.0, 1.0 - d);
             ((UIImageView *)[b viewWithTag:101]).alpha = 0.45 + 0.55 * on;
             ((UILabel *)[b viewWithTag:102]).alpha = 0.45 + 0.55 * on;
         }
+        return;
     }
     if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled ||
         g.state == UIGestureRecognizerStateFailed) {
         if (!self.draggingDock) return;
         self.draggingDock = NO;
+        self.dockDragEndTime = CACurrentMediaTime();
+        // 图标/文字亮度归位（拖动中的 0.45~1.0 过渡值不能带进切页动画）
+        for (UIButton *b in self.dockButtons) {
+            ((UIImageView *)[b viewWithTag:101]).alpha = 1.0;
+            ((UILabel *)[b viewWithTag:102]).alpha = 1.0;
+        }
+        if (g.state != UIGestureRecognizerStateEnded) {          // 被系统取消：静默吸回当前 Tab
+            [UIView animateWithDuration:0.22 delay:0
+                                options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                             animations:^{ self.pill.frame = [self pillFrameForTab:self.current]; }
+                             completion:nil];
+            return;
+        }
         CGFloat vx = [g velocityInView:self.dock].x;
         NSInteger idx = (NSInteger)floor(p.x / w);
-        if (vx > 320.0) idx = (NSInteger)floor(p.x / w) + 1;        // 快速甩 → 往下一格
-        else if (vx < -320.0) idx = (NSInteger)floor(p.x / w);
+        if (vx > 320.0) idx = (NSInteger)floor(p.x / w) + 1;        // 向右快甩 → 往下一格
+        else if (vx < -320.0) idx = (NSInteger)floor(p.x / w) - 1;  // 向左快甩 → 往上一格（原先少减一，甩了等于没甩）
         idx = MAX(0, MIN(idx, n - 1));
         if (idx == self.current) {                                   // 没换页：吸附回原位
             [UIView animateWithDuration:0.22 delay:0
@@ -249,8 +278,7 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
                              completion:^(BOOL f) { [self refreshDock]; }];
             return;
         }
-        self.current = idx;                                          // 先记当前页，动画里从手指位置收到目标
-        [self tb_switchToTab:idx];
+        [self tb_switchToTab:idx];                                   // 水滴动画自己会从手指位置接管并更新 self.current
     }
 }
 
@@ -384,7 +412,11 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
     [a1 addCompletion:^(UIViewAnimatingPosition pos) {
         __strong typeof(self) s = wself;
         if (!s) return;
-        if (pos != UIViewAnimatingPositionEnd) { s.switching = NO; return; }
+        if (pos != UIViewAnimatingPositionEnd || s.pillAnimator != a1) {
+            // 被打断（连点/拖动接管）：只清状态，不许动 pill 的 frame
+            if (s.pillAnimator == a1) { s.switching = NO; s.pillAnimator = nil; }
+            return;
+        }
 
         UISpringTimingParameters *p2 =
             [[UISpringTimingParameters alloc] initWithDampingRatio:kTBTabSettleDamp];
@@ -397,8 +429,13 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
         [a2 addCompletion:^(UIViewAnimatingPosition p) {
             __strong typeof(self) ss = s;
             if (!ss) return;
+            if (p != UIViewAnimatingPositionEnd || ss.pillAnimator != a2) {
+                // 被打断（拖动接管/连点）：保持当前可见位置，别跳到旧目标
+                if (ss.pillAnimator == a2) { ss.switching = NO; ss.pillAnimator = nil; }
+                return;
+            }
             ss.switching = NO;
-            if (ss.pillAnimator == a2) ss.pillAnimator = nil;
+            ss.pillAnimator = nil;
             ss.pill.frame = b;
         }];
         [a2 startAnimation];
