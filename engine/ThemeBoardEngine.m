@@ -858,6 +858,11 @@ static UIImage *TBFitCached(UIImage *img, TBInfo info, NSString *bid) {
 // 17.x 上永远保持 0，行为与旧版完全一致）
 static long gTBAppearanceType = 0;
 static NSMutableDictionary<NSString *, UIImage *> *gDeriveCache = nil;
+static NSObject *TBDeriveLock(void) {
+    static NSObject *lock; static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
 
 static BOOL TBAppearanceEnabled(void) {
     id v = TBPref(@"ApplyDarkIcons");
@@ -967,6 +972,7 @@ static void TBApplyDarkRules(uint8_t *buf, size_t w, size_t h) {
 }
 
 static UIImage *TBDeriveForAppearance(UIImage *light, long type) {
+    if (light.size.width * light.size.height > 4.0e6) return light;   // 超大图跳过，避免卡顿
     size_t w = 0, h = 0;
     uint8_t *buf = TBCopyRGBA(light, &w, &h);
     if (!buf) return light;
@@ -1147,25 +1153,29 @@ static UIImage *TBImageForBundle(NSString *bid) {
     if (type == 0 || !TBAppearanceEnabled() || !bid.length) return TBImageForBundleLight(bid);
     if (TBSkipAppearanceDerive(bid)) return TBImageForBundleLight(bid);
 
-    if (!gDeriveCache) gDeriveCache = [NSMutableDictionary dictionary];
+    @synchronized (TBDeriveLock()) {
+        if (!gDeriveCache) gDeriveCache = [NSMutableDictionary dictionary];
+    }
 
     NSString *vp = TBVariantPath(bid, type);
     if (vp.length) {
         NSString *k = [NSString stringWithFormat:@"%@|%ld|var|%lu", bid, type, (unsigned long)vp.hash];
-        UIImage *c = gDeriveCache[k];
+        UIImage *c = nil;
+        @synchronized (TBDeriveLock()) { c = gDeriveCache[k]; }
         if (c) return c;
         UIImage *img = [[UIImage alloc] initWithContentsOfFile:vp];
-        if (img) { gDeriveCache[k] = img; return img; }
+        if (img) { @synchronized (TBDeriveLock()) { gDeriveCache[k] = img; } return img; }
     }
 
     UIImage *light = TBImageForBundleLight(bid);
     if (!light) return nil;
     NSString *k = [NSString stringWithFormat:@"%@|%ld|%.0fx%.0f", bid, type,
                    light.size.width, light.size.height];
-    UIImage *c = gDeriveCache[k];
+    UIImage *c = nil;
+    @synchronized (TBDeriveLock()) { c = gDeriveCache[k]; }
     if (c) return c;
     UIImage *d = TBDeriveForAppearance(light, type);
-    if (d) gDeriveCache[k] = d;
+    if (d) { @synchronized (TBDeriveLock()) { gDeriveCache[k] = d; } }
     return d ?: light;
 }
 
@@ -1298,14 +1308,18 @@ static FnStoreImage o_storeImage;
 
 static void TBSetAppearanceType(long t, NSString *why) {
     if (t == gTBAppearanceType) return;
+    // 防抖：任何外观切换至少间隔 1.5s，杜绝和刷新互相触发形成死循环
+    static CFAbsoluteTime sLast = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sLast < 1.5) return;
+    sLast = now;
+
     gTBAppearanceType = t;
-    [gDeriveCache removeAllObjects];
+    // 只清我们自己的三本缓存，绝不发 kNotify（那条会触发全量重载 → 又回到这里）
+    @synchronized (TBDeriveLock()) { [gDeriveCache removeAllObjects]; }
     [gImageCache removeAllObjects];
     [gFitCache removeAllObjects];
     TBLog(@"图标外观：%ld（%@）", t, why);
-    // 让图标视图重取（复用现有的 Darwin 通知 → TBReload）
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                         (__bridge CFStringRef)kNotify, NULL, NULL, true);
 }
 
 static id tb_storeImageForIcon(id self, SEL _cmd, id icon, id appearance) {
@@ -1322,19 +1336,21 @@ static id tb_storeImageForIcon(id self, SEL _cmd, id icon, id appearance) {
 /// iOS 17 没有图标外观，用系统深色模式当开关
 static BOOL TBFollowSystemDark(void) {
     id v = TBPref(@"FollowSystemDark");
-    return v ? [v boolValue] : YES;
+    return v ? [v boolValue] : NO;   // 默认关闭：先由用户主动开启再观察
 }
 
 typedef void (*TraitFn)(id, SEL, id);
 static TraitFn o_traitDidChange;
 static void tb_traitDidChange(id self, SEL _cmd, id previous) {
     if (o_traitDidChange) o_traitDidChange(self, _cmd, previous);
-    if (!TBFollowSystemDark() || gTBAppearanceType > 1) return;
+    if (!TBFollowSystemDark() || !TBAppearanceEnabled() || gTBAppearanceType > 1) return;
+    // 只认「全屏」的深浅色，不看单个视图（各视图会来回报，正是死循环源头）
+    BOOL dark = NO;
     @try {
-        UITraitCollection *tc = [self valueForKey:@"traitCollection"];
-        BOOL dark = (tc.userInterfaceStyle == UIUserInterfaceStyleDark);
-        TBSetAppearanceType(dark ? 1 : 0, @"系统深色模式");
+        UITraitCollection *tc = [UIScreen mainScreen].traitCollection;
+        if (tc) dark = (tc.userInterfaceStyle == UIUserInterfaceStyleDark);
     } @catch (NSException *e) { }
+    TBSetAppearanceType(dark ? 1 : 0, @"系统深色模式");
 }
 
 typedef id (*FnInfoImage)(id, SEL, TBImageInfo);
@@ -3064,10 +3080,7 @@ static void TBInstall(void) {
             o_traitDidChange = (TraitFn)TBHook(ivCls, @"traitCollectionDidChange:",
                                                (IMP)tb_traitDidChange, "深色模式跟随");
         }
-        @try {
-            UITraitCollection *tc = [UIScreen mainScreen].traitCollection;
-            if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) gTBAppearanceType = 1;
-        } @catch (NSException *e) { }
+
     }
 
     if (cache && !gDoneCache) {
