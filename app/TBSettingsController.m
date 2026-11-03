@@ -51,10 +51,6 @@ static UIDocumentPickerViewController *TBNewFolderPicker(void) {
         @[ @{@"t": @"写日志", @"k": TBKeyLogEnabled, @"v": @YES},
            @{@"t": @"安全模式（只记录，不换图）", @"k": @"SafeMode", @"v": @NO},
            @{@"t": @"应用后清图标缓存", @"k": @"PurgeCache", @"v": @YES} ],
-        @[ @{@"t": @"深色 / 着色图标（自动生成）", @"k": @"ApplyDarkIcons", @"v": @YES,
-             @"d": @"主题只有一套图时，按深色/着色外观自动派生"},
-           @{@"t": @"iOS 17 跟随系统深色", @"k": @"FollowSystemDark", @"v": @YES,
-             @"d": @"18+ 由系统图标外观决定，此项无效"} ],
     ];
 
     // 每行配一个 SF Symbol

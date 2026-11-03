@@ -850,193 +850,7 @@ static UIImage *TBFitCached(UIImage *img, TBInfo info, NSString *bid) {
     return out;
 }
 
-
-#pragma mark - 深色/着色图标外观派生（iOS 18）
-
-// 当前图标外观：0=浅色 1=深色 2=tintable 3=tinted
-// 由 SBHIconImageAppearanceStore -imageForIcon:appearance: 记录（iOS 18 才有该类，
-// 17.x 上永远保持 0，行为与旧版完全一致）
-static long gTBAppearanceType = 0;
-static BOOL gTBReloading = NO;   // 全量重载进行中
-static NSMutableDictionary<NSString *, UIImage *> *gDeriveCache = nil;
-static NSObject *TBDeriveLock(void) {
-    static NSObject *lock; static dispatch_once_t once;
-    dispatch_once(&once, ^{ lock = [NSObject new]; });
-    return lock;
-}
-
-static BOOL TBAppearanceEnabled(void) {
-    id v = TBPref(@"ApplyDarkIcons");
-    return v ? [v boolValue] : YES;
-}
-
-static inline float TBSS(float e0, float e1, float x) {
-    float t = (x - e0) / (e1 - e0);
-    t = t < 0.f ? 0.f : (t > 1.f ? 1.f : t);
-    return t * t * (3.f - 2.f * t);
-}
-
-static uint8_t *TBCopyRGBA(UIImage *img, size_t *ow, size_t *oh) {
-    CGImageRef cg = img.CGImage;
-    if (!cg) return NULL;
-    size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
-    if (!w || !h) return NULL;
-    uint8_t *buf = calloc(w * h * 4, 1);
-    if (!buf) return NULL;
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs,
-        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    CGColorSpaceRelease(cs);
-    if (!ctx) { free(buf); return NULL; }
-    CGContextSetBlendMode(ctx, kCGBlendModeCopy);
-    CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cg);
-    CGContextRelease(ctx);
-    // 反预乘，便于按原色计算
-    for (size_t i = 0; i < w * h; i++) {
-        uint8_t *q = buf + i * 4;
-        uint8_t a = q[3];
-        if (a == 0 || a == 255) continue;
-        q[0] = (uint8_t)MIN(255, (q[0] * 255 + a / 2) / a);
-        q[1] = (uint8_t)MIN(255, (q[1] * 255 + a / 2) / a);
-        q[2] = (uint8_t)MIN(255, (q[2] * 255 + a / 2) / a);
-    }
-    if (ow) *ow = w;
-    if (oh) *oh = h;
-    return buf;
-}
-
-static UIImage *TBImageFromRGBA(uint8_t *buf, size_t w, size_t h) {
-    if (!buf) return nil;
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs,
-        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    CGColorSpaceRelease(cs);
-    if (!ctx) { free(buf); return nil; }
-    CGImageRef cg = CGBitmapContextCreateImage(ctx);
-    CGContextRelease(ctx);
-    free(buf);
-    if (!cg) return nil;
-    UIImage *out = [UIImage imageWithCGImage:cg scale:1 orientation:UIImageOrientationUp];
-    CGImageRelease(cg);
-    return out;
-}
-
-/// K 方案：全图亮度映射 + 条件反白（深色）
-static void TBApplyDarkRules(uint8_t *buf, size_t w, size_t h) {
-    const size_t n = w * h;
-    uint8_t *orig = malloc(n * 3);
-    float *origL = malloc(n * sizeof(float));
-    if (!orig || !origL) { free(orig); free(origL); return; }
-
-    double sumL = 0, sumSat = 0;
-    size_t subjCount = 0, whiteCount = 0;
-
-    for (size_t i = 0; i < n; i++) {
-        uint8_t *q = buf + i * 4;
-        uint8_t *o = orig + i * 3;
-        o[0] = q[0]; o[1] = q[1]; o[2] = q[2];
-        float r = q[0], g = q[1], b = q[2];
-        float L = (0.299f * r + 0.587f * g + 0.114f * b) / 255.f;
-        origL[i] = L;
-        if (q[3] > 0) {
-            if (L > 0.86f) whiteCount++;
-            if (L <= 0.60f) {
-                float mx = fmaxf(r, fmaxf(g, b));
-                float mn = fminf(r, fminf(g, b));
-                sumL += L;
-                sumSat += (mx > 1.f) ? (mx - mn) / mx : 0.f;
-                subjCount++;
-            }
-            float t = TBSS(0.68f, 0.93f, L);
-            // 饱和度越高越保留色相：彩色底只压暗，中性白才压成深色
-            float mx = fmaxf(r, fmaxf(g, b)), mn = fminf(r, fminf(g, b));
-            float sat = (mx > 1.f) ? (mx - mn) / mx : 0.f;
-            float w = TBSS(0.08f, 0.30f, sat);
-            float neu_r = r * (1 - t) + 30 * t;
-            float neu_g = g * (1 - t) + 30 * t;
-            float neu_b = b * (1 - t) + 32 * t;
-            float sat_r = r * (1 - 0.45f * t);
-            float sat_g = g * (1 - 0.45f * t);
-            float sat_b = b * (1 - 0.45f * t);
-            q[0] = (uint8_t)lrintf(neu_r * (1 - w) + sat_r * w);
-            q[1] = (uint8_t)lrintf(neu_g * (1 - w) + sat_g * w);
-            q[2] = (uint8_t)lrintf(neu_b * (1 - w) + sat_b * w);
-        }
-    }
-
-    BOOL invert = NO;
-    if ((double)whiteCount / (double)n > 0.45 && subjCount >= 200) {
-        invert = ((sumL / (double)subjCount) < 0.45 && (sumSat / (double)subjCount) < 0.18);
-    }
-    if (invert) {
-        for (size_t i = 0; i < n; i++) {
-            uint8_t *q = buf + i * 4;
-            if (q[3] == 0 || origL[i] > 0.60f) continue;
-            const uint8_t *o = orig + i * 3;
-            q[0] = (uint8_t)lrintf(255.f - o[0] * 0.92f);
-            q[1] = (uint8_t)lrintf(255.f - o[1] * 0.92f);
-            q[2] = (uint8_t)lrintf(255.f - o[2] * 0.92f);
-        }
-    }
-    free(orig);
-    free(origL);
-}
-
-static UIImage *TBDeriveForAppearance(UIImage *light, long type) {
-    if (light.size.width * light.size.height > 4.0e6) return light;   // 超大图跳过，避免卡顿
-    size_t w = 0, h = 0;
-    uint8_t *buf = TBCopyRGBA(light, &w, &h);
-    if (!buf) return light;
-    if (type == 1) {
-        TBApplyDarkRules(buf, w, h);
-    } else {
-        // tinted / tintable：灰度化，交系统按用户色染色
-        for (size_t i = 0; i < w * h; i++) {
-            uint8_t *q = buf + i * 4;
-            if (q[3] == 0) continue;
-            float L = (0.299f * q[0] + 0.587f * q[1] + 0.114f * q[2]) / 255.f;
-            float ink = (1.f - L) * 1.15f;
-            ink = ink < 0 ? 0 : (ink > 1 ? 1 : ink);
-            uint8_t v = (uint8_t)lrintf(ink * 255.f);
-            q[0] = q[1] = q[2] = v;
-        }
-    }
-    UIImage *out = TBImageFromRGBA(buf, w, h);
-    if (out) out = [UIImage imageWithCGImage:out.CGImage scale:light.scale orientation:light.imageOrientation];
-    return out ?: light;
-}
-
-/// 主题里是否自带该外观的专用图（<name>-dark.png / IconBundles-dark/<bid>.png）
-static NSString *TBVariantPath(NSString *bid, long type) {
-    if (!bid.length || type == 0) return nil;
-    NSString *suffix = (type == 1) ? @"-dark" : @"-tinted";
-    NSString *folder = (type == 1) ? @"IconBundles-dark" : @"IconBundles-tinted";
-
-    [gLock lock];
-    TBLoadIndex();
-    NSString *base = gIndex[bid];
-    [gLock unlock];
-    if (!base.length) return nil;
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *dir = [base stringByDeletingLastPathComponent];
-    NSString *alt = [[dir stringByAppendingPathComponent:folder]
-                     stringByAppendingPathComponent:[bid stringByAppendingPathExtension:@"png"]];
-    if ([fm fileExistsAtPath:alt]) return alt;
-
-    NSString *name = [[base lastPathComponent] stringByDeletingPathExtension];
-    NSString *alt2 = [dir stringByAppendingPathComponent:
-                      [NSString stringWithFormat:@"%@%@.png", name, suffix]];
-    if ([fm fileExistsAtPath:alt2]) return alt2;
-    return nil;
-}
-
-static BOOL TBSkipAppearanceDerive(NSString *bid) {
-    return [bid isEqualToString:@"com.apple.mobilecal"] ||
-           [bid isEqualToString:@"com.apple.mobiletimer"];
-}
-
-static UIImage *TBImageForBundleLight(NSString *bid) {
+static UIImage *TBImageForBundle(NSString *bid) {
     if (!bid.length || !TBEnabled()) return nil;
     if (TBSafeMode()) return nil;   // 安全模式：只记日志，绝不改图
     // 时钟：表盘当普通图标图交给系统（IconBundles 优先，没有则用 Bundles 的表盘素材），
@@ -1155,39 +969,6 @@ static NSString *TBBIDDumpIcon(id icon) {
         }
     } @catch (NSException *e) { }
     return [pairs componentsJoinedByString:@" "];
-}
-
-
-/// 对外：按当前外观返回主题图（无专用图时现场派生并缓存）
-static UIImage *TBImageForBundle(NSString *bid) {
-    long type = gTBAppearanceType;
-    if (type == 0 || !TBAppearanceEnabled() || !bid.length) return TBImageForBundleLight(bid);
-    if (TBSkipAppearanceDerive(bid)) return TBImageForBundleLight(bid);
-
-    @synchronized (TBDeriveLock()) {
-        if (!gDeriveCache) gDeriveCache = [NSMutableDictionary dictionary];
-    }
-
-    NSString *vp = TBVariantPath(bid, type);
-    if (vp.length) {
-        NSString *k = [NSString stringWithFormat:@"%@|%ld|var|%lu", bid, type, (unsigned long)vp.hash];
-        UIImage *c = nil;
-        @synchronized (TBDeriveLock()) { c = gDeriveCache[k]; }
-        if (c) return c;
-        UIImage *img = [[UIImage alloc] initWithContentsOfFile:vp];
-        if (img) { @synchronized (TBDeriveLock()) { gDeriveCache[k] = img; } return img; }
-    }
-
-    UIImage *light = TBImageForBundleLight(bid);
-    if (!light) return nil;
-    NSString *k = [NSString stringWithFormat:@"%@|%ld|%.0fx%.0f", bid, type,
-                   light.size.width, light.size.height];
-    UIImage *c = nil;
-    @synchronized (TBDeriveLock()) { c = gDeriveCache[k]; }
-    if (c) return c;
-    UIImage *d = TBDeriveForAppearance(light, type);
-    if (d) { @synchronized (TBDeriveLock()) { gDeriveCache[k] = d; } }
-    return d ?: light;
 }
 
 static NSString *TBBIDFromIcon(id icon) {
@@ -1311,92 +1092,6 @@ static id tb_cacheImageForIcon(id self, SEL _cmd, id image, id icon) {
         }
     } @catch (NSException *e) { }
     return o_cacheImageForIcon ? o_cacheImageForIcon(self, _cmd, image, icon) : nil;
-}
-
-// ---- 图标外观（iOS 18：系统风格；iOS 17：跟随深色模式）----
-typedef id (*FnStoreImage)(id, SEL, id, id);
-static FnStoreImage o_storeImage;
-
-static void TBSetAppearanceType(long t, NSString *why) {
-    if (t == gTBAppearanceType) return;
-    if (gTBReloading) return;                 // 重载中，忽略
-    static CFAbsoluteTime sLast = 0;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - sLast < 1.5) return;            // 防抖
-    sLast = now;
-
-    gTBAppearanceType = t;
-    @synchronized (TBDeriveLock()) { [gDeriveCache removeAllObjects]; }
-    [gImageCache removeAllObjects];
-    [gFitCache removeAllObjects];
-    TBLog(@"图标外观：%ld（%@）", t, why);
-
-    // 必须清系统那份缓存，否则只有部分图标会变（一半深一半浅）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (gTBReloading) return;
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                             (__bridge CFStringRef)kNotify, NULL, NULL, true);
-    });
-}
-
-static BOOL TBFollowSystemDark(void);
-/// 启动后每 1 秒核对一次系统深浅色（唯一来源，不会像 per-view 回调那样互相打架）
-static void TBStartAppearanceWatch(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        // 先按当前系统状态定初值
-        @try {
-            UITraitCollection *tc = [UIScreen mainScreen].traitCollection;
-            if (tc && tc.userInterfaceStyle == UIUserInterfaceStyleDark) gTBAppearanceType = 1;
-        } @catch (NSException *e) { }
-
-        dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-                                                     dispatch_get_main_queue());
-        dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
-                                  NSEC_PER_SEC, 200 * NSEC_PER_MSEC);
-        dispatch_source_set_event_handler(t, ^{
-            if (!TBFollowSystemDark() || !TBAppearanceEnabled()) return;
-            @try {
-                UITraitCollection *tc = [UIScreen mainScreen].traitCollection;
-                if (!tc) return;
-                long want = (tc.userInterfaceStyle == UIUserInterfaceStyleDark) ? 1 : 0;
-                if (want != gTBAppearanceType) TBSetAppearanceType(want, @"系统深浅色");
-            } @catch (NSException *e) { }
-        });
-        dispatch_resume(t);
-    });
-}
-
-static id tb_storeImageForIcon(id self, SEL _cmd, id icon, id appearance) {
-    @try {
-        if (appearance && [appearance respondsToSelector:NSSelectorFromString(@"appearanceType")]) {
-            long t = (long)((long (*)(id, SEL))objc_msgSend)(appearance,
-                        NSSelectorFromString(@"appearanceType"));
-            TBSetAppearanceType(t, @"SBHIconImageAppearanceStore");
-        }
-    } @catch (NSException *e) { }
-    return o_storeImage ? o_storeImage(self, _cmd, icon, appearance) : nil;
-}
-
-/// iOS 17 没有图标外观，用系统深色模式当开关
-static BOOL TBFollowSystemDark(void) {
-    id v = TBPref(@"FollowSystemDark");
-    return v ? [v boolValue] : YES;  // 默认跟随系统深浅色
-}
-
-typedef void (*TraitFn)(id, SEL, id);
-static TraitFn o_traitDidChange;
-static void tb_traitDidChange(id self, SEL _cmd, id previous) {
-    if (o_traitDidChange) o_traitDidChange(self, _cmd, previous);
-    if (!TBFollowSystemDark() || !TBAppearanceEnabled() || gTBAppearanceType > 1) return;
-    // 只认「全屏」的深浅色，不看单个视图（各视图会来回报，正是死循环源头）
-    BOOL dark = NO;
-    @try {
-        UITraitCollection *tc = [UIScreen mainScreen].traitCollection;
-        if (tc) dark = (tc.userInterfaceStyle == UIUserInterfaceStyleDark);
-    } @catch (NSException *e) { }
-    TBSetAppearanceType(dark ? 1 : 0, @"系统深色模式");
 }
 
 typedef id (*FnInfoImage)(id, SEL, TBImageInfo);
@@ -2684,7 +2379,6 @@ static BOOL gDoneImageHooks = NO;      // UIImage / NSBundle 那组
 static BOOL gDoneISIcon = NO;
 static BOOL gDoneActivity = NO;
 static BOOL gDoneCache = NO;
-static BOOL gDoneAppearance = NO;
 // ---- 左滑删除：一次性把滑动容器的真实层级打进日志（灰底到底是什么）----
 static NSString *TBColorDesc(UIColor *c) {
     if (!c) return @"nil";
@@ -2902,104 +2596,6 @@ static BOOL gDoneIconImageView = NO;
 static BOOL gDoneSetIcon = NO;
 static BOOL gDoneLayout = NO;
 static BOOL gDoneIFImage = NO;
-static BOOL gDoneNC = NO;
-static int gNCRetries = 0;
-
-#pragma mark - 通知中心图标（NCNotificationContent -icons）
-
-typedef id (*NCContentFn)(id, SEL);
-typedef id (*NCIconsFn)(id, SEL);
-static NCContentFn o_ncContent = NULL;
-static NCIconsFn o_ncIcons = NULL;
-
-/// 超椭圆（squircle）路径，近似系统图标遮罩
-static UIBezierPath *TBSquirclePath(CGRect rect) {
-    CGFloat w = rect.size.width, h = rect.size.height;
-    CGFloat cx = CGRectGetMidX(rect), cy = CGRectGetMidY(rect);
-    CGFloat a = w / 2.0, b = h / 2.0;
-    const CGFloat n = 5.0;
-    const int seg = 96;
-    const CGFloat twoPi = 6.283185307179586;
-    UIBezierPath *p = [UIBezierPath bezierPath];
-    for (int i = 0; i < seg; i++) {
-        CGFloat t = (CGFloat)i / (CGFloat)seg * twoPi;
-        CGFloat ct = cos(t), st = sin(t);
-        CGFloat x = cx + a * (ct < 0 ? -1 : 1) * pow(fabs(ct), 2.0 / n);
-        CGFloat y = cy + b * (st < 0 ? -1 : 1) * pow(fabs(st), 2.0 / n);
-        if (i == 0) [p moveToPoint:CGPointMake(x, y)];
-        else [p addLineToPoint:CGPointMake(x, y)];
-    }
-    [p closePath];
-    return p;
-}
-
-static UIImage *TBMaskIconSquircle(UIImage *img, CGSize size, CGFloat scale) {
-    if (!img || size.width < 1 || size.height < 1) return nil;
-    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-    fmt.scale = scale > 0.5 ? scale : 3.0;
-    fmt.opaque = NO;
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size format:fmt];
-    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        UIBezierPath *path = TBSquirclePath(CGRectMake(0, 0, size.width, size.height));
-        [path addClip];
-        [img drawInRect:CGRectMake(0, 0, size.width, size.height)];
-    }];
-}
-
-/// NCNotificationRequest -content：把 sectionIdentifier 抄给 content（icons 里要用）
-static id tb_ncContent(id self, SEL _cmd) {
-    id content = o_ncContent ? o_ncContent(self, _cmd) : nil;
-    @try {
-        if (content) {
-            NSString *sid = nil;
-            if ([self respondsToSelector:NSSelectorFromString(@"sectionIdentifier")]) {
-                sid = [self valueForKey:@"sectionIdentifier"];
-            }
-            if ([sid isKindOfClass:[NSString class]] && sid.length) {
-                BOOL missing = YES;
-                @try {
-                    id cur = [content valueForKey:@"sectionIdentifier"];
-                    missing = !(cur && [cur length] > 0);
-                } @catch (NSException *e) { missing = YES; }
-                if (missing) [content setValue:sid forKey:@"sectionIdentifier"];
-            }
-        }
-    } @catch (NSException *e) {}
-    return content;
-}
-
-/// NCNotificationContent -icons：返回主题图（遮罩 + 同尺寸）
-static id tb_ncIcons(id self, SEL _cmd) {
-    id arr = o_ncIcons ? o_ncIcons(self, _cmd) : nil;
-    if (!TBApplyEnabled(@"ApplyNotification")) return arr;
-    @try {
-        NSString *bid = nil;
-        if ([self respondsToSelector:NSSelectorFromString(@"sectionIdentifier")]) {
-            bid = [self valueForKey:@"sectionIdentifier"];
-        }
-        if (![bid isKindOfClass:[NSString class]] || bid.length == 0) return arr;
-
-        UIImage *first = [arr isKindOfClass:[NSArray class]] ? [(NSArray *)arr firstObject] : nil;
-        CGFloat scale = [first isKindOfClass:[UIImage class]] ? first.scale : 3.0;
-        CGSize size = [first isKindOfClass:[UIImage class]] ? first.size : CGSizeMake(36, 36);
-
-        NSString *key = [NSString stringWithFormat:@"nc|%@|%.0fx%.0f@%.0f", bid, size.width, size.height, scale];
-        UIImage *cached = [gImageCache objectForKey:key];
-        if (cached) return @[cached];
-
-        UIImage *themed = TBImageForBundle(bid);
-        if (!themed) return arr;
-        UIImage *out = TBMaskIconSquircle(themed, size, scale);
-        if (!out) return arr;
-        [gImageCache setObject:out forKey:key];
-        gServe++;
-        TBLog(@"serve NC 图标 %@ %.0fx%.0f", bid, size.width, size.height);
-        return @[out];
-    } @catch (NSException *e) {
-        TBLog(@"NC 图标异常: %@", e.reason);
-    }
-    return arr;
-}
 
 static void TBInstall(void) {
     // 检测 iOS 主版本
@@ -3042,21 +2638,6 @@ static void TBInstall(void) {
         o_appIconScale = (AppIconScaleFn)TBHookClass([UIImage class], @"_applicationIconImageForBundleIdentifier:format:scale:",
                                                      (IMP)tb_appIconImageForBIDScale, "应用图标(scale)");
         gDoneImageHooks = YES;
-    }
-
-    // 通知中心：NC 的图标来自 NCNotificationContent -icons 的预生成数组，不走 UIImage API
-    if (!gDoneNC) {
-        Class ncReq = NSClassFromString(@"NCNotificationRequest");
-        Class ncContent = NSClassFromString(@"NCNotificationContent");
-        if (ncReq && ncContent) {
-            gDoneNC = YES;
-            o_ncContent = (NCContentFn)TBHook(ncReq, @"content", (IMP)tb_ncContent, "NC.content");
-            o_ncIcons = (NCIconsFn)TBHook(ncContent, @"icons", (IMP)tb_ncIcons, "NC.icons");
-        } else if (gNCRetries < 40) {
-            gNCRetries++;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ TBInstall(); });
-        }
     }
 
     // ISIcon（运行时检测）
@@ -3113,23 +2694,6 @@ static void TBInstall(void) {
     }
 
     // SBHIconImageCache 主通道（所有版本的核心缓存接口）
-    if (!gDoneAppearance) {
-        gDoneAppearance = YES;
-        Class apStore = NSClassFromString(@"SBHIconImageAppearanceStore");
-        if (apStore && TBHasMethod(apStore, @"imageForIcon:appearance:")) {
-            o_storeImage = (FnStoreImage)TBHook(apStore, @"imageForIcon:appearance:",
-                                                (IMP)tb_storeImageForIcon, "图标外观记录");
-        }
-        // iOS 17：跟随系统深色模式（轮询 UIScreen，1 秒一次，最可靠）
-        Class ivCls = NSClassFromString(@"SBIconView");
-        if (ivCls && TBHasMethod(ivCls, @"traitCollectionDidChange:")) {
-            o_traitDidChange = (TraitFn)TBHook(ivCls, @"traitCollectionDidChange:",
-                                               (IMP)tb_traitDidChange, "深色模式跟随");
-        }
-        TBStartAppearanceWatch();
-
-    }
-
     if (cache && !gDoneCache) {
         gDoneCache = YES;
         // 跨版本最稳定的核心方法
@@ -3412,9 +2976,6 @@ static NSInteger TBInvalidateIconViews(NSArray *icons) {
 
 static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, const void *obj, CFDictionaryRef info) {
     static NSUInteger sReloadSeq = 0;
-    gTBReloading = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ gTBReloading = NO; });
     const NSUInteger mySeq = ++sReloadSeq;
     [gLock lock];
     gIndex = nil;
@@ -3433,7 +2994,6 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n, c
 
     [gImageCache removeAllObjects];
     [gFitCache removeAllObjects];
-    [gDeriveCache removeAllObjects];
 
     // 主线程：先（可选）分批清缓存，再通知图标视图重取，最后让 SpringBoard 重排
     dispatch_async(dispatch_get_main_queue(), ^{
