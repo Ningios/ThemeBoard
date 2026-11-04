@@ -37,4 +37,10 @@ BOOL TBURLIsICloud(NSURL *_Nullable url);
 /// 统一的失败提示文案（带 iCloud 说明 + 原始错误）
 NSString *TBImportFailureMessage(NSURL *_Nullable url, NSError *_Nullable error, NSString *fallback);
 
+/// 0.15.54：从 from 沿 presentedViewController 链找到「真正的最顶层」可呈现 VC。
+/// 从抽屉/弹层/popover 里 present 文件选择器时必须用它：直接 present 在非顶层 VC 上，
+/// picker 能弹出来（UIKit 会自己往上转发 view），但选中回调可能落到一个已经不在窗口里的
+/// VC 上，表现就是「点了文件完全没反应、连日志都没有」。
+UIViewController *TBTopPresentingViewController(UIViewController *from);
+
 NS_ASSUME_NONNULL_END

@@ -1157,11 +1157,24 @@ static NSArray<NSArray<NSString *> *> *TBAssetKindTable(void) {
     if (!picker) { [self tb_alert:@"打不开" message:@"系统没有可用的图片选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
-    [self presentViewController:picker animated:YES completion:nil];
+
+    // 0.15.54：抽屉是从列表页 present 上来的，再在抽屉上 present picker 属于「嵌套呈现」，
+    // 回调容易丢。统一从最顶层 VC 发，并留日志。
+    UIViewController *host = TBTopPresentingViewController(self);
+    TBLog2(@"[导入遮罩][picker] 即将 present self=%@ host=%@ delegate==self?%d",
+           NSStringFromClass([self class]), NSStringFromClass([host class]),
+           (picker.delegate == (id)self) ? 1 : 0);
+    [host presentViewController:picker animated:YES completion:^{
+        TBLog2(@"[导入遮罩][picker] present 完成 presenting=%@",
+               NSStringFromClass([picker.presentingViewController class]));
+    }];
 }
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
 didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSLog(@"[ThemeBoard] ★进入遮罩 didPickDocumentsAtURLs urls.count=%lu", (unsigned long)urls.count);
+    TBLog2(@"[导入遮罩][picker] ★进入回调 urls.count=%lu delegate=%@",
+           (unsigned long)urls.count, NSStringFromClass([controller.delegate class]));
     NSURL *url = urls.firstObject;
     if (!url) return;
 
@@ -1304,7 +1317,8 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
-    // 用户取消：什么都不做
+    // 用户取消：什么都不做（但要留日志，便于区分「没回调」和「用户取消」）
+    TBLog2(@"[导入遮罩][picker] 用户取消 documentPickerWasCancelled");
 }
 
 @end

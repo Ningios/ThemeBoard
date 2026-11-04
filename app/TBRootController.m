@@ -75,14 +75,13 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
     self.pages.firstObject.view.hidden = NO;
     self.current = 0;
 
-    // 0.15.53：页面左右滑切 Tab（水平主导才触发，cancelsTouchesInView=NO 不干扰列表滚动；
-    // dock 上的 tb_dockPan 手势在 dock 视图上，优先级天然高于这个加在主视图上的）
-    UIPanGestureRecognizer *pagePan =
-        [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(tb_pagePan:)];
-    pagePan.cancelsTouchesInView = NO;
-    [self.view addGestureRecognizer:pagePan];
+    // 0.15.54：删除 0.15.53 加的全屏 UIPanGestureRecognizer（tb_pagePan）。
+    // 它加在主视图上，会和 UITableView 的 cell 左滑删除抢手势，导致「左滑删除"滑不动"、
+    // 变成切页」。现在 Tab 根页面不再有任何左右滑手势：左右滑什么都不发生，
+    // 列表的上下滚动 / cell 左滑删除全部还给 UITableView 自己处理。
+    // 切 Tab 仍然只有两种入口：点 dock 按钮、dock 上拖动（tb_dockPan，手势挂在 dock 上）。
 
-    // 0.15.53：各 nav 启用边缘右滑返回；根页面禁用 pop（防与切 Tab 手势打架/卡死）
+    // 各 nav 启用系统自带的边缘右滑返回：只有 push 出二级页面后才生效（根页面返回 NO，防卡死）
     for (UINavigationController *nav in self.pages) {
         nav.delegate = self;
         nav.interactivePopGestureRecognizer.enabled = YES;
@@ -218,28 +217,12 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
 
 #pragma mark - Tab 切换（水滴：前沿先到、后沿慢半拍 + 轻微回弹，共 400ms）
 
-/// 0.15.53：主视图左右滑切 Tab —— 向左滑（content 向左）→ 右边 Tab，向右滑 → 左边 Tab。
-/// 水平主导（|vx| > |vy| 且位移够大）才算切页，竖向滚动 / 斜向拖动不触发。
-- (void)tb_pagePan:(UIPanGestureRecognizer *)g {
-    if (self.draggingDock) return;                 // dock 拖动优先
-    if (self.switching) return;                    // 切页动画中不叠发
-    CGPoint v = [g velocityInView:self.view];
-    CGPoint t = [g translationInView:self.view];
-    if (g.state == UIGestureRecognizerStateEnded) {
-        BOOL horizontal = fabs(v.x) > fabs(v.y) * 1.2;
-        BOOL farEnough = fabs(t.x) > 44.0 || fabs(v.x) > 500.0;
-        if (!horizontal || !farEnough) return;
-        NSInteger n = (NSInteger)self.pages.count;
-        NSInteger target = (t.x < 0) ? self.current + 1 : self.current - 1;   // 左滑→下一个
-        target = MAX(0, MIN(target, n - 1));
-        if (target != self.current) [self tb_switchToTab:target];
-    }
-}
-
 #pragma mark - 边缘右滑返回（UINavigationControllerDelegate / 手势代理）
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gr {
-    // interactivePop 手势：只在真的有页面可弹时放行（根页面禁用，防和切 Tab 打架）
+    // 0.15.54：只剩系统自带的 interactivePop 手势（边缘右滑返回）。
+    // 只有导航栈里真的 push 了页面（count > 1）才放行；Tab 根页面一律返回 NO，
+    // 避免根页面手势把系统导航状态搞乱（卡死 / 吃掉列表触摸）。
     if ([gr isKindOfClass:[UIScreenEdgePanGestureRecognizer class]] ||
         [gr.view isKindOfClass:[UINavigationBar class]]) {
         UINavigationController *nav = nil;

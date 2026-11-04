@@ -19,6 +19,10 @@
 @property (nonatomic, strong) NSArray<TBTheme *> *assetPacks;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, assign) NSInteger sortMode;   // 0 名称 1 图标数
+/// 0.15.54：强引用当前 picker —— 之前是局部变量，虽然有 present 持有，
+/// 但一旦被提前 dismiss（比如 search 控制器抢了呈现）就会连回调一起消失，
+/// 表现正是「点了文件完全没反应」。留住它 + delegate 自查日志。
+@property (nonatomic, strong) UIDocumentPickerViewController *activePicker;
 - (void)tb_dismissSearch;
 @end
 
@@ -207,16 +211,42 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 - (void)importTapped {
     // iOS14+：initForOpeningContentTypes:asCopy:YES（系统先把文件/目录复制进 App 临时区）
     // 老系统：initWithDocumentTypes:inMode:UIDocumentPickerModeImport
+    // 搜索态下 self.presentedViewController 是搜索控制器，会抢走呈现 → 先退出搜索
+    if (self.search.isActive) [self tb_dismissSearch];
+
     UIDocumentPickerViewController *picker =
         TBNewImportPicker(@[ UTTypeFolder, UTTypeZIP, UTTypeItem ], @[ @"public.item" ]);
     if (!picker) { [self alertTitle:@"打不开" message:@"系统没有可用的文件夹选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
-    [self presentViewController:picker animated:YES completion:nil];
+    self.activePicker = picker;                 // 强持有，防提前释放
+
+    // ★ 0.15.54：从「真正的最顶层 VC」present。之前在 self 上 present，若 self 上面
+    //   还挂着弹层/搜索控制器，picker 是弹出来了，但选中回调落不到 self 上（用户实测：
+    //   跳到文件选择器后点文件完全没反应，且 didPickDocumentsAtURLs / WasCancelled 一行日志都没有）。
+    UIViewController *host = TBTopPresentingViewController(self);
+    NSLog(@"[ThemeBoard] 导入 picker: self=%@ host=%@ delegate==self?%d",
+          NSStringFromClass([self class]), NSStringFromClass([host class]),
+          (picker.delegate == (id)self) ? 1 : 0);
+    TBLog2(@"[导入][picker] 即将 present self=%@ host=%@ delegate==self?%d",
+           NSStringFromClass([self class]), NSStringFromClass([host class]),
+           (picker.delegate == (id)self) ? 1 : 0);
+    [host presentViewController:picker animated:YES completion:^{
+        TBLog2(@"[导入][picker] present 完成 picker.presenting=%@",
+               NSStringFromClass([picker.presentingViewController class]));
+    }];
 }
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
 didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    // ★ 0.15.54：这里是回调的「第一行」。用户实测 app.log 里连这一行都没有，
+    //   说明要么回调没进（呈现层级/delegate 问题），要么日志被前面 return 掉。
+    //   先无条件打，定位用。
+    NSLog(@"[ThemeBoard] ★进入 didPickDocumentsAtURLs urls.count=%lu", (unsigned long)urls.count);
+    TBLog2(@"[导入][picker] ★进入回调 didPickDocumentsAtURLs urls.count=%lu delegate=%@",
+           (unsigned long)urls.count, NSStringFromClass([controller.delegate class]));
+    self.activePicker = nil;
+
     NSURL *url = urls.firstObject;
     TBLog2(@"[导入] 主题列表：didPickDocumentsAtURLs 入口，选中 %lu 个，第一个=%@ isICloud=%d",
            (unsigned long)urls.count, url.absoluteString ?: @"(nil)",
@@ -237,6 +267,21 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         TBLog2(@"[导入] 主题列表：失败弹窗内容：%@", msg);
         TBPresentAlert(self, @"导入失败", msg);
     }
+}
+
+/// 老系统的单 URL 回调（iOS 11 起已废弃，个别系统版本只回这一条）→ 统一转给复数版本
+- (void)documentPicker:(UIDocumentPickerViewController *)controller
+didPickDocumentAtURL:(NSURL *)url {
+    TBLog2(@"[导入][picker] 旧回调 didPickDocumentAtURL=%@", url.absoluteString ?: @"(nil)");
+    if (!url) return;
+    [self documentPicker:controller didPickDocumentsAtURLs:@[ url ]];
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    // 0.15.54：取消也要有日志，否则排障时无法区分「没回调」和「用户取消」
+    NSLog(@"[ThemeBoard] documentPickerWasCancelled");
+    TBLog2(@"[导入][picker] 用户取消 documentPickerWasCancelled");
+    self.activePicker = nil;
 }
 
 #pragma mark - 顶部工具条

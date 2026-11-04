@@ -296,3 +296,34 @@ void TBRemoveTempCopy(NSURL *tempURL) {
     if (![[parent lastPathComponent] hasPrefix:@"tb-import-"]) return;
     [[NSFileManager defaultManager] removeItemAtPath:parent error:NULL];
 }
+UIViewController *TBTopPresentingViewController(UIViewController *from) {
+    UIViewController *vc = from;
+    NSInteger guard = 0;
+    while (vc.presentedViewController && guard++ < 16) {
+        UIViewController *next = vc.presentedViewController;
+        // 正在被 dismiss 的中间态不要跟进去（会拿到一个马上要消失的 VC）
+        if (next.isBeingDismissed) break;
+        vc = next;
+    }
+    // 兜底：如果这条链上没有任何 VC 真的挂在窗口里（例如从被移出层级的抽屉里 present），
+    // 改用窗口的 rootViewController —— 那才是唯一保证能正常弹 picker 且回调能回来的对象。
+    if (!vc.view.window) {
+        UIWindow *w = from.view.window;
+        if (!w) {
+            for (UIWindow *cand in [UIApplication sharedApplication].windows) {
+                if (cand.isKeyWindow) { w = cand; break; }
+            }
+        }
+        UIViewController *root = w.rootViewController;
+        if (root && root != vc) {
+            UIViewController *top = root;
+            NSInteger g2 = 0;
+            while (top.presentedViewController && g2++ < 16 &&
+                   !top.presentedViewController.isBeingDismissed) {
+                top = top.presentedViewController;
+            }
+            return top;
+        }
+    }
+    return vc ?: from;
+}

@@ -25,6 +25,39 @@ void TBLog2(NSString *fmt, ...) {
     else { @try { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; } @catch (id e) {} [fh closeFile]; }
 }
 
+/// 0.15.54：弹窗按钮统一套玻璃底（SystemThinMaterial + 白 0.55/0.12 + 1px 亮边 + 圆角 12），
+/// 与抽屉/工具条按钮同一套观感。以前「取消」是裸 UIButtonTypeSystem，在玻璃卡片上像个
+/// 悬浮的纯文字，几乎看不出是按钮。
+static void TBApplyPanelGlass(UIButton *b) {
+    if (!b || [b viewWithTag:2002]) return;
+    b.backgroundColor = [UIColor clearColor];
+    b.clipsToBounds = YES;
+    b.layer.cornerRadius = 12.0;
+    b.layer.cornerCurve = kCACornerCurveContinuous;
+    TBApplyRim(b, 0.45);                       // 1px 亮边
+
+    UIVisualEffectView *mat = [[UIVisualEffectView alloc] initWithEffect:
+        [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
+    mat.tag = 2002;
+    mat.userInteractionEnabled = NO;
+    mat.frame = b.bounds;
+    mat.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [b insertSubview:mat atIndex:0];
+
+    UIView *fill = [[UIView alloc] init];
+    fill.tag = 2003;
+    fill.userInteractionEnabled = NO;
+    fill.frame = b.bounds;
+    fill.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    fill.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                          [UIColor colorWithWhite:1 alpha:0.12]);
+    [b insertSubview:fill atIndex:1];
+
+    // 文字/图标要盖在玻璃之上（insertSubview:atIndex:0/1 只是插到最底，这里再兜一次）
+    if (b.titleLabel) [b bringSubviewToFront:b.titleLabel];
+    if (b.imageView) [b bringSubviewToFront:b.imageView];
+}
+
 @implementation TBGlassPanelBase
 
 - (instancetype)initWithNibName:(NSString *)nibNameOrNil bundle:(NSBundle *)nibBundleOrNil {
@@ -153,6 +186,13 @@ void TBLog2(NSString *fmt, ...) {
     } completion:^(BOOL finished) {
         __strong typeof(self) s = wself;
         if (!s) { if (done) done(); return; }
+        // ★ 0.15.54：先整屏隐藏再 dismiss。原来 dim/card 归零后直接 dismiss，
+        //   dismiss 那一帧窗口会先把「已经全透明」的 self.view 重新显示出来，
+        //   用户看到的正是「取消时弹窗闪一下 / 全亮一帧」。
+        s.view.hidden = YES;
+        s.view.alpha = 0;
+        s.dimView.alpha = 0;
+        s.cardView.alpha = 0;
         [s dismissViewControllerAnimated:NO completion:done];
     }];
 }
@@ -262,12 +302,14 @@ static CGFloat TBTextHeight(NSString *text, UIFont *font, CGFloat width) {
         [self.buttons addObject:b];
     }
 
+    // 0.15.54：取消按钮不再是裸文字按钮，套玻璃底（与选项按钮一致）
     self.cancelButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.cancelButton setTitle:(self.cancelTitle.length ? self.cancelTitle : @"取消")
                        forState:UIControlStateNormal];
-    self.cancelButton.titleLabel.font = [UIFont systemFontOfSize:16];
+    self.cancelButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     [self.cancelButton setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
     [self.cancelButton addTarget:self action:@selector(tb_cancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    TBApplyPanelGlass(self.cancelButton);
     [self.cardView addSubview:self.cancelButton];
 }
 
@@ -467,19 +509,21 @@ static CGFloat TBTextHeight(NSString *text, UIFont *font, CGFloat width) {
     self.confirmButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     [self.confirmButton setTitleColor:(self.destructive ? [UIColor systemRedColor] : [UIColor labelColor])
                               forState:UIControlStateNormal];
-    self.confirmButton.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
-                                                        [UIColor colorWithWhite:1 alpha:0.14]);
-    self.confirmButton.layer.cornerRadius = 13;
-    self.confirmButton.layer.cornerCurve = kCACornerCurveContinuous;
-    TBApplyRim(self.confirmButton, 0.55);
+    // 0.15.54：确认按钮统一套玻璃底（保留「蓝/红字强调」的标题色）
+    TBApplyPanelGlass(self.confirmButton);
+    [self.confirmButton setTitleColor:(self.destructive ? [UIColor systemRedColor]
+                                                       : [UIColor systemBlueColor])
+                              forState:UIControlStateNormal];
     [self.confirmButton addTarget:self action:@selector(tb_confirmTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.cardView addSubview:self.confirmButton];
 
+    // 0.15.54：取消按钮套玻璃底
     self.cancelButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.cancelButton setTitle:self.cancelTitle forState:UIControlStateNormal];
-    self.cancelButton.titleLabel.font = [UIFont systemFontOfSize:16];
+    self.cancelButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     [self.cancelButton setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
     [self.cancelButton addTarget:self action:@selector(tb_cancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    TBApplyPanelGlass(self.cancelButton);
     [self.cardView addSubview:self.cancelButton];
 }
 

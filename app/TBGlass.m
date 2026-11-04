@@ -321,15 +321,10 @@ void TBStyleSearchBarGlass(UISearchBar *sb) {
     tf.backgroundColor = [UIColor clearColor];
     tf.borderStyle = UITextBorderStyleNone;
     tf.textColor = [UIColor labelColor];
-    // ★ 文字聚焦后"会动/错位"：系统在聚焦时会改 tf 的左右内边距（给取消按钮腾位）。
-    //   固定成条件内边距，聚焦前后文字位置一致。
-    // ★ 保留系统放大镜（leftView）和清除按钮（rightView）：不要每帧强制置 nil——
-    //   那会把系统图标挤没（0.15.50 回归）。存在时只把对应侧内边距调小对齐：
-    //   有放大镜 → 6pt（贴着放大镜），没有 → 12pt（原来写死的值，按需求复查后保留为兜底）。
-    CGFloat lpad = (tf.leftView && tf.leftViewMode != UITextFieldViewModeNever) ? 6.0 : 12.0;
-    CGFloat rpad = (tf.rightView && tf.rightViewMode != UITextFieldViewModeNever) ? 6.0 : 12.0;
-    [tf setValue:@(lpad) forKey:@"paddingLeft"];
-    [tf setValue:@(rpad) forKey:@"paddingRight"];
+    // ★ 0.15.54：彻底不动 leftView / rightView / paddingLeft / paddingRight。
+    //   之前的 KVC 改内边距方案会在聚焦动画期间和系统自己的内边距动画互相覆盖，
+    //   文字照样会「动一下」（本轮用户实测的最后一个问题）。现在文字布局 100% 交给系统，
+    //   我们只在底下垫一层玻璃，视觉不变、也不可能有跳动。
     // 0.15.53：placeholder 用次要标签色（之前跟随系统默认灰，玻璃底上显得又黑又挤）。
     // attributedPlaceholder 带动态色，深浅色模式自动跟随；关联标记保证只设一次不每帧重建。
     if (tf.placeholder.length && !objc_getAssociatedObject(tf, kTBSearchPHKey)) {
