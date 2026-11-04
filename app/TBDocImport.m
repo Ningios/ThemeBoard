@@ -345,6 +345,13 @@ NSURL *TBCopyCoordinatedItemToTemp(NSURL *url, NSError **error) {
     NSURL *dst = [NSURL fileURLWithPath:[root stringByAppendingPathComponent:name]];
 
     BOOL accessed = [url startAccessingSecurityScopedResource];
+    // ★ 0.15.67：iCloud URL 先触发下载并等待落地（最多 20 秒），再进 coordinator。
+    //   之前只在 accessor 里等 15 秒——但 coordinator 给我们的 newURL 常常是 provider 的
+    //   临时符号链接，startDownloading 对它无效，所以一直 size=0 失败。
+    TBLog2(@"[导入][复制] 开始 url=%@ isICloud=%d accessed=%d", url.path, TBURLIsICloud(url), accessed);
+    if (TBURLIsICloud(url)) {
+        TBWaitForICloudDownload(url, 20.0);
+    }
     NSFileCoordinator *coord = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
     __block NSError *copyErr = nil;
     NSError *coordErr = nil;
