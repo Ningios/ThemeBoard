@@ -1153,7 +1153,8 @@ static NSArray<NSArray<NSString *> *> *TBAssetKindTable(void) {
     // 类型放开到 public.item：否则 iCloud 上不匹配的文件会被系统置灰、根本点不动
     // （选完再由我们自己判定是不是图片，见 didPickDocumentsAtURLs）
     UIDocumentPickerViewController *picker =
-        TBNewImportPicker(@[ UTTypePNG, UTTypeJPEG, UTTypeZIP, UTTypeArchive, UTTypeItem ], @[ @"public.item" ]);
+        TBNewImportPicker(@[ UTTypePNG, UTTypeJPEG, UTTypeZIP ],
+                                    @[ @"public.png", @"public.jpeg", @"public.zip-archive", @"public.data" ]);
     if (!picker) { [self tb_alert:@"打不开" message:@"系统没有可用的图片选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;

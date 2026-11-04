@@ -83,7 +83,7 @@ static NSString *TBReadLogLossy(NSString *path) {
     self.table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.table.dataSource = self;
     self.table.delegate = self;
-    self.table.rowHeight = 52;
+    self.table.rowHeight = 48;   // 0.15.57 收紧（仍 ≥44）
     self.table.estimatedSectionHeaderHeight = 24;
     TBGlassTable(self.table);
     TBSetPageBackground(self);
@@ -320,7 +320,7 @@ static NSString *TBReadLogLossy(NSString *path) {
 }
 
 - (CGFloat)tableView:(UITableView *)t heightForHeaderInSection:(NSInteger)s {
-    return s == 2 ? 34 : UITableViewAutomaticDimension;
+    return s == 2 ? 28 : UITableViewAutomaticDimension;   // 0.15.57 收紧
 }
 
 - (void)openLogFolder {

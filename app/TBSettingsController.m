@@ -18,7 +18,7 @@
     [super viewDidLoad];
     self.title = @"设置";
 
-    self.tableView.rowHeight = 56;
+    self.tableView.rowHeight = 50;   // 0.15.57 收紧（仍 ≥44）
 
     self.model = @[
         @[ @{@"t": @"引擎状态", @"act": @"engineInfo"},
@@ -255,7 +255,8 @@
     if ([act isEqualToString:@"import"]) {
         // 与主题列表页同一个选择器：iOS14+ = initForOpeningContentTypes:asCopy:YES
         UIDocumentPickerViewController *picker =
-            TBNewImportPicker(@[ UTTypeFolder, UTTypeZIP, UTTypeItem ], @[ @"public.item" ]);
+            TBNewImportPicker(@[ UTTypeZIP, UTTypeFolder ],
+                                  @[ @"public.zip-archive", @"public.folder", @"public.data" ]);
         if (!picker) { [self alert:@"打不开" msg:@"系统没有可用的文件夹选择器"]; return; }
         picker.delegate = self;
         [self presentViewController:picker animated:YES completion:nil];

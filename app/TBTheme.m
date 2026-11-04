@@ -353,3 +353,10 @@ static NSString *TBFindBestScaledPNG(NSString *dir, NSString *prefix) {
 }
 
 @end
+
+/// 公共「2×2 图标块」入口：主页列表缩略图和详情页「图标预览」卡都走这里。
+/// 这里刻意只做转发，真正拼图仍是 -coverImageWithSize: 那一套（输出逐字节不变）。
+UIImage *TBThemeFourUpImage(TBTheme *theme, CGFloat size) {
+    if (!theme || size < 2.0) return nil;
+    return [theme coverImageWithSize:size];
+}

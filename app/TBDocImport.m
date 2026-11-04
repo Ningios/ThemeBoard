@@ -35,59 +35,26 @@ static NSString *TBErrText(NSError *e) {
 
 UIDocumentPickerViewController *TBNewImportPicker(NSArray *contentTypes,
                                                   NSArray<NSString *> *legacyTypes) {
+    // ★ 0.15.57：按用户要求统一走 legacy Import 模式
+    //   IPC = initWithDocumentTypes:inMode:UIDocumentPickerModeImport
+    //   系统会把选中的文件/整个目录复制进 App 的 Inbox，返回普通 file:// URL，
+    //   不需要 security scope —— 在越狱 / 根less 环境里这条最稳。
+    //   （iOS14+ 的 initForOpeningContentTypes:asCopy:YES 在部分 iCloud provider 上会被
+    //     当成 documentPickerWasCancelled；如果真机上 legacy 又出现 cancel，把下面这一行
+    //     换成 asCopy 分支即可：contentTypes 只放 @[UTTypeZIP, UTTypeFolder]，不要带 UTTypeItem。）
     UIDocumentPickerViewController *p = nil;
-    BOOL modern = NO;
-    if (@available(iOS 14.0, *)) modern = YES;
-
-    NSMutableArray *types = [NSMutableArray array];
-    for (id t in contentTypes) if (t) [types addObject:t];
-#ifdef TB_HAS_UTTYPE
-    // 放开到 public.item：iCloud 云盘上类型不匹配的文件否则会被系统置灰、根本点不动
-    if (modern) {
-        BOOL hasItem = NO;
-        for (id t in types) {
-            if ([t isKindOfClass:[UTType class]] &&
-                [[(UTType *)t identifier] isEqualToString:@"public.item"]) { hasItem = YES; break; }
-        }
-        if (!hasItem) [types addObject:UTTypeItem];
-    }
-#endif
     NSString *mode = @"(未创建)";
     @try {
-        if (modern) {
-            // 统一走 asCopy:YES：系统把选中的文件（或整个目录）先复制进 App 的临时区，
-            // iCloud 文件由系统负责下载，拿到的是可读的本地副本。
-            if (types.count) {
-                // 不用 asCopy：asCopy:YES 在 iCloud 云盘 + 根less 环境下会把"点文件"变成
-                // documentPickerWasCancelled（用户日志实测：三次点选全是 cancel）。
-                // 改用 open-in-place，下载/复制由我们自己用 NSFileCoordinator 完成。
-                // 根less + 非沙盒环境下，iCloud 文件的 security-scoped 读取会 EPERM(257)：
-                //   ① asCopy:YES → 点文件被系统当成 cancel
-                //   ② asCopy:NO  → startAccessing 成功但 coordinator 读不了（257 无权限）
-                // 走 8~13 的 Import 模式：系统把文件直接复制进 App 的 Inbox，返回普通 file:// URL，
-                // 不需要 security scope（这套在越狱环境最稳）。
-                p = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:(legacyTypes ?: @[@"public.item"])
-                                                                           inMode:UIDocumentPickerModeImport];
-                mode = @"initWithDocumentTypes:UIDocumentPickerModeImport(legacy)";
-            }
-        } else {
-            p = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:(legacyTypes ?: @[@"public.item"])
-                                                                       inMode:UIDocumentPickerModeImport];
-            mode = @"initWithDocumentTypes:UIDocumentPickerModeImport";
-        }
-        // iOS14+ 但 contentTypes 传空时兜底成 public.item
-        if (!p && legacyTypes.count) {
-            p = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:legacyTypes
-                                                                       inMode:UIDocumentPickerModeImport];
-            mode = @"initWithDocumentTypes:Import(兜底)";
-        }
+        p = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:(legacyTypes ?: @[@"public.item"])
+                                                                   inMode:UIDocumentPickerModeImport];
+        mode = @"initWithDocumentTypes:UIDocumentPickerModeImport(legacy)";
     } @catch (NSException *e) {
         TBLog2(@"[导入][picker] ❌ 创建异常：%@ — %@", e.name, e.reason);
         NSLog(@"[ThemeBoard] picker 创建失败: %@", e.reason);
         p = nil;
     }
-    TBLog2(@"[导入][picker] 模式=%@ contentTypes=[%@] legacyTypes=[%@] → %@",
-           mode, TBPickerTypeNames(types),
+    TBLog2(@"[导入][picker] 模式=%@ contentTypes(iOS14 不用)=[%@] legacyTypes=[%@] → %@",
+           mode, TBPickerTypeNames(contentTypes),
            legacyTypes.count ? [legacyTypes componentsJoinedByString:@","] : @"(空)",
            p ? @"创建成功" : @"创建失败(返回 nil)");
     return p;

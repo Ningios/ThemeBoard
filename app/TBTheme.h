@@ -63,3 +63,8 @@
 - (nullable UIImage *)coverImageWithSize:(CGFloat)size;
 
 @end
+
+/// 公共的「2×2 图标块」：主页列表卡片左边那块拼图，和详情页「图标预览」卡共用同一个入口，
+/// 保证两处看到的永远是同一组代表性图标（相机/信息/设置…）和同样的拼法。
+/// theme 为空或 size < 2 返回 nil。
+UIImage *_Nullable TBThemeFourUpImage(TBTheme *_Nullable theme, CGFloat size);

@@ -17,15 +17,26 @@ static NSString *const kTBKeyUseThemeIconShadow  = @"UseThemeIconShadow";
 static const double  kTBDefaultMaskCornerRadius = 13.42;
 
 static const CGFloat kTBCardRadius   = 20.0;   // 与 TBGlassCard(20) / 列表卡片一致
-static const CGFloat kTBCardGap      = 12.0;   // 卡片间距
+static const CGFloat kTBCardGap      = 10.0;   // 卡片间距（0.15.57：12→10）
 static const CGFloat kTBSideInset    = 16.0;   // 左右内缩
 
 #pragma mark - 方形卡片 cell（双列网格的通用卡片）
 
+/// 图标卡（grid）竖直节奏：标题 5 → 图标 +4 → 说明 +3 → 底 ≥5，和 sizeForItem 用同一套数字
+static const CGFloat kTBGridTitleTop = 5.0;    // 标题 top
+static const CGFloat kTBGridTitleIconGap = 4.0;// 图标 top = 标题 bottom + 4
+static const CGFloat kTBGridIconCapGap = 3.0;  // 说明 top = 图标 bottom + 3
+static const CGFloat kTBGridBottomPad = 5.0;   // 说明 bottom ≤ 卡.bottom − 5
+static const CGFloat kTBGridIconScale = 0.86;  // 图标宽 = 卡宽 × 0.86（原来 0.80）
+/// 图标卡高度里除图标以外的固定占用（标题最多 2 行 + 各段间隙 + 底边距），实测 48 刚好贴身
+static const CGFloat kTBGridTextBlock = 48.0;
+
 @interface TBSquareCardCell : UICollectionViewCell
 @property (nonatomic, assign) BOOL compact;          // 四功能小卡
+@property (nonatomic, assign) BOOL didBuildConstraints;   // 约束只按首次形态建一次
 @property (nonatomic, strong) NSArray *compactCons;
 @property (nonatomic, strong) NSArray *gridCons;
+@property (nonatomic, strong) NSLayoutConstraint *iconXCons;   // 两种形态共用
 @property (nonatomic, strong) UIView *card;
 @property (nonatomic, strong) UIImageView *icon;
 @property (nonatomic, strong) UILabel *titleLabel;
@@ -76,42 +87,61 @@ static const CGFloat kTBSideInset    = 16.0;   // 左右内缩
         NSLayoutConstraint *titleR = [_titleLabel.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-8];
         NSLayoutConstraint *capL = [_captionLabel.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:8];
         NSLayoutConstraint *capR = [_captionLabel.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-8];
-        NSLayoutConstraint *iconX = [_icon.centerXAnchor constraintEqualToAnchor:_card.centerXAnchor];
+        _iconXCons = [_icon.centerXAnchor constraintEqualToAnchor:_card.centerXAnchor];
 
-        // 图标卡：卡片只比图标大一点点（上标题 / 中图标 / 下名字，紧凑竖排）
-        _gridCons = @[
-            [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:6],
-            iconX,
-            [_icon.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:6],
-            [_icon.widthAnchor constraintEqualToAnchor:_card.widthAnchor multiplier:0.80],
-            [_icon.heightAnchor constraintEqualToAnchor:_icon.widthAnchor],
-            [_captionLabel.topAnchor constraintEqualToAnchor:_icon.bottomAnchor constant:4],
-            [_captionLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_card.bottomAnchor constant:-6],
-        ];
-        // 功能卡：更小一档的小方卡（概览 / 应用主题 / 取消应用 / 导出），图标 20pt
-        _compactCons = @[
-            [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:10],
-            iconX,
-            [_icon.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:4],
-            [_icon.widthAnchor constraintEqualToConstant:20],
-            [_icon.heightAnchor constraintEqualToConstant:20],
-            [_captionLabel.topAnchor constraintEqualToAnchor:_icon.bottomAnchor constant:4],
-            [_captionLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_card.bottomAnchor constant:-8],
-        ];
+        // ★ 0.15.57：两套形态的约束这里只"备料"不激活，等 setCompact: 第一次定形态时
+        //   才建对应的那一套。以前是 init 里先激活 grid、复用成 compact 时再 deactivate/
+        //   activate 一遍 —— 每次形态切换都动约束，就是这个分区"闪一下"的来源。
         [NSLayoutConstraint activateConstraints:@[titleL, titleR, capL, capR]];
-        [NSLayoutConstraint activateConstraints:_gridCons];
     }
     return self;
 }
 
+/// 某一形态的约束（第一次用到时才创建，之后复用同一个数组，不再重建）
+- (NSArray *)tb_constraintsForCompact:(BOOL)compact {
+    if (compact) {
+        if (!_compactCons) {
+            // 功能卡：更小一档的小方卡（概览 / 应用主题 / 取消应用 / 导出），图标 20pt
+            _compactCons = @[
+                [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:10],
+                _iconXCons,
+                [_icon.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:4],
+                [_icon.widthAnchor constraintEqualToConstant:20],
+                [_icon.heightAnchor constraintEqualToConstant:20],
+                [_captionLabel.topAnchor constraintEqualToAnchor:_icon.bottomAnchor constant:4],
+                [_captionLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_card.bottomAnchor constant:-8],
+            ];
+        }
+        return _compactCons;
+    }
+    if (!_gridCons) {
+        // 图标卡：标题（最多 2 行）→ 图标（卡宽 × 0.86）→ 说明（1 行，中间截断）
+        _gridCons = @[
+            [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:kTBGridTitleTop],
+            _iconXCons,
+            [_icon.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:kTBGridTitleIconGap],
+            [_icon.widthAnchor constraintEqualToAnchor:_card.widthAnchor multiplier:kTBGridIconScale],
+            [_icon.heightAnchor constraintEqualToAnchor:_icon.widthAnchor],
+            [_captionLabel.topAnchor constraintEqualToAnchor:_icon.bottomAnchor constant:kTBGridIconCapGap],
+            [_captionLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_card.bottomAnchor constant:-kTBGridBottomPad],
+        ];
+    }
+    return _gridCons;
+}
+
 - (void)setCompact:(BOOL)compact {
-    if (_compact == compact) return;
+    if (_didBuildConstraints && _compact == compact) return;
+    BOOL wasBuilt = _didBuildConstraints;
+    if (wasBuilt) {                                   // 只有真换形态才动约束
+        [NSLayoutConstraint deactivateConstraints:[self tb_constraintsForCompact:_compact]];
+    }
     _compact = compact;
-    [NSLayoutConstraint deactivateConstraints:(compact ? _gridCons : _compactCons)];
-    [NSLayoutConstraint activateConstraints:(compact ? _compactCons : _gridCons)];
+    _didBuildConstraints = YES;
+    [NSLayoutConstraint activateConstraints:[self tb_constraintsForCompact:compact]];
+    // 字体/行数只是属性，不动约束（不会引起布局抖动）
     _titleLabel.font = [UIFont systemFontOfSize:(compact ? 12.5 : 13) weight:UIFontWeightSemibold];
     _captionLabel.font = [UIFont systemFontOfSize:(compact ? 10 : 11)];
-    _captionLabel.numberOfLines = compact ? 3 : 2;
+    _captionLabel.numberOfLines = compact ? 3 : 1;    // 说明只给 1 行
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
@@ -121,10 +151,152 @@ static const CGFloat kTBSideInset    = 16.0;   // 左右内缩
 
 - (void)prepareForReuse {
     [super prepareForReuse];
+    // ★ 只清内容，绝不碰约束（碰约束 = 复用瞬间抖一下）
     self.card.alpha = 1.0;
     self.icon.image = nil;
+    self.icon.alpha = 1.0;
     self.titleLabel.text = nil;
     self.captionLabel.text = nil;
+    self.captionLabel.hidden = NO;
+}
+
+@end
+
+#pragma mark - 预览卡（section 1）：系统形态 / 图标预览（2×2）
+
+/// 预览卡基类：外观、圆角、玻璃、内边距全部跟 4 列图标卡同一套
+/// （标题 top 5 → 内容 top +4 → 内容 bottom −5，内容宽 = 卡宽 × 0.86）
+@interface TBPreviewTileCell : UICollectionViewCell
+@property (nonatomic, strong) UIView *card;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UIView *content;
+@end
+
+@implementation TBPreviewTileCell
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.backgroundColor = [UIColor clearColor];
+        self.contentView.backgroundColor = [UIColor clearColor];
+
+        _card = TBGlassCard(kTBCardRadius);
+        _card.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:_card];
+        [NSLayoutConstraint activateConstraints:@[
+            [_card.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
+            [_card.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+            [_card.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+            [_card.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
+        ]];
+
+        _titleLabel = [[UILabel alloc] init];
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+        _titleLabel.textColor = [UIColor labelColor];
+        _titleLabel.textAlignment = NSTextAlignmentCenter;
+        _titleLabel.numberOfLines = 1;
+        _titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [_card addSubview:_titleLabel];
+
+        _content = [[UIView alloc] init];
+        _content.translatesAutoresizingMaskIntoConstraints = NO;
+        _content.backgroundColor = [UIColor clearColor];
+        [_card addSubview:_content];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_titleLabel.topAnchor constraintEqualToAnchor:_card.topAnchor constant:kTBGridTitleTop],
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:_card.leadingAnchor constant:6],
+            [_titleLabel.trailingAnchor constraintEqualToAnchor:_card.trailingAnchor constant:-6],
+            [_content.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:kTBGridTitleIconGap],
+            [_content.centerXAnchor constraintEqualToAnchor:_card.centerXAnchor],
+            [_content.widthAnchor constraintEqualToAnchor:_card.widthAnchor multiplier:kTBGridIconScale],
+            [_content.bottomAnchor constraintEqualToAnchor:_card.bottomAnchor constant:-kTBGridBottomPad],
+        ]];
+    }
+    return self;
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.card.alpha = 1.0;
+}
+
+@end
+
+/// 「系统形态」：单张合成图（当前形状 + 叠加层 + 阴影）+ 原来的说明
+@interface TBShapePreviewCell : TBPreviewTileCell
+@property (nonatomic, strong) UIImageView *imageView;
+@property (nonatomic, strong) UILabel *captionLabel;
+@end
+
+@implementation TBShapePreviewCell
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        _imageView = [[UIImageView alloc] init];
+        _imageView.translatesAutoresizingMaskIntoConstraints = NO;
+        _imageView.contentMode = UIViewContentModeScaleAspectFit;
+        _imageView.clipsToBounds = NO;
+        [self.content addSubview:_imageView];
+
+        _captionLabel = [[UILabel alloc] init];
+        _captionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _captionLabel.font = [UIFont systemFontOfSize:9];
+        _captionLabel.textColor = [UIColor secondaryLabelColor];
+        _captionLabel.textAlignment = NSTextAlignmentCenter;
+        _captionLabel.numberOfLines = 2;   // 原来的说明是多行的（「主题里没有遮罩图\n→ 系统形状」）
+        _captionLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [self.content addSubview:_captionLabel];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_imageView.topAnchor constraintEqualToAnchor:self.content.topAnchor],
+            [_imageView.leadingAnchor constraintEqualToAnchor:self.content.leadingAnchor],
+            [_imageView.trailingAnchor constraintEqualToAnchor:self.content.trailingAnchor],
+            [_captionLabel.topAnchor constraintEqualToAnchor:_imageView.bottomAnchor constant:2],
+            [_captionLabel.leadingAnchor constraintEqualToAnchor:self.content.leadingAnchor],
+            [_captionLabel.trailingAnchor constraintEqualToAnchor:self.content.trailingAnchor],
+            [_captionLabel.bottomAnchor constraintEqualToAnchor:self.content.bottomAnchor],
+        ]];
+    }
+    return self;
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.imageView.image = nil;
+    self.captionLabel.text = nil;
+}
+
+@end
+
+/// 「图标预览」：直接显示主页列表卡片左边那块 2×2 拼图（同一个 TBThemeFourUpImage，
+/// 同一组代表性图标），不是详情页自己的 previewBids —— 两处必须长得一模一样。
+@interface TBFourIconCell : TBPreviewTileCell
+@property (nonatomic, strong) UIImageView *imageView;
+@end
+
+@implementation TBFourIconCell
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        _imageView = [[UIImageView alloc] init];
+        _imageView.translatesAutoresizingMaskIntoConstraints = NO;
+        _imageView.contentMode = UIViewContentModeScaleAspectFit;
+        _imageView.clipsToBounds = NO;
+        [self.content addSubview:_imageView];
+        [NSLayoutConstraint activateConstraints:@[
+            [_imageView.topAnchor constraintEqualToAnchor:self.content.topAnchor],
+            [_imageView.leadingAnchor constraintEqualToAnchor:self.content.leadingAnchor],
+            [_imageView.trailingAnchor constraintEqualToAnchor:self.content.trailingAnchor],
+            [_imageView.bottomAnchor constraintEqualToAnchor:self.content.bottomAnchor],
+        ]];
+    }
+    return self;
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.imageView.image = nil;
 }
 
 @end
@@ -363,7 +535,7 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
     layout.minimumInteritemSpacing = kTBCardGap;
     layout.minimumLineSpacing = kTBCardGap;
-    layout.sectionInset = UIEdgeInsetsMake(8, kTBSideInset, 28, kTBSideInset);
+    layout.sectionInset = UIEdgeInsetsMake(6, kTBSideInset, 16, kTBSideInset);   // 0.15.57 收紧
 
     self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:layout];
     self.collectionView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -372,10 +544,16 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
     self.collectionView.dataSource = self;
     self.collectionView.delegate = self;
     self.collectionView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
+    // ★ 0.15.57：两种形态用各自的 reuse identifier，cell 从创建起就只会是那一种形态，
+    //   不会出现「compact 卡被网格复用 / 网格卡被 compact 复用」→ 约束来回换 → 闪一下。
     [self.collectionView registerClass:[TBSquareCardCell class]
-            forCellWithReuseIdentifier:@"card"];
-    [self.collectionView registerClass:[TBPreviewCardCell class]
-            forCellWithReuseIdentifier:@"preview"];
+            forCellWithReuseIdentifier:@"cardCompact"];
+    [self.collectionView registerClass:[TBSquareCardCell class]
+            forCellWithReuseIdentifier:@"cardGrid"];
+    [self.collectionView registerClass:[TBShapePreviewCell class]
+            forCellWithReuseIdentifier:@"shapePreview"];
+    [self.collectionView registerClass:[TBFourIconCell class]
+            forCellWithReuseIdentifier:@"fourIcon"];
     [self.collectionView registerClass:[TBSectionHeaderView class]
             forSupplementaryViewOfKind:UICollectionElementKindSectionHeader
                    withReuseIdentifier:@"header"];
@@ -622,14 +800,30 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
 
 - (NSInteger)collectionView:(UICollectionView *)cv numberOfItemsInSection:(NSInteger)s {
     if (s == 0) return 4;                       // 概览 / 应用 / 取消应用 / 导出
-    if (s == 1) return 1;                       // 合并成一张预览卡
+    if (s == 1) return 2;                       // 两张预览卡：系统形态 / 图标预览
     return self.bids.count;
 }
 
 - (CGFloat)collectionView:(UICollectionView *)cv
 layout:(UICollectionViewLayout *)layout
 heightForHeaderInSection:(NSInteger)s {
-    return s == 0 ? 0.0 : 30.0;
+    return s == 0 ? 0.0 : 24.0;   // 0.15.57：30→24
+}
+
+/// 预览区只有两张卡：算成「一行居中」，左右各留 (W - (2w + 12)) / 2
+- (UIEdgeInsets)collectionView:(UICollectionView *)cv
+                        layout:(UICollectionViewLayout *)layout
+        insetForSectionAtIndex:(NSInteger)s {
+    // 其它分区保持原来 layout.sectionInset = (8, 16, 28, 16) 不动（底部 28 是给底栏留的位置）
+    if (s != 1) return UIEdgeInsetsMake(6, kTBSideInset, 16, kTBSideInset);
+    CGFloat W = cv.bounds.size.width;
+    if (W < 1) W = [UIScreen mainScreen].bounds.size.width;
+    CGFloat w = floor((W - kTBSideInset * 2 - kTBCardGap * 3) / 4.0);
+    if (w < 56) w = 56;
+    CGFloat side = floor((W - (2 * w + kTBCardGap)) / 2.0);
+    while (side > 0 && (2 * w + kTBCardGap + 2 * side) > W) side -= 1;   // 防浮点把两卡挤成两行
+    if (side < 0) side = 0;
+    return UIEdgeInsetsMake(0, side, 0, side);
 }
 
 - (UICollectionReusableView *)collectionView:(UICollectionView *)cv
@@ -655,40 +849,41 @@ heightForHeaderInSection:(NSInteger)s {
         if (two < 120) two = 120;
         return CGSizeMake(two, 78);
     }
-    if (ip.section == 1) {                      // 预览：一张卡（卡内 2×3）
-        CGFloat w = W - kTBSideInset * 2;
-        if (w < 160) w = 160;
-        return CGSizeMake(w, TBPreviewCardHeight(w));
+    if (ip.section == 1) {                      // 预览：两张卡，尺寸与 4 列图标卡完全一致
+        CGFloat w = floor((W - kTBSideInset * 2 - kTBCardGap * 3) / 4.0);
+        if (w < 56) w = 56;
+        return CGSizeMake(w, floor(w * kTBGridIconScale) + kTBGridTextBlock);
     }
-    // 全部图标：四列，图标 = 卡宽 × 0.80，高度 = 图标 + 名字（2 行小字）
+    // 全部图标：四列，图标 = 卡宽 × 0.86，高度 = 图标 + 文字块（与 cell 内约束同一套数字）
     CGFloat col = floor((W - kTBSideInset * 2 - kTBCardGap * 3) / 4.0);
     if (col < 56) col = 56;
-    CGFloat iconH = floor(col * 0.80);
-    return CGSizeMake(col, iconH + 52.0);
+    CGFloat iconH = floor(col * kTBGridIconScale);
+    return CGSizeMake(col, iconH + kTBGridTextBlock);
 }
 
 - (UICollectionViewCell *)collectionView:(UICollectionView *)cv
                   cellForItemAtIndexPath:(NSIndexPath *)ip {
-    // 预览分区：一张卡里并排显示「遮罩预览 + 前几个图标」
+    // 预览分区：第 1 张「系统形态」（遮罩合成图），第 2 张「图标预览」（2×2 四个图标）
     if (ip.section == 1) {
-        TBPreviewCardCell *pc = [cv dequeueReusableCellWithReuseIdentifier:@"preview" forIndexPath:ip];
-        NSMutableArray *imgs = [NSMutableArray array];
-        NSMutableArray *caps = [NSMutableArray array];
-        [imgs addObject:self.maskPreviewImage ?: [NSNull null]];
-        [caps addObject:(self.maskPreviewCaption.length ? self.maskPreviewCaption : @"遮罩预览")];
-        for (NSString *bid in self.previewBids) {
-            UIImage *im = [self.theme imageForBundleID:bid];
-            [imgs addObject:im ?: [NSNull null]];
-            NSString *dn = [TBAppInfo displayNameForBundleID:bid];
-            [caps addObject:(dn.length ? dn : [[bid componentsSeparatedByString:@"."] lastObject])];
+        if (ip.item == 0) {
+            TBShapePreviewCell *sc = [cv dequeueReusableCellWithReuseIdentifier:@"shapePreview"
+                                                                    forIndexPath:ip];
+            sc.titleLabel.text = @"系统形态";
+            sc.imageView.image = self.maskPreviewImage;
+            sc.captionLabel.text = self.maskPreviewCaption.length ? self.maskPreviewCaption : @"遮罩预览";
+            return sc;
         }
-        [pc setPreviewImages:imgs captions:caps];
-        return pc;
+        TBFourIconCell *fc = [cv dequeueReusableCellWithReuseIdentifier:@"fourIcon" forIndexPath:ip];
+        fc.titleLabel.text = @"图标预览";
+        // 和主页列表卡片左边那块 2×2 完全同源（TBThemeFourUpImage），不另选图标
+        fc.imageView.image = TBThemeFourUpImage(self.theme, 240.0);
+        return fc;
     }
 
-    TBSquareCardCell *cell = [cv dequeueReusableCellWithReuseIdentifier:@"card" forIndexPath:ip];
+    NSString *cardID = (ip.section == 0) ? @"cardCompact" : @"cardGrid";
+    TBSquareCardCell *cell = [cv dequeueReusableCellWithReuseIdentifier:cardID forIndexPath:ip];
     cell.icon.tintColor = [UIColor secondaryLabelColor];
-    cell.compact = (ip.section == 0);
+    cell.compact = (ip.section == 0);   // 与 identifier 一一对应，幂等，不会换约束
     cell.captionLabel.hidden = NO;
     if (ip.section == 0) {
         NSString *sym = nil;

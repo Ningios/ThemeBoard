@@ -334,14 +334,19 @@ void TBStyleSearchBarGlass(UISearchBar *sb) {
         objc_setAssociatedObject(tf, kTBSearchPHKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    UIView *glass = objc_getAssociatedObject(tf, kTBSearchGlassKey);
+    // ② 自绘玻璃底：SystemThinMaterial + 白填充 + 1px 亮边（与玻璃卡片同一套观感）
+    // ★★ 0.15.57 关键改动：玻璃【绝不插进 UISearchBar 的内部层级】。
+    //   用户线索非常明确：没加玻璃时文字完全不动，加了玻璃才开始动 —— 说明不是"跟错 frame"，
+    //   而是往 sb 内部（tf.superview）插视图这件事本身扰动了 UISearchBar 的私有布局。
+    //   现在玻璃挂到 sb.superview、插在 sb 下面一层，搜索栏内部 100% 是系统原样。
+    UIView *glass = objc_getAssociatedObject(sb, kTBSearchGlassKey);
     if (!glass) {
-        // ② 自绘玻璃底：SystemThinMaterial + 白填充 + 1px 亮边（与玻璃卡片同一套观感）
-        glass = [[UIView alloc] initWithFrame:tf.frame];
+        glass = [[UIView alloc] init];
         glass.userInteractionEnabled = NO;
         glass.clipsToBounds = YES;
         glass.backgroundColor = [UIColor clearColor];
         glass.layer.cornerCurve = kCACornerCurveContinuous;
+        glass.autoresizingMask = UIViewAutoresizingNone;   // 位置只由本函数算，别让 autoresizing 掺和
 
         UIVisualEffectView *mat = [[UIVisualEffectView alloc] initWithEffect:
             [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
@@ -367,24 +372,25 @@ void TBStyleSearchBarGlass(UISearchBar *sb) {
             [fill.bottomAnchor constraintEqualToAnchor:glass.bottomAnchor],
         ]];
         TBApplyRim(glass, 0.55);
-        objc_setAssociatedObject(tf, kTBSearchGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if (tf.superview) [tf.superview insertSubview:glass belowSubview:tf];
-    }
-    if (tf.superview && glass.superview != tf.superview) {   // 换过父视图 → 跟着搬
-        [glass removeFromSuperview];
-        [tf.superview insertSubview:glass belowSubview:tf];
+        objc_setAssociatedObject(sb, kTBSearchGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    // ③ 每帧贴合输入框：圆角 = 高/2
-    CGRect f = tf.frame;
+    // ③ 挂在 sb 的父视图里、sb 的下一层（玻璃只垫在同一条搜索栏底下，不碰 sb 内部）
+    UIView *host = sb.superview;
+    if (!host) return;                       // 还没挂进视图树 → 等下一次布局
+    if (glass.superview != host) {           // 父视图换过 → 跟着搬
+        [glass removeFromSuperview];
+        [host insertSubview:glass belowSubview:sb];
+    }
+
+    // ④ frame 直接用 sb.frame（玻璃和 sb 是同一个父视图里的兄弟，坐标系一致），
+    //    每次 layoutSubviews 都重算；CATransaction 禁隐式动画，避免聚焦动画里滑一下。
+    CGRect f = CGRectInset(sb.frame, 2, 3);
     if (f.size.height < 2) return;
-    // ★ 搜索框"文字会动"的真凶：glass 跟随 tf.frame 时落在系统的聚焦动画 block 里，
-    //   隐式动画让玻璃底从旧位置滑到新位置，视觉上就像"字在动"。这里禁掉隐式动画。
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     glass.frame = f;
     glass.layer.cornerRadius = f.size.height / 2.0;
-    glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [CATransaction commit];
 }
 

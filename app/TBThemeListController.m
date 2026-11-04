@@ -215,7 +215,8 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
     if (self.search.isActive) [self tb_dismissSearch];
 
     UIDocumentPickerViewController *picker =
-        TBNewImportPicker(@[ UTTypeFolder, UTTypeZIP, UTTypeItem ], @[ @"public.item" ]);
+        TBNewImportPicker(@[ UTTypeZIP, UTTypeFolder ],
+                          @[ @"public.zip-archive", @"public.folder", @"public.data" ]);
     if (!picker) { [self alertTitle:@"打不开" message:@"系统没有可用的文件夹选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
@@ -288,7 +289,7 @@ didPickDocumentAtURL:(NSURL *)url {
 
 - (UIView *)buildToolbarBar {
     CGFloat w = MAX(320.0, self.tableView.bounds.size.width);
-    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 56)];
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 50)];
     head.backgroundColor = [UIColor clearColor];
     head.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
@@ -298,8 +299,8 @@ didPickDocumentAtURL:(NSURL *)url {
     [NSLayoutConstraint activateConstraints:@[
         [bar.leadingAnchor constraintEqualToAnchor:head.leadingAnchor constant:20],
         [bar.trailingAnchor constraintEqualToAnchor:head.trailingAnchor constant:-20],
-        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:8],
-        [bar.heightAnchor constraintEqualToConstant:44],
+        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:2],
+        [bar.heightAnchor constraintEqualToConstant:44],   // 按钮本体仍是 44，只收外留白
     ]];
 
     // 与主题详情页的按钮同款：圆角 13、高 44、16 号半粗、白色玻璃底 + 细边
@@ -414,9 +415,10 @@ didPickDocumentAtURL:(NSURL *)url {
 static const CGFloat kTBListHeaderInset = 32.0;
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
-    if (section == 2) return 56.0;   // 「主题」标题 + 右侧排序按钮
+    // 0.15.57 间距收紧：分组标题 56→50、普通分组 34→28（按钮行上方保持最小 8）
+    if (section == 2) return 50.0;   // 「主题」标题 + 右侧排序按钮
     if (section == 1) return 8.0;    // 按钮行上方的小间距（这一组本来就没有标题）
-    return 34.0;
+    return 28.0;
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
@@ -477,7 +479,7 @@ static const CGFloat kTBListHeaderInset = 32.0;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    return indexPath.section == 1 ? 62 : 76;
+    return indexPath.section == 1 ? 50 : 76;   // 按钮行 62→50
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -494,8 +496,8 @@ static const CGFloat kTBListHeaderInset = 32.0;
         [NSLayoutConstraint activateConstraints:@[
             [bar.leadingAnchor constraintEqualToAnchor:bc.contentView.leadingAnchor],
             [bar.trailingAnchor constraintEqualToAnchor:bc.contentView.trailingAnchor],
-            [bar.topAnchor constraintEqualToAnchor:bc.contentView.topAnchor constant:4],
-            [bar.heightAnchor constraintEqualToConstant:56],
+            [bar.topAnchor constraintEqualToAnchor:bc.contentView.topAnchor constant:0],
+            [bar.heightAnchor constraintEqualToConstant:50],
         ]];
         return bc;
     }
@@ -579,7 +581,8 @@ static const CGFloat kTBListHeaderInset = 32.0;
 
 - (UIImage *)thumbFor:(TBTheme *)theme {
     CGFloat s = 46;
-    UIImage *cover = [theme coverImageWithSize:s];
+    // 0.15.57：2×2 拼图抽成公共函数（主页视觉与之前完全一致，详情页「图标预览」卡共用同一份）
+    UIImage *cover = TBThemeFourUpImage(theme, s);
     if (!cover) return [UIImage systemImageNamed:@"square.grid.2x2"];
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(s, s)];
     return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
@@ -671,6 +674,10 @@ static const CGFloat kTBListHeaderInset = 32.0;
 }
 
 - (BOOL)styleSwipeForRowAtIndexPath:(NSIndexPath *)indexPath tableView:(UITableView *)tableView {
+    // ★ 0.15.57：整个方法停用（只保留函数体做考古）。改滑动容器的子视图 = 左滑必崩，
+    //   见上面 trailingSwipeActionsConfiguration 的注释。调用点也已删除，这里再加一道闸。
+    TBLog2(@"[左滑] styleSwipeForRowAtIndexPath 已停用（不再改滑动容器）");
+    return NO;
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
     UIView *root = cell ? (cell.superview ?: cell) : tableView;
     UIView *pull = nil;
@@ -698,11 +705,11 @@ static const CGFloat kTBListHeaderInset = 32.0;
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         cell.accessoryType = UITableViewCellAccessoryNone;
     }
-    // 原版：0.05 秒后给这一行套样式（现在 swizzle 也会套，这里保留做兜底）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        [self styleSwipeForRowAtIndexPath:indexPath tableView:tableView];
-    });
+    // ★ 0.15.57：这里原来还有一段「0.05 秒后调 styleSwipeForRowAtIndexPath 给滑动容器套玻璃」
+    //   已经删掉。它会去改 UISwipeActionPullView 的子视图（改背景/圆角/字体色），而 UIKit 在
+    //   swipe 事务收尾时会重新数按钮 —— 只要它数到的子视图和当初建 action 时不一致，就抛
+    //   NSInternalInconsistencyException: The swipe action count does not match…
+    //   左滑按钮现在就是系统原生的红色「删除」，不碰滑动容器，彻底消除这条崩溃路径。
 }
 
 - (void)tableView:(UITableView *)tableView didEndEditingRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -716,89 +723,95 @@ static const CGFloat kTBListHeaderInset = 32.0;
     }
 }
 
-// 左滑删除改用【原生编辑模式】(editingStyle + commitEditingStyle)。
-// 之前用 UIContextualAction：只要 action 的数量在两次回调间不一致，UIKit 就抛
-// NSInternalInconsistencyException: The swipe action count does not match...（用户实测必崩）
-- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    return (indexPath.section == 2 || indexPath.section == 3);
-}
-
-- (UITableViewCellEditingStyle)tableView:(UITableView *)tableView
-           editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section == 2 || indexPath.section == 3) return UITableViewCellEditingStyleDelete;
-    return UITableViewCellEditingStyleNone;
-}
-
-- (void)tableView:(UITableView *)tableView
-commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
-forRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (editingStyle != UITableViewCellEditingStyleDelete) return;
+// ── 左滑删除 ────────────────────────────────────────────────────────────────
+// 崩溃根因（0.15.48 起）：在 swipe action 的 handler 里 present 模态（哪怕先用
+// dispatch_async 推迟一拍）会打断 UIKit 的 swipe 提交事务，事务收尾时算出来的按钮数
+// 对不上，抛 NSInternalInconsistencyException: The swipe action count does not match
+// the number of swipe action buttons。后来换成原生 editingStyle + commitEditingStyle
+// （里面 setEditing:NO）同样打断事务，一样崩。
+//
+// 现在这版必须同时满足三条，缺一不可：
+//   ① handler 里【先同步】completionHandler(YES) ——  UIKit 当场把这次 swipe 事务收尾；
+//   ② 真正的删除再 dispatch_async 到下一拍 —— 那时事务已结束，reloadData 不会打断它；
+//   ③ 全程不 present 任何 VC（不用 UIAlertController，也不用 TBConfirmPanelController），
+//      成功/失败都只用 TBToast 玻璃胶囊 + TBLog2。
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+    trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section != 2 && indexPath.section != 3) return nil;
     NSArray<TBTheme *> *list = [self themesInSection:indexPath.section];
-    if (indexPath.row >= (NSInteger)list.count) { [tableView setEditing:NO animated:YES]; return; }
+    if (indexPath.row < 0 || indexPath.row >= (NSInteger)list.count) return nil;
+
     TBTheme *t = list[indexPath.row];
-    BOOL isAsset = (indexPath.section == 3) || t.isAssetPack;
-    [tableView setEditing:NO animated:YES];          // 先收起左滑按钮，避免删除后 UIKit 校验
+    NSString *identity = t.path.length ? t.path : (t.name ?: @"");
+    NSInteger section = indexPath.section;
+    NSInteger row = indexPath.row;
+    TBLog2(@"[删除] 左滑 action「%@」section=%ld row=%ld path=%@",
+           t.name ?: @"?", (long)section, (long)row, identity ?: @"(空)");
+
     __weak typeof(self) wself = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        __strong typeof(self) s = wself;
-        if (!s) return;
-        TBPresentConfirm(s, [NSString stringWithFormat:@"删除「%@」？", t.name],
-                         (isAsset ? @"素材包文件夹会被直接删除，不可恢复" : @"主题文件夹会被直接删除，不可恢复"),
-                         @"取消", @"删除", YES, ^(BOOL ok) {
-            if (!ok) return;
-            __strong typeof(self) ss = wself;
-            if (!ss) return;
-            NSArray<TBTheme *> *now = [ss themesInSection:indexPath.section];
-            if (indexPath.row >= (NSInteger)now.count) return;
-            TBTheme *cur = now[indexPath.row];
-            TBLog2(@"[删除] 用户确认删除「%@」（%@）path=%@", cur.name, isAsset ? @"素材包" : @"主题包", cur.path);
-            NSError *err = nil;
-            BOOL deleted = [TBThemeScanner deleteTheme:cur error:&err];
-            TBLog2(@"[删除] 结果 ok=%d err=%@（%@）", deleted, err.domain ?: @"-",
-                   err.localizedDescription ?: @"-");
-            if (!deleted) { [ss tb_showDeleteFailure:err theme:cur]; return; }
-            [ss tb_clearPrefsPointingInto:cur.path];
-            NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
-            if ([active isEqualToString:cur.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
-            [TBPrefs notifyChanged];
-            [ss reload];
+    UIContextualAction *del =
+        [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+                                                title:@"删除"
+                                              handler:^(UIContextualAction *action,
+                                                        UIView *sourceView,
+                                                        void (^completionHandler)(BOOL)) {
+        // ① 先同步收尾：这一行必须在任何其它事情之前，且绝不能等 UI
+        completionHandler(YES);
+        // ② 下一拍再真正删除：那时 swipe 事务已经结束
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(self) s = wself;
+            if (!s) return;
+            [s tb_deleteThemeAtSection:section row:row identity:identity];
         });
-    });
+    }];
+    del.backgroundColor = [UIColor systemRedColor];
+
+    UISwipeActionsConfiguration *cfg =
+        [UISwipeActionsConfiguration configurationWithActions:@[del]];
+    cfg.performsFirstActionWithFullSwipe = NO;   // 不做「整条滑到底直接删」，防误触
+    return cfg;
 }
 
-- (void)tb_showDeleteFailure:(NSError *)err theme:(TBTheme *)t {
-    NSString *path = t.path.length ? t.path : (err.userInfo[NSFilePathErrorKey] ?: @"");
-    NSString *why = err.localizedDescription.length ? err.localizedDescription : @"未知原因";
-    NSNumber *eno = err.userInfo[@"errno"];
-    if (!eno) {
-        // 从 "（errno=13）" 这类文案里再兜一次底
-        NSRange rr = [why rangeOfString:@"errno="];
-        if (rr.location != NSNotFound) {
-            NSString *tail = [why substringFromIndex:NSMaxRange(rr)];
-            NSCharacterSet *nonDigit = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
-            NSRange stop = [tail rangeOfCharacterFromSet:nonDigit];
-            if (stop.location != NSNotFound) tail = [tail substringToIndex:stop.location];
-            if (tail.length) eno = @(tail.integerValue);
+/// 真正执行删除：跑在 swipe 事务结束后的那一拍；本方法绝不 present 任何 VC
+- (void)tb_deleteThemeAtSection:(NSInteger)section row:(NSInteger)row identity:(NSString *)identity {
+    // 行号可能已经变了（搜索 / 排序 / 刚删过一行），先用 row 取 + path 校验，再按 path 兜底找
+    NSArray<TBTheme *> *now = [self themesInSection:section];
+    TBTheme *cur = nil;
+    if (row >= 0 && row < (NSInteger)now.count) {
+        TBTheme *cand = now[row];
+        if (!identity.length || [(cand.path ?: @"") isEqualToString:identity]) cur = cand;
+    }
+    if (!cur && identity.length) {
+        for (TBTheme *cand in now) {
+            if ([(cand.path ?: @"") isEqualToString:identity]) { cur = cand; break; }
         }
     }
-    if (path.length) [UIPasteboard generalPasteboard].string = path;
-    NSString *enumHint = nil;
-    if (eno) {
-        NSInteger e = eno.integerValue;
-        enumHint = (e == 1 || e == 13) ? @"没有访问许可（EPERM/EACCES），多半是文件属于 root 或只读"
-                 : (e == 30) ? @"文件系统只读（EROFS）"
-                 : (e == 16) ? @"目录还在被占用（EBUSY）"
-                 : [NSString stringWithFormat:@"errno=%ld", (long)e];
+    if (!cur) {
+        TBLog2(@"[删除] 目标已不在列表（section=%ld row=%ld identity=%@），跳过",
+               (long)section, (long)row, identity ?: @"(空)");
+        [TBToast show:@"删除失败" icon:@"exclamationmark.triangle" in:self];
+        return;
     }
-    NSMutableString *msg = [NSMutableString stringWithFormat:@"目录：\n%@\n\n原因：%@", path ?: @"(路径为空)", why];
-    if (enumHint) [msg appendFormat:@"\n（%@）", enumHint];
-    [msg appendString:@"\n\n已依次尝试：直接删除 → 递归 chmod 0777 → 先删内容再删目录。"];
-    if (path.length) {
-        [msg appendString:@"\n\n完整路径【已复制到剪贴板】。\n可以打开 Filza 手动删除这一项（长按 → 删除）："
-                        @"\nFilza → /var/mobile/Documents/ThemeBoard/"];
+
+    NSError *err = nil;
+    BOOL deleted = [TBThemeScanner deleteTheme:cur error:&err];
+    TBLog2(@"[删除] 结果 ok=%d err=%@（%@） path=%@", deleted,
+           err.domain ?: @"-", err.localizedDescription ?: @"-", cur.path ?: @"-");
+    if (!deleted) {
+        // 失败也不弹模态：只 toast + 把完整原因写进日志（原来的自绘「删除失败」弹窗 0.15.57 移除）
+        TBLog2(@"[删除] ❌ 失败详情 theme=%@ path=%@ errno=%@ userInfo=%@",
+               cur.name ?: @"?", cur.path ?: @"-",
+               err.userInfo[@"errno"] ?: @"-", err.userInfo ?: @{});
+        [TBToast show:@"删除失败" icon:@"exclamationmark.triangle" in:self];
+        return;
     }
-    TBLog2(@"[删除] 失败提示已弹出 path=%@ errno=%@", path ?: @"(空)", eno ? [eno stringValue] : @"-");
-    TBPresentAlert(self, @"删除失败", msg);
+
+    [self tb_clearPrefsPointingInto:cur.path];
+    NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
+    if ([active isEqualToString:cur.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
+    [TBPrefs notifyChanged];
+    [self reload];
+    [TBToast show:@"已删除" icon:@"trash" in:self];
 }
 
 /// 删除后：把指向这个目录里的 Custom*Path 清掉并把对应开关关掉（否则设置里留着死路径）
