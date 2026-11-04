@@ -481,7 +481,7 @@ static BOOL TBIsThemeLikeDirectory(NSString *dir) {
     // iCloud 云盘的文件在没下载时只是占位符（.icloud），直接 contentsOfFile: 拿到空数据。
     // 统一走 TBCopyCoordinatedItemToTemp：
     //   ① startAccessingSecurityScopedResource
-    //   ② NSFileCoordinator + NSFileCoordinatorReadingForUploading（会触发 iCloud 下载）
+    //   ② NSFileCoordinator + NSFileCoordinatorReadingWithoutChanges（0.15.59 起，照 MarkFont 的可工作实现）
     //   ③ 在 accessor 里把文件 / 整个目录递归复制到 NSTemporaryDirectory()
     // 之后再在副本上跑原来的本地导入流程。
     NSError *copyErr = nil;

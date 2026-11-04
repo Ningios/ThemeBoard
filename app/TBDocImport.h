@@ -3,7 +3,7 @@
 /// 统一的「导入」文件访问层。
 /// 关键点：iCloud 云盘里的文件在没下载到本机时只是占位符（.icloud），
 /// 直接 contentsOfFile: 一定失败；必须让 NSFileCoordinator 去做协调读取
-/// （NSFileCoordinatorReadingForUploading 会触发 iCloud 下载），
+/// （NSFileCoordinatorReadingWithoutChanges，0.15.59 起照 MarkFont-Ning 的可工作实现），
 /// 而且读完要立刻把内容复制/读进 App 自己的沙盒（临时目录），
 /// 因为选择器给的安全作用域 URL 一旦 stopAccessing 就失效了。
 
@@ -13,8 +13,9 @@ NS_ASSUME_NONNULL_BEGIN
 void TBLog2(NSString *fmt, ...);
 
 /// 统一文件选择器：
-///   iOS14+  → initForOpeningContentTypes:asCopy:YES（系统先把文件/目录复制进 App 的临时区）
+///   iOS14+  → initForOpeningContentTypes:asCopy:NO（open in place，只用具体类型，不带 UTTypeItem）
 ///   老系统  → initWithDocumentTypes:inMode:UIDocumentPickerModeImport
+/// 读取统一走 NSFileCoordinatorReadingWithoutChanges（照 MarkFont-Ning 的可工作实现）
 /// contentTypes 传 UTType 数组（只在 iOS14+ 用），legacyTypes 传 UTI 字符串数组。
 /// 任何异常都返回 nil，不让调用方崩。
 UIDocumentPickerViewController *_Nullable TBNewImportPicker(NSArray *contentTypes,

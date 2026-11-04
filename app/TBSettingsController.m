@@ -7,6 +7,7 @@
 #import "TBEngineInstaller.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "TBDocImport.h"
+#import "TBSpacing.h"
 
 @interface TBSettingsController () <UIDocumentPickerDelegate>
 @property (nonatomic, strong) NSArray<NSArray<NSDictionary *> *> *model;
@@ -18,7 +19,8 @@
     [super viewDidLoad];
     self.title = @"设置";
 
-    self.tableView.rowHeight = 50;   // 0.15.57 收紧（仍 ≥44）
+    self.tableView.rowHeight = MAX(50.0, kTBSpaceRowMin);   // 行高 ≥44
+    if (@available(iOS 15.0, *)) self.tableView.sectionHeaderTopPadding = 0;
 
     self.model = @[
         @[ @{@"t": @"引擎状态", @"act": @"engineInfo"},
@@ -116,6 +118,17 @@
     return nil;
 }
 
+/// 0.15.59：全 App 统一间距（TBSpacing.h）
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    NSString *t = [self tableView:tableView titleForHeaderInSection:section];
+    return t.length ? kTBSpaceGroupTitle : kTBSpaceHeaderH;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    NSString *t = [self tableView:tableView titleForFooterInSection:section];
+    return t.length ? UITableViewAutomaticDimension : kTBSpaceSectionBot;
+}
+
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return self.model[section].count;
 }
@@ -126,7 +139,7 @@
                                                    reuseIdentifier:nil];
     cell.backgroundColor = [UIColor clearColor];
     cell.contentView.backgroundColor = [UIColor clearColor];
-    cell.backgroundView = TBGlassCellBG(12);
+    cell.backgroundView = TBGlassCellBG(kTBSpaceTableCellCardInset);
     cell.selectedBackgroundView = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.textLabel.text = row[@"t"];
@@ -253,10 +266,10 @@
     if (!act) return;
 
     if ([act isEqualToString:@"import"]) {
-        // 与主题列表页同一个选择器：iOS14+ = initForOpeningContentTypes:asCopy:YES
+        // 与主题列表页同一个选择器（0.15.59：iOS14+ = asCopy:NO，只用具体类型）
         UIDocumentPickerViewController *picker =
             TBNewImportPicker(@[ UTTypeZIP, UTTypeFolder ],
-                                  @[ @"public.zip-archive", @"public.folder", @"public.data" ]);
+                                  @[ @"public.zip-archive", @"public.folder" ]);
         if (!picker) { [self alert:@"打不开" msg:@"系统没有可用的文件夹选择器"]; return; }
         picker.delegate = self;
         [self presentViewController:picker animated:YES completion:nil];

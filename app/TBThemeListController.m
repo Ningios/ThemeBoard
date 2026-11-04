@@ -9,6 +9,7 @@
 #import "TBTableViewController.h"
 #import "TBDocImport.h"
 #import "TBToast.h"
+#import "TBSpacing.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 @interface TBThemeListController () <UISearchResultsUpdating, UIDocumentPickerDelegate>
@@ -46,8 +47,8 @@ static void TBStyleSwipePullView(UIView *pull) {
     pull.clipsToBounds = YES;
 
     for (UIView *btn in pull.subviews) {
-        btn.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
-                                             [UIColor colorWithWhite:1 alpha:0.14]);
+        btn.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                             [UIColor colorWithWhite:1 alpha:0.12]);
         btn.layer.cornerRadius = 20;
         btn.layer.cornerCurve = kCACornerCurveContinuous;
         btn.clipsToBounds = YES;
@@ -86,6 +87,10 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
     [super viewDidLoad];
     self.title = @"主题";
     self.tableView.rowHeight = 76;
+    if (@available(iOS 15.0, *)) {
+        // 全 App 统一间距：去掉 iOS15 给分组标题额外加的那段顶部留白
+        self.tableView.sectionHeaderTopPadding = 0;
+    }
 
     self.search = [[UISearchController alloc] initWithSearchResultsController:nil];
     self.search.searchResultsUpdater = self;
@@ -209,6 +214,37 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 #pragma mark - 导入
 
 - (void)importTapped {
+    // 0.15.59：主推「文件 App 分享到 ThemeBoard」通路 —— 它走 AppDelegate 的
+    //   application:openURL:options:，完全不经过 UIDocumentPicker，
+    //   避开用户设备上「点文件被当成取消 / 257 无权限」的问题。
+    //   原来的 picker 保留为第二选项（无害）。
+    if (self.search.isActive) [self tb_dismissSearch];
+    __weak typeof(self) wself = self;
+    TBChoicePanelController *p = [TBChoicePanelController
+        panelWithTitle:@"导入主题"
+               message:@"推荐用「文件」App 直接分享给 ThemeBoard：不经过系统文件选择器，最稳。\n（这条通路在你这台机器上一定能走通）"
+               options:@[ @"选择文件导入", @"用「文件」App 分享到 ThemeBoard" ]
+               handler:^(NSInteger idx) {
+        __strong typeof(self) s = wself;
+        if (!s || idx < 0) return;
+        if (idx == 0) [s tb_presentImportPicker];
+        else          [s tb_showShareImportHelp];
+    }];
+    [p presentOver:self];
+}
+
+/// 「文件」App 分享导入的步骤说明
+- (void)tb_showShareImportHelp {
+    TBPresentAlert(self, @"用「文件」App 分享到 ThemeBoard",
+        @"1. 打开「文件」App，找到要导入的 zip（或主题文件夹）\n"
+        @"2. 长按它 → 共享（也可以点右上角分享按钮）\n"
+        @"3. 在 App 列表里点「ThemeBoard」\n\n"
+        @"ThemeBoard 会直接打开并导入 —— 不经过系统文件选择器，"
+        @"不会再出现「点了文件被当成取消」的问题。\n\n"
+        @"如果共享列表里没有 ThemeBoard：点列表底部的「更多」把它打开。");
+}
+
+- (void)tb_presentImportPicker {
     // iOS14+：initForOpeningContentTypes:asCopy:YES（系统先把文件/目录复制进 App 临时区）
     // 老系统：initWithDocumentTypes:inMode:UIDocumentPickerModeImport
     // 搜索态下 self.presentedViewController 是搜索控制器，会抢走呈现 → 先退出搜索
@@ -216,7 +252,7 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 
     UIDocumentPickerViewController *picker =
         TBNewImportPicker(@[ UTTypeZIP, UTTypeFolder ],
-                          @[ @"public.zip-archive", @"public.folder", @"public.data" ]);
+                          @[ @"public.zip-archive", @"public.folder" ]);
     if (!picker) { [self alertTitle:@"打不开" message:@"系统没有可用的文件夹选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
@@ -265,6 +301,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     } else {
         NSString *msg = err.localizedDescription
             ?: TBImportFailureMessage(url, nil, @"导入失败：读不到选中的内容");
+        msg = [msg stringByAppendingString:@"\n\n可改用：文件 App → 长按 zip → 共享 → ThemeBoard。"];
         TBLog2(@"[导入] 主题列表：失败弹窗内容：%@", msg);
         TBPresentAlert(self, @"导入失败", msg);
     }
@@ -289,7 +326,7 @@ didPickDocumentAtURL:(NSURL *)url {
 
 - (UIView *)buildToolbarBar {
     CGFloat w = MAX(320.0, self.tableView.bounds.size.width);
-    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 50)];
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, kTBSpaceRowMin)];
     head.backgroundColor = [UIColor clearColor];
     head.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
@@ -297,10 +334,10 @@ didPickDocumentAtURL:(NSURL *)url {
     bar.translatesAutoresizingMaskIntoConstraints = NO;
     [head addSubview:bar];
     [NSLayoutConstraint activateConstraints:@[
-        [bar.leadingAnchor constraintEqualToAnchor:head.leadingAnchor constant:20],
-        [bar.trailingAnchor constraintEqualToAnchor:head.trailingAnchor constant:-20],
-        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:2],
-        [bar.heightAnchor constraintEqualToConstant:44],   // 按钮本体仍是 44，只收外留白
+        [bar.leadingAnchor constraintEqualToAnchor:head.leadingAnchor constant:kTBSpacePageSide],
+        [bar.trailingAnchor constraintEqualToAnchor:head.trailingAnchor constant:-kTBSpacePageSide],
+        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:0],
+        [bar.heightAnchor constraintEqualToConstant:kTBSpaceRowMin],   // 按钮本体 44
     ]];
 
     // 与主题详情页的按钮同款：圆角 13、高 44、16 号半粗、白色玻璃底 + 细边
@@ -412,13 +449,24 @@ didPickDocumentAtURL:(NSURL *)url {
 #pragma mark - 分组标题（「主题」右侧挂排序按钮）
 
 /// 分组标题的左缩进：和玻璃卡片左边对齐（系统内缩 20 + 卡片自身 12）
-static const CGFloat kTBListHeaderInset = 32.0;
+static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻璃卡内文对齐
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
-    // 0.15.57 间距收紧：分组标题 56→50、普通分组 34→28（按钮行上方保持最小 8）
-    if (section == 2) return 50.0;   // 「主题」标题 + 右侧排序按钮
-    if (section == 1) return 8.0;    // 按钮行上方的小间距（这一组本来就没有标题）
-    return 28.0;
+    // 0.15.59：全 App 统一间距，只引用 TBSpacing.h
+    // 段与段之间只留 8pt：上一段的 footer(8) 已经给了间隔，按钮行这一组不再额外加 header
+    if (section == 1) return 0.0;
+    NSString *title = [self tableView:tableView titleForHeaderInSection:section];
+    if (!title.length) return kTBSpaceHeaderH;     // 8
+    return kTBSpaceGroupTitle;                     // 28
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    // 只有最后一段有统计/空态文案，按内容自适应；其余一律 8pt
+    if (section == 3) {
+        NSString *txt = [self tableView:tableView titleForFooterInSection:section];
+        if (txt.length) return UITableViewAutomaticDimension;
+    }
+    return kTBSpaceSectionBot;                     // 8
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
@@ -479,7 +527,7 @@ static const CGFloat kTBListHeaderInset = 32.0;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    return indexPath.section == 1 ? 50 : 76;   // 按钮行 62→50
+    return indexPath.section == 1 ? kTBSpaceRowMin : 76;   // 按钮行 44（行高下限）
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -510,7 +558,7 @@ static const CGFloat kTBListHeaderInset = 32.0;
         cell.contentView.backgroundColor = [UIColor clearColor];
         // 卡片必须放进 contentView：系统左滑只平移 contentView，挂在 backgroundView
         // 上的卡片不会跟着走（表现就是内容左移、卡片留在原地，内容跑到卡片外面）。
-        UIView *bg = TBGlassCellBG(12);
+        UIView *bg = TBGlassCellBG(kTBSpaceTableCellCardInset);
         bg.translatesAutoresizingMaskIntoConstraints = NO;
         [cell.contentView insertSubview:bg atIndex:0];
         [NSLayoutConstraint activateConstraints:@[
@@ -654,13 +702,11 @@ static const CGFloat kTBListHeaderInset = 32.0;
 /// 给这一行套上样式；找不到滑动容器返回 NO（外观与原来完全一致，只是把
 /// 「找容器」这件事做得更彻底：cell / cell 的父视图 / 表格 / 整个窗口都试一遍）
 + (void)tb_installSwipeStyle {
-    // ★★ 0.15.56：整段禁用。我们曾在 UISwipeActionPullView -layoutSubviews 里改它的子视图
-    //    （想把左滑按钮做成玻璃），只要改动让 UIKit 数出来的按钮数对不上，就会抛
-    //    NSInternalInconsistencyException: The swipe action count does not match the number
-    //    of swipe action buttons —— 用户"任何一行左滑直接闪退"的真凶（换成原生
-    //    editingStyle 也照样崩，因为崩的是这个 hook，不是 swipe action 本身）。
-    TBLog2(@"[左滑] 已停用 UISwipeActionPullView 样式 hook（避免动作数校验崩溃）");
-    return;
+    // ★ 0.15.59：恢复安装。真凶已确认在引擎侧：ThemeBoardEngine 也 hook 了
+    //   UISwipeActionPullView -layoutSubviews 但**替换后没调原实现** → 滑动容器不布局 →
+    //   UIKit 动作数校验永远失败（连 Filza 左滑都崩）。引擎那条 hook 已永久移除。
+    //   本 hook 是安全的：先调 o_swipePullLayout(self, _cmd) 原实现，再只改颜色/圆角/描边
+    //   （**不增删任何子视图**），不会影响 UIKit 的按钮计数。
     static BOOL done = NO;
     if (done) return;
     done = YES;
@@ -674,10 +720,6 @@ static const CGFloat kTBListHeaderInset = 32.0;
 }
 
 - (BOOL)styleSwipeForRowAtIndexPath:(NSIndexPath *)indexPath tableView:(UITableView *)tableView {
-    // ★ 0.15.57：整个方法停用（只保留函数体做考古）。改滑动容器的子视图 = 左滑必崩，
-    //   见上面 trailingSwipeActionsConfiguration 的注释。调用点也已删除，这里再加一道闸。
-    TBLog2(@"[左滑] styleSwipeForRowAtIndexPath 已停用（不再改滑动容器）");
-    return NO;
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
     UIView *root = cell ? (cell.superview ?: cell) : tableView;
     UIView *pull = nil;
@@ -705,11 +747,16 @@ static const CGFloat kTBListHeaderInset = 32.0;
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         cell.accessoryType = UITableViewCellAccessoryNone;
     }
-    // ★ 0.15.57：这里原来还有一段「0.05 秒后调 styleSwipeForRowAtIndexPath 给滑动容器套玻璃」
-    //   已经删掉。它会去改 UISwipeActionPullView 的子视图（改背景/圆角/字体色），而 UIKit 在
-    //   swipe 事务收尾时会重新数按钮 —— 只要它数到的子视图和当初建 action 时不一致，就抛
-    //   NSInternalInconsistencyException: The swipe action count does not match…
-    //   左滑按钮现在就是系统原生的红色「删除」，不碰滑动容器，彻底消除这条崩溃路径。
+    // 0.15.59：恢复「0.05 秒后给滑动容器补一次玻璃样式」。
+    // 首帧前 layoutSubviews 的 hook 已经套过一次；这里再补一次是兜底（有的系统版本
+    // 是先建容器后调 willBeginEditing）。只改颜色/圆角/描边，不增删子视图。
+    __weak typeof(self) wself = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(self) s = wself;
+        if (!s) return;
+        [s styleSwipeForRowAtIndexPath:indexPath tableView:tableView];
+    });
 }
 
 - (void)tableView:(UITableView *)tableView didEndEditingRowAtIndexPath:(NSIndexPath *)indexPath {

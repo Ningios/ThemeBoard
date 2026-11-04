@@ -1131,14 +1131,26 @@ static NSArray<NSArray<NSString *> *> *TBAssetKindTable(void) {
     __weak typeof(self) wself = self;
     TBChoicePanelController *p = [TBChoicePanelController panelWithTitle:@"导入遮罩"
                                                                  message:msg
-                                                                 options:@[@"选择文件导入", @"跳转 Filza 导入"]
+                                                                 options:@[@"选择文件导入", @"跳转 Filza 导入",
+                                                                           @"用「文件」App 分享到 ThemeBoard"]
                                                                  handler:^(NSInteger idx) {
         __strong typeof(self) s = wself;
         if (!s || idx < 0) return;
-        if (idx == 0) [s tb_pickMaskFile];
-        else          [s tb_openPathInFilza:dir];
+        if (idx == 0)      [s tb_pickMaskFile];
+        else if (idx == 1) [s tb_openPathInFilza:dir];
+        else               [s tb_showShareImportHelp];
     }];
     [p presentOver:self];
+}
+
+- (void)tb_showShareImportHelp {
+    TBPresentAlert(self, @"用「文件」App 分享到 ThemeBoard",
+        @"1. 打开「文件」App，长按要导入的 zip\n"
+        @"2. 点「共享」→ 在 App 列表里选「ThemeBoard」\n"
+        @"3. ThemeBoard 会直接打开并导入，不经过系统文件选择器\n"
+        @"   （这条通路不会出现「点了文件被当成取消」）\n\n"
+        @"导入完成后回到主题列表，点开这个包就能看到它的遮罩；\n"
+        @"想把它当成本主题的遮罩：进入本主题 →「导入遮罩」→ 选择导入后的 IconBundles/Icon.png。");
 }
 
 - (void)tb_openPathInFilza:(NSString *)path {
@@ -1154,7 +1166,7 @@ static NSArray<NSArray<NSString *> *> *TBAssetKindTable(void) {
     // （选完再由我们自己判定是不是图片，见 didPickDocumentsAtURLs）
     UIDocumentPickerViewController *picker =
         TBNewImportPicker(@[ UTTypePNG, UTTypeJPEG, UTTypeZIP ],
-                                    @[ @"public.png", @"public.jpeg", @"public.zip-archive", @"public.data" ]);
+                                    @[ @"public.png", @"public.jpeg", @"public.zip-archive" ]);
     if (!picker) { [self tb_alert:@"打不开" message:@"系统没有可用的图片选择器"]; return; }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;

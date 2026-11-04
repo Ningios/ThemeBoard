@@ -3,6 +3,7 @@
 #import "TBThemeScanner.h"
 #import "TBTheme.h"
 #import "TBGlass.h"
+#import "TBSpacing.h"
 #import "TBPanelController.h"
 #import <sys/sysctl.h>
 
@@ -83,8 +84,9 @@ static NSString *TBReadLogLossy(NSString *path) {
     self.table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.table.dataSource = self;
     self.table.delegate = self;
-    self.table.rowHeight = 48;   // 0.15.57 收紧（仍 ≥44）
-    self.table.estimatedSectionHeaderHeight = 24;
+    self.table.rowHeight = MAX(48.0, kTBSpaceRowMin);   // 行高 ≥44
+    if (@available(iOS 15.0, *)) self.table.sectionHeaderTopPadding = 0;
+    self.table.estimatedSectionHeaderHeight = kTBSpaceGroupTitle;
     TBGlassTable(self.table);
     TBSetPageBackground(self);
     [self.view addSubview:self.table];
@@ -200,7 +202,7 @@ static NSString *TBReadLogLossy(NSString *path) {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
     cell.backgroundColor = [UIColor clearColor];
     cell.contentView.backgroundColor = [UIColor clearColor];
-    cell.backgroundView = TBGlassCellBG(12);
+    cell.backgroundView = TBGlassCellBG(kTBSpaceTableCellCardInset);
     cell.selectedBackgroundView = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
@@ -320,7 +322,14 @@ static NSString *TBReadLogLossy(NSString *path) {
 }
 
 - (CGFloat)tableView:(UITableView *)t heightForHeaderInSection:(NSInteger)s {
-    return s == 2 ? 28 : UITableViewAutomaticDimension;   // 0.15.57 收紧
+    // 0.15.59：全 App 统一间距（TBSpacing.h）
+    if (s == 2) return kTBSpaceGroupTitle;            // 「引擎日志」28（带右侧按钮）
+    NSString *title = [self tableView:t titleForHeaderInSection:s];
+    return title.length ? kTBSpaceGroupTitle : kTBSpaceHeaderH;
+}
+
+- (CGFloat)tableView:(UITableView *)t heightForFooterInSection:(NSInteger)s {
+    return kTBSpaceSectionBot;                        // 8
 }
 
 - (void)openLogFolder {

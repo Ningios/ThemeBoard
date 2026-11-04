@@ -35,23 +35,41 @@ static NSString *TBErrText(NSError *e) {
 
 UIDocumentPickerViewController *TBNewImportPicker(NSArray *contentTypes,
                                                   NSArray<NSString *> *legacyTypes) {
-    // ★ 0.15.57：按用户要求统一走 legacy Import 模式
-    //   IPC = initWithDocumentTypes:inMode:UIDocumentPickerModeImport
-    //   系统会把选中的文件/整个目录复制进 App 的 Inbox，返回普通 file:// URL，
-    //   不需要 security scope —— 在越狱 / 根less 环境里这条最稳。
-    //   （iOS14+ 的 initForOpeningContentTypes:asCopy:YES 在部分 iCloud provider 上会被
-    //     当成 documentPickerWasCancelled；如果真机上 legacy 又出现 cancel，把下面这一行
-    //     换成 asCopy 分支即可：contentTypes 只放 @[UTTypeZIP, UTTypeFolder]，不要带 UTTypeItem。）
+    // ★ 0.15.59：照 MarkFont-Ning（同账号、能正常从 iCloud 云盘导入）的做法：
+    //   · iOS14+：initForOpeningContentTypes:asCopy:NO，**只用具体类型**
+    //     （UTTypeZIP / UTTypeFolder / 图片），绝不带 UTTypeItem —— 带 Item 时系统
+    //     会把 iCloud 上不匹配的条目置灰或走 provider 的“导入”语义，进而被当成取消。
+    //   · 老系统：initWithDocumentTypes:inMode:UIDocumentPickerModeImport，同样只给具体 UTI。
+    //   asCopy:NO = open in place，拿到的就是原文件 URL（配 security scope 读取），
+    //   不会触发系统“复制进 Inbox”那一步（那一步在 rootless 下会报 257 无权限）。
     UIDocumentPickerViewController *p = nil;
     NSString *mode = @"(未创建)";
-    @try {
-        p = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:(legacyTypes ?: @[@"public.item"])
-                                                                   inMode:UIDocumentPickerModeImport];
-        mode = @"initWithDocumentTypes:UIDocumentPickerModeImport(legacy)";
-    } @catch (NSException *e) {
-        TBLog2(@"[导入][picker] ❌ 创建异常：%@ — %@", e.name, e.reason);
-        NSLog(@"[ThemeBoard] picker 创建失败: %@", e.reason);
-        p = nil;
+#ifdef TB_HAS_UTTYPE
+    if (@available(iOS 14.0, *)) {
+        NSMutableArray *types = [NSMutableArray array];
+        for (id t in contentTypes) {
+            if ([t isKindOfClass:[UTType class]]) [types addObject:t];
+        }
+        if (!types.count) types = [@[ UTTypeZIP ] mutableCopy];
+        @try {
+            p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:NO];
+            mode = @"initForOpeningContentTypes:asCopy:NO";
+        } @catch (NSException *e) {
+            TBLog2(@"[导入][picker] ❌ iOS14 分支创建异常：%@ — %@", e.name, e.reason);
+            p = nil;
+        }
+    }
+#endif
+    if (!p) {
+        @try {
+            p = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:(legacyTypes ?: @[@"public.zip-archive"])
+                                                                       inMode:UIDocumentPickerModeImport];
+            mode = @"initWithDocumentTypes:UIDocumentPickerModeImport(legacy)";
+        } @catch (NSException *e) {
+            TBLog2(@"[导入][picker] ❌ 创建异常：%@ — %@", e.name, e.reason);
+            NSLog(@"[ThemeBoard] picker 创建失败: %@", e.reason);
+            p = nil;
+        }
     }
     TBLog2(@"[导入][picker] 模式=%@ contentTypes(iOS14 不用)=[%@] legacyTypes=[%@] → %@",
            mode, TBPickerTypeNames(contentTypes),
@@ -132,10 +150,12 @@ NSData *TBReadCoordinatedData(NSURL *url, NSError **error) {
     TBLog2(@"[导入][读] startAccessingSecurityScopedResource=%d", scoped);
     NSFileCoordinator *coord = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
     @try {
-        // ReadingForUploading：让系统把 iCloud 上的文件真正下载到本机再交给 accessor。
-        // 直接用 contentsOfFile: 拿到的是占位文件（读出来是空的/失败）。
+        // ★ 0.15.59：改成 ReadingWithoutChanges（= 0）。MarkFont-Ning 用这个选项能在
+        //   同一台机器、同样的 ldid 签名、没有任何 iCloud entitlement 的情况下从 iCloud
+        //   云盘读文件；ReadingForUploading 会要求 provider 走“上传”语义，rootless 下
+        //   没有对应权限 → 正是 257 / EPERM 的来源。
         [coord coordinateReadingItemAtURL:url
-                                  options:NSFileCoordinatorReadingForUploading
+                                  options:NSFileCoordinatorReadingWithoutChanges
                                     error:&coordErr
                                byAccessor:^(NSURL *newURL) {
             TBLog2(@"[导入][读] accessor url=%@ 本地存在=%d",
@@ -206,7 +226,7 @@ NSURL *TBCopyCoordinatedItemToTemp(NSURL *url, NSError **error) {
     NSFileCoordinator *coord = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
     @try {
         [coord coordinateReadingItemAtURL:url
-                                  options:NSFileCoordinatorReadingForUploading
+                                  options:NSFileCoordinatorReadingWithoutChanges
                                     error:&coordErr
                                byAccessor:^(NSURL *newURL) {
             NSError *e = nil;
@@ -237,8 +257,24 @@ NSURL *TBCopyCoordinatedItemToTemp(NSURL *url, NSError **error) {
             if (!ok) copyErr = e;
             if (ok) {
                 NSDictionary *at = [fm attributesOfItemAtPath:dstPath error:NULL];
-                TBLog2(@"[导入][复制] ✅ 成功 字节数=%lu 目录=%d",
-                       (unsigned long)[at fileSize], isDirNow);
+                if (!isDirNow) {
+                    // 照 MarkFont：复制后把权限收紧到 0600，并校验字节数与源一致
+                    [fm setAttributes:@{NSFilePosixPermissions: @0600} ofItemAtPath:dstPath error:NULL];
+                    NSDictionary *srcAt = [fm attributesOfItemAtPath:newURL.path error:NULL];
+                    unsigned long long srcSize = [srcAt fileSize];
+                    unsigned long long dstSize = [at fileSize];
+                    TBLog2(@"[导入][复制] 字节校验 源=%llu 副本=%llu", srcSize, dstSize);
+                    if (srcSize != dstSize) {
+                        ok = NO;
+                        copyErr = [NSError errorWithDomain:@"ThemeBoard.Import" code:9 userInfo:@{
+                            NSLocalizedDescriptionKey:
+                                [NSString stringWithFormat:@"复制后大小不一致（源 %llu / 副本 %llu）",
+                                 srcSize, dstSize]}];
+                        TBLog2(@"[导入][复制] ❌ 大小不一致，判定失败：%@", TBErrText(copyErr));
+                    }
+                }
+                if (ok) TBLog2(@"[导入][复制] ✅ 成功 字节数=%lu 目录=%d 权限=0600",
+                               (unsigned long)[at fileSize], isDirNow);
             }
         }];
     } @catch (NSException *ex) {
@@ -255,6 +291,9 @@ NSURL *TBCopyCoordinatedItemToTemp(NSURL *url, NSError **error) {
     NSError *under = copyErr ?: coordErr;
     TBLog2(@"[导入][复制] ❌ 失败 %@ → coordinator=%@ 复制=%@ 占位=%d",
            url.lastPathComponent ?: @"?", TBErrText(coordErr), TBErrText(copyErr), placeholder);
+    TBLog2(@"[导入][复制] 失败详情 domain=%@ code=%ld desc=%@ userInfo=%@",
+           under.domain ?: @"-", (long)under.code, under.localizedDescription ?: @"-",
+           under.userInfo ?: @{});
     if (error) {
         *error = TBMakeError(TBImportFailureMessage(url, under, @"复制到 App 临时目录失败"), under);
     }
