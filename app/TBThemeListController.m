@@ -666,13 +666,26 @@ static const CGFloat kTBListHeaderInset = 32.0;
     }
 }
 
-/// 这一行（含子视图）里是否还挂着左滑容器 —— 用来判断「左滑是不是真的结束了」
-- (BOOL)tb_rowHasActiveSwipePull:(UITableViewCell *)cell {
-    UIView *pull = TBFindSwipePullView(cell, 0);
+/// 抓到的左滑容器是不是「还开着」：隐藏 / 透明 / 宽度归零的残留视图不算
+- (BOOL)tb_pullLooksActive:(UIView *)pull {
     if (!pull) return NO;
     if (pull.hidden || pull.alpha < 0.01) return NO;
     if (pull.bounds.size.width < 1.0) return NO;
     return YES;
+}
+
+/// 这一行（含子视图）里是否还挂着左滑容器
+- (BOOL)tb_rowHasActiveSwipePull:(UITableViewCell *)cell {
+    return [self tb_pullLooksActive:TBFindSwipePullView(cell, 0)];
+}
+
+/// 整张表里是否还有活着的左滑容器（有的系统版本把它挂在 cell 的父层）
+- (BOOL)tb_anyActiveSwipePull {
+    for (NSIndexPath *ip in [self.tableView indexPathsForVisibleRows]) {
+        UITableViewCell *c = [self.tableView cellForRowAtIndexPath:ip];
+        if (c && [self tb_rowHasActiveSwipePull:c]) return YES;
+    }
+    return [self tb_pullLooksActive:TBFindSwipePullView(self.tableView, 0)];
 }
 
 /// 素材包副标题：「遮罩 · 边框 · 阴影 · 角标」里实际有的项
@@ -838,23 +851,21 @@ willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPa
     [self tb_stopSwipeWatch];
     NSDate *beganAt = [NSDate date];
     __weak typeof(self) wself = self;
-    NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *tm) {
+    NSTimer *t = [NSTimer timerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *tm) {
         __strong typeof(self) s = wself;
         if (!s) { [tm invalidate]; return; }
         // 前 0.35s 是左滑容器出现/收起的动画窗口，这段时间不碰 accessory（避免闪）
         if ([[NSDate date] timeIntervalSinceDate:beganAt] < 0.35) return;
-        BOOL swiping = NO;
-        for (NSIndexPath *ip in [s.tableView indexPathsForVisibleRows]) {
-            UITableViewCell *c = [s.tableView cellForRowAtIndexPath:ip];
-            if (c && [s tb_rowHasActiveSwipePull:c]) { swiping = YES; break; }
-        }
-        if (swiping) return;
+        if ([s tb_anyActiveSwipePull]) return;   // 还在滑（或容器还在动画中）
         // 左滑容器已不在任何一行上 → 这次左滑真的结束了（不管有没有回调 didEndEditingRow）
         [tm invalidate];
         s.tb_swipeWatchTimer = nil;
         [s tb_refreshVisibleCheckmarksForce:YES];
         TBLog2(@"[勾选] 左滑看门狗：左滑容器已消失 → 重算可见行 ✓");
     }];
+    // 必须挂 CommonModes：默认模式在列表拖动（UITrackingRunLoopMode）期间不跑，
+    // 而「滑一半直接滚动」恰恰就是拖动状态
+    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
     self.tb_swipeWatchTimer = t;
 }
 
