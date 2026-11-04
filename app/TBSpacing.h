@@ -14,11 +14,11 @@ static const CGFloat kTBSpaceGroupTitle = 28.0;  // 分组标题高度
 static const CGFloat kTBSpaceCardGap    = 10.0;  // 卡片/行之间
 static const CGFloat kTBSpaceRowMin     = 44.0;  // 行高下限
 
-/// 表格（UITableViewStyleInsetGrouped）的 cell 本身左右自带约 20pt 内缩；
-/// 玻璃卡再补 -4pt，最终卡片边缘距屏幕 = 16pt（= kTBSpacePageSide）。
-/// 这是全 App 表格页统一卡片边距的唯一写法，别再写 12 / 8 之类的魔法数。
+/// 表格（UITableViewStyleInsetGrouped）cell 内玻璃卡的左右内缩 —— v0.15.41 的取值：12。
+/// 卡片左边 = 系统 section inset（约 20）+ 12，即距屏幕约 32pt；与 0.15.41 完全一致。
 ///
-/// ★ 0.15.61：恢复 0.15.59 的取值方式。0.15.60 曾改用 TBGlassCellAtPageSide()
-/// 在运行时按 cell 实际位置反推外扩量（试图「精确 16」），用户实测「一点没变」，
-/// 而且那套 hack 依赖放开 cell 裁剪，副作用多。这一版把所有调用点撤回本常量。
-static const CGFloat kTBSpaceTableCellCardInset = kTBSpacePageSide - 20.0;  // -4
+/// ★ 0.15.62：水平方向整体退回 0.15.41（12），纵向间距仍用下面这套收紧值。
+///   历史：0.15.58 起改成 kTBSpacePageSide-20 = -4（卡片外扩、几乎贴屏幕边）；
+///   0.15.60 又换成 TBGlassCellAtPageSide() 运行时反推（已撤，调用点已清零）。
+///   现在就是旧版那个 12，不要再写 -4 / 运行时换算。
+static const CGFloat kTBSpaceTableCellCardInset = 12.0;   // = v0.15.41 的 TBGlassCellBG(12)

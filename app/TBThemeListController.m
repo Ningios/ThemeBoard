@@ -37,66 +37,43 @@ static UIView *TBFindSwipePullView(UIView *root, NSInteger depth) {
     return nil;
 }
 
-/// 删除按钮的文字：浅色玻璃上用红、深色玻璃上用白（跟玻璃底色成对，保证对比度）。
-static void TBStyleSwipeLabels(UIView *v, NSInteger depth) {
+// ── 以下三段 = v0.15.41（commit 6868857）原样搬回 ──────────────────────────
+static void TBPaintRedLabels(UIView *v, NSInteger depth);
+
+static void TBStyleSwipePullView(UIView *pull) {
+    CGFloat scale = [UIScreen mainScreen].scale;
+    pull.backgroundColor = [UIColor clearColor];
+    pull.layer.cornerRadius = 20;
+    pull.layer.cornerCurve = kCACornerCurveContinuous;
+    pull.clipsToBounds = YES;
+
+    for (UIView *btn in pull.subviews) {
+        btn.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
+                                             [UIColor colorWithWhite:1 alpha:0.14]);
+        btn.layer.cornerRadius = 20;
+        btn.layer.cornerCurve = kCACornerCurveContinuous;
+        btn.clipsToBounds = YES;
+        btn.layer.borderWidth = 1.0 / scale;
+        btn.layer.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                               [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
+        TBPaintRedLabels(btn, 0);
+    }
+}
+
+/// 只把删除按钮里的文字染红；不设 tintColor（会向下继承，染红整张表）
+static void TBPaintRedLabels(UIView *v, NSInteger depth) {
     if (!v || depth > 3) return;
     for (UIView *sub in v.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
-            ((UILabel *)sub).textColor =
-                TBDynamicColor([UIColor systemRedColor], [UIColor whiteColor]);
+            ((UILabel *)sub).textColor = [UIColor systemRedColor];
         } else {
-            TBStyleSwipeLabels(sub, depth + 1);
+            TBPaintRedLabels(sub, depth + 1);
         }
     }
 }
 
-/// 「删除」按钮的玻璃底：画在按钮 **layer 的一个 CALayer 子层**里（不是 UIView，
-/// 所以永远不改变 UIKit 的 swipe action 视图树 → 不会触发动作数断言）。
-/// frame 每次布局都按 button.bounds 重算：左右 0（完全交给系统，不缩进、不留缝），
-/// 上下各内缩 5pt —— 卡片在 cell 里就是上下各留 5pt 左右，这样玻璃高度正好等于卡片高度。
-static CALayer *TBSwipeGlassLayer(UIView *btn) {
-    for (CALayer *l in btn.layer.sublayers) {
-        if ([l.name isEqualToString:@"tbSwipeGlass"]) return l;
-    }
-    CALayer *l = [CALayer layer];
-    l.name = @"tbSwipeGlass";
-    [btn.layer insertSublayer:l atIndex:0];   // 垫在文字 label 之下
-    return l;
-}
-
-/// 0.15.61：玻璃观感，照 11/02 那版截图 1:1 复现 —— 白色玻璃按钮，高度与左侧卡片一致。
-/// 与 0.15.60 的区别只在「几何」：0.15.60 按表格/屏幕坐标自己算 left/right inset 和 8pt 缝，
-/// 结果左右压住卡片、上下越界。这一版：
-///   · 按钮自身 backgroundColor = clear、cornerRadius = 0（圆角只由子层画）
-///   · 子层 frame = CGRectInset(button.bounds, 0, 5) —— **左右严格 0**，上下各内缩 5pt
-///   · 子层：cornerRadius 13 / cornerCurve continuous / masksToBounds / 白 0.55(浅)·0.12(深)
-///     + 1px 亮边
-///   · 文字只改颜色（浅色 systemRed / 深色白），字号、位置、transform 一律不碰
-/// 不增删任何 UIView，不动按钮 frame —— 左右位置/右边缘完全由系统给。
-static void TBStyleSwipePullView(UIView *pull) {
-    pull.backgroundColor = [UIColor clearColor];   // 容器只去掉底色，圆角/裁剪一律不动
-    for (UIView *btn in pull.subviews) {
-        btn.backgroundColor = [UIColor clearColor];
-        btn.layer.cornerRadius = 0;
-
-        CALayer *glass = TBSwipeGlassLayer(btn);
-        glass.frame = CGRectInset(btn.bounds, 0.0, 5.0);
-        glass.cornerRadius = 13;
-        glass.cornerCurve = kCACornerCurveContinuous;
-        glass.masksToBounds = YES;
-        glass.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                                [UIColor colorWithWhite:1 alpha:0.12]).CGColor;
-        glass.borderWidth = 1.0 / [UIScreen mainScreen].scale;
-        glass.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                            [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
-
-        TBStyleSwipeLabels(btn, 0);
-    }
-}
-
-/// 滑动容器每次布局都套一次：**先调原实现**，再只改颜色/圆角/文字色。
-/// 顺序绝不能反 —— 0.15.58 的崩溃就是引擎侧替换了 layoutSubviews 却没调原实现
-/// （容器不布局 → UIKit 动作数校验失败）。这里也不增删任何子视图，所以按钮计数不变。
+/// 滑动容器每次布局都重新套样式：样式和原来一模一样，只是时机提前到首帧之前，
+/// 不会先闪一下系统灰底，也不会因为「那次没抓到」而整行变灰。
 static void (*o_swipePullLayout)(id, SEL);
 static void tb_swipePullLayout(id self, SEL _cmd) {
     if (o_swipePullLayout) o_swipePullLayout(self, _cmd);
@@ -723,13 +700,18 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
 
 #pragma mark - 删除
 
-/// 安装 UISwipeActionPullView -layoutSubviews 的 hook：每次都先调原实现，
-/// 再只改按钮的底色 / 圆角 / 文字颜色（形状和尺寸完全不碰）。
+// ══════════════════════════════════════════════════════════════════════════
+//  左滑「删除」整段恢复 v0.15.41（commit 6868857）的实现 —— 用户点名那版观感 / 交互都没问题，
+//  0.15.57~0.15.61 期间加的「即时删除 + TBToast + CALayer 玻璃子层 + CGRectInset」全部撤掉。
+//  唯一保留的一条工程约束（不改观感）：
+//    · hook 必须先调原实现（引擎侧那条替换了 layoutSubviews 却不调原实现的 hook 已永久移除）；
+//    · UIContextualAction 的 handler 先【同步】调用 completionHandler，再下一拍 present 确认弹窗，
+//      否则 UIKit 的 swipe 事务收尾时会算错按钮数（NSInternalInconsistencyException）。
+// ══════════════════════════════════════════════════════════════════════════
+
+/// 给这一行套上样式；找不到滑动容器返回 NO（外观与原来完全一致，只是把
+/// 「找容器」这件事做得更彻底：cell / cell 的父视图 / 表格 / 整个窗口都试一遍）
 + (void)tb_installSwipeStyle {
-    // ★ 0.15.61：恢复安装，但只做「颜色 + 圆角 + 文字色」这三件最朴素的事。
-    //   历史教训：ThemeBoardEngine 曾替换 UISwipeActionPullView -layoutSubviews 却不调
-    //   原实现 → 滑动容器不布局 → UIKit 动作数校验永远失败（连 Filza 左滑都崩）。
-    //   引擎那条 hook 已永久移除；App 侧这条严格「先调原实现」，且不增删任何子视图。
     static BOOL done = NO;
     if (done) return;
     done = YES;
@@ -742,9 +724,6 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
     }
 }
 
-
-/// 兜底：万一某个系统版本先建容器后调 willBeginEditing，0.05s 后再套一次同样的
-/// 颜色/圆角（幂等，纯改属性，不增删视图）。
 - (BOOL)styleSwipeForRowAtIndexPath:(NSIndexPath *)indexPath tableView:(UITableView *)tableView {
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
     UIView *root = cell ? (cell.superview ?: cell) : tableView;
@@ -773,12 +752,10 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         cell.accessoryType = UITableViewCellAccessoryNone;
     }
-    __weak typeof(self) wself = self;
+    // 原版：0.05 秒后给这一行套样式（现在 swizzle 也会套，这里保留做兜底）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        __strong typeof(self) s = wself;
-        if (!s) return;
-        [s styleSwipeForRowAtIndexPath:indexPath tableView:tableView];
+        [self styleSwipeForRowAtIndexPath:indexPath tableView:tableView];
     });
 }
 
@@ -793,96 +770,41 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
     }
 }
 
-// ── 左滑删除 ────────────────────────────────────────────────────────────────
-// 崩溃根因（0.15.48 起）：在 swipe action 的 handler 里 present 模态（哪怕先用
-// dispatch_async 推迟一拍）会打断 UIKit 的 swipe 提交事务，事务收尾时算出来的按钮数
-// 对不上，抛 NSInternalInconsistencyException: The swipe action count does not match
-// the number of swipe action buttons。后来换成原生 editingStyle + commitEditingStyle
-// （里面 setEditing:NO）同样打断事务，一样崩。
-//
-// 现在这版必须同时满足三条，缺一不可：
-//   ① handler 里【先同步】completionHandler(YES) ——  UIKit 当场把这次 swipe 事务收尾；
-//   ② 真正的删除再 dispatch_async 到下一拍 —— 那时事务已结束，reloadData 不会打断它；
-//   ③ 全程不 present 任何 VC（不用 UIAlertController，也不用 TBConfirmPanelController），
-//      成功/失败都只用 TBToast 玻璃胶囊 + TBLog2。
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
-    trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section != 2 && indexPath.section != 3) return nil;
+trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    // 与 0.15.41 的差异只有一处（分区逻辑不变）：那一版只有「已安装主题」一段，
+    // 现在拆成 2「主题」/ 3「素材」，两段都可删。
+    if (indexPath.section < 2) return nil;
     NSArray<TBTheme *> *list = [self themesInSection:indexPath.section];
     if (indexPath.row < 0 || indexPath.row >= (NSInteger)list.count) return nil;
-
     TBTheme *t = list[indexPath.row];
-    NSString *identity = t.path.length ? t.path : (t.name ?: @"");
-    NSInteger section = indexPath.section;
-    NSInteger row = indexPath.row;
-    TBLog2(@"[删除] 左滑 action「%@」section=%ld row=%ld path=%@",
-           t.name ?: @"?", (long)section, (long)row, identity ?: @"(空)");
 
-    __weak typeof(self) wself = self;
-    // 0.15.61：必须是 Normal —— Destructive 会被系统强制刷成红底（就是之前那块大红块的来源）。
-    // 也不设 backgroundColor、不设 image：底色/圆角由 TBStyleSwipePullView 统一给玻璃。
-    UIContextualAction *del =
-        [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
-                                                title:@"删除"
-                                              handler:^(UIContextualAction *action,
-                                                        UIView *sourceView,
-                                                        void (^completionHandler)(BOOL)) {
-        // ① 先同步收尾：这一行必须在任何其它事情之前，且绝不能等 UI
-        completionHandler(YES);
-        // ② 下一拍再真正删除：那时 swipe 事务已经结束
+    UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                     title:@"删除"
+                                                                   handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+        // 0.15.41 原版：先问「删除「x」？」再删。
+        // completionHandler 必须同步收尾（UIKit 当场结束这次 swipe 事务），模态放到下一拍。
+        done(YES);
         dispatch_async(dispatch_get_main_queue(), ^{
-            __strong typeof(self) s = wself;
-            if (!s) return;
-            [s tb_deleteThemeAtSection:section row:row identity:identity];
+            UIAlertController *ac = [UIAlertController alertControllerWithTitle:
+                                     [NSString stringWithFormat:@"删除「%@」？", t.name]
+                message:@"主题文件夹会被直接删除，不可恢复" preferredStyle:UIAlertControllerStyleAlert];
+            [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [ac addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+                NSError *err = nil;
+                BOOL ok = [TBThemeScanner deleteTheme:t error:&err];
+                if (ok) {
+                    [self tb_clearPrefsPointingInto:t.path];
+                    NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
+                    if ([active isEqualToString:t.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
+                    [TBPrefs notifyChanged];
+                    [self reload];
+                }
+            }]];
+            [self presentViewController:ac animated:YES completion:nil];
         });
     }];
-
-    UISwipeActionsConfiguration *cfg =
-        [UISwipeActionsConfiguration configurationWithActions:@[del]];
-    cfg.performsFirstActionWithFullSwipe = NO;   // 不做「整条滑到底直接删」，防误触
-    return cfg;
-}
-
-/// 真正执行删除：跑在 swipe 事务结束后的那一拍；本方法绝不 present 任何 VC
-- (void)tb_deleteThemeAtSection:(NSInteger)section row:(NSInteger)row identity:(NSString *)identity {
-    // 行号可能已经变了（搜索 / 排序 / 刚删过一行），先用 row 取 + path 校验，再按 path 兜底找
-    NSArray<TBTheme *> *now = [self themesInSection:section];
-    TBTheme *cur = nil;
-    if (row >= 0 && row < (NSInteger)now.count) {
-        TBTheme *cand = now[row];
-        if (!identity.length || [(cand.path ?: @"") isEqualToString:identity]) cur = cand;
-    }
-    if (!cur && identity.length) {
-        for (TBTheme *cand in now) {
-            if ([(cand.path ?: @"") isEqualToString:identity]) { cur = cand; break; }
-        }
-    }
-    if (!cur) {
-        TBLog2(@"[删除] 目标已不在列表（section=%ld row=%ld identity=%@），跳过",
-               (long)section, (long)row, identity ?: @"(空)");
-        [TBToast show:@"删除失败" icon:@"exclamationmark.triangle" in:self];
-        return;
-    }
-
-    NSError *err = nil;
-    BOOL deleted = [TBThemeScanner deleteTheme:cur error:&err];
-    TBLog2(@"[删除] 结果 ok=%d err=%@（%@） path=%@", deleted,
-           err.domain ?: @"-", err.localizedDescription ?: @"-", cur.path ?: @"-");
-    if (!deleted) {
-        // 失败也不弹模态：只 toast + 把完整原因写进日志（原来的自绘「删除失败」弹窗 0.15.57 移除）
-        TBLog2(@"[删除] ❌ 失败详情 theme=%@ path=%@ errno=%@ userInfo=%@",
-               cur.name ?: @"?", cur.path ?: @"-",
-               err.userInfo[@"errno"] ?: @"-", err.userInfo ?: @{});
-        [TBToast show:@"删除失败" icon:@"exclamationmark.triangle" in:self];
-        return;
-    }
-
-    [self tb_clearPrefsPointingInto:cur.path];
-    NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
-    if ([active isEqualToString:cur.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
-    [TBPrefs notifyChanged];
-    [self reload];
-    [TBToast show:@"已删除" icon:@"trash" in:self];
+    return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 
 /// 删除后：把指向这个目录里的 Custom*Path 清掉并把对应开关关掉（否则设置里留着死路径）
@@ -903,8 +825,6 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
     }
 }
 
-
-/// 主题包（2）和素材包（3）都可删除；其它行（当前使用 / 按钮行）不可
 
 - (void)alertTitle:(NSString *)title message:(NSString *)msg {
     TBPresentAlert(self, title, msg);      // 自绘玻璃提示弹窗
