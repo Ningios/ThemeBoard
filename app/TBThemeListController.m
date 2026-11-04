@@ -19,6 +19,7 @@
 @property (nonatomic, strong) NSArray<TBTheme *> *assetPacks;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, assign) NSInteger sortMode;   // 0 名称 1 图标数
+- (void)tb_dismissSearch;
 @end
 
 static UIView *TBFindSwipePullView(UIView *root, NSInteger depth) {
@@ -88,6 +89,19 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
     self.navigationItem.searchController = self.search;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
 
+    // 0.15.53：0.15.50 删了系统「取消」按钮后，激活的搜索没有退路（点屏幕/滑动都收不回去）。
+    // 三条退出路径：
+    // ① 点列表任意处（含空白）→ 收起；cancelsTouchesInView=NO，不影响 cell 点击
+    UITapGestureRecognizer *dismissTap =
+        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tb_dismissSearch)];
+    dismissTap.cancelsTouchesInView = NO;
+    [self.tableView addGestureRecognizer:dismissTap];
+    // ③ 键盘收起（下拉隐藏键盘 / 系统收起）→ 同步退出搜索态
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(tb_dismissSearch)
+                                                 name:UIKeyboardWillHideNotification
+                                               object:nil];
+
     // 排序按钮已从导航栏挪进列表（「主题」分组标题右侧），见 viewForHeaderInSection:
 
     // 三个操作按钮放在「当前使用」下面（见 tableView:cellForRowAtIndexPath: 第 1 段）
@@ -109,6 +123,26 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 
 
 #pragma mark - 数据
+
+/// 收起搜索（0.15.53：搜索栏删了系统「取消」按钮后的退出路径）
+- (void)tb_dismissSearch {
+    if (self.search && self.search.active) {
+        self.search.active = NO;   // searchBar 会跟着失焦收起
+        [self applyFilter];
+    }
+}
+
+/// ② 开始拖动列表 → 收起搜索（用户往下滑是明确的「退出搜索」意图）
+- (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
+    [self tb_dismissSearch];
+}
+
+/// ② 兜底：大位移滚动（只在用户真实拖动/惯性时触发；搜索激活动画也会改 contentOffset，别误收）
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (!self.search.active) return;
+    BOOL userScrolling = scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating;
+    if (userScrolling && fabs(scrollView.contentOffset.y) > 10.0) [self tb_dismissSearch];
+}
 
 - (void)reload {
     self.themes = [TBThemeScanner scanThemes];
@@ -184,7 +218,9 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
 didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *url = urls.firstObject;
-    TBLog2(@"[导入] 主题列表：选中 %lu 个，第一个=%@", (unsigned long)urls.count, url.absoluteString ?: @"(nil)");
+    TBLog2(@"[导入] 主题列表：didPickDocumentsAtURLs 入口，选中 %lu 个，第一个=%@ isICloud=%d",
+           (unsigned long)urls.count, url.absoluteString ?: @"(nil)",
+           TBURLIsICloud(url) ? 1 : 0);
     if (!url) return;
 
     // 真正的读取/复制在 TBThemeScanner 里用 NSFileCoordinator 做（会触发 iCloud 下载）
@@ -198,6 +234,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     } else {
         NSString *msg = err.localizedDescription
             ?: TBImportFailureMessage(url, nil, @"导入失败：读不到选中的内容");
+        TBLog2(@"[导入] 主题列表：失败弹窗内容：%@", msg);
         TBPresentAlert(self, @"导入失败", msg);
     }
 }
@@ -361,20 +398,20 @@ static const CGFloat kTBListHeaderInset = 32.0;
     }
 
     if (section == 2) {
-        // 排序按钮：从导航栏挪到这里（「主题」分组标题右侧），
-        // 与「重新扫描 / 导入主题 / 清除主题」同款玻璃（高 44 / 圆角 13 / 白 .62-.14 / 1px 亮边）
+        // 排序按钮：从导航栏挪到这里（「主题」分组标题右侧）。
+        // 0.15.53：58×44 → 40×32（圆角 10 / 图标 18pt）——之前和三操作按钮一样大，喧宾夺主
         UIButton *sort = [UIButton buttonWithType:UIButtonTypeSystem];
         UIImageSymbolConfiguration *sc =
-            [UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIFontWeightRegular];
+            [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIFontWeightRegular];
         [sort setImage:[UIImage systemImageNamed:@"arrow.up.arrow.down" withConfiguration:sc]
               forState:UIControlStateNormal];
         sort.tintColor = [UIColor labelColor];
         sort.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.62],
                                               [UIColor colorWithWhite:1 alpha:0.14]);
-        sort.layer.cornerRadius = 13;
+        sort.layer.cornerRadius = 10;
         sort.layer.cornerCurve = kCACornerCurveContinuous;
         TBApplyRim(sort, 0.55);
-        sort.frame = CGRectMake(w - kTBListHeaderInset - 58.0, (h - 44.0) / 2.0, 58.0, 44.0);
+        sort.frame = CGRectMake(w - kTBListHeaderInset - 40.0, (h - 32.0) / 2.0, 40.0, 32.0);
         sort.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
         [sort addTarget:self action:@selector(sortTapped) forControlEvents:UIControlEventTouchUpInside];
         [head addSubview:sort];
@@ -635,13 +672,19 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.row >= (NSInteger)list.count) return nil;
     TBTheme *t = list[indexPath.row];
     BOOL isAsset = (indexPath.section == 3) || t.isAssetPack;
-    UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+    UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
                                                                      title:@"删除"
                                                                    handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+        // ★★ 必须先、且只调一次 completionHandler：UIKit 会校验「动作数 == 按钮数」，
+        //    如果等用户在确认弹窗里点完才调，就抛
+        //    NSInternalInconsistencyException: The swipe action count does not match ...
+        //    —— 这就是"任何一行左滑直接闪退"的根因（0.15.52 崩溃日志实锤）。
+        done(YES);
+        dispatch_async(dispatch_get_main_queue(), ^{     // 让左滑收尾事务先跑完，再弹确认
         TBPresentConfirm(self, [NSString stringWithFormat:@"删除「%@」？", t.name],
                          (isAsset ? @"素材包文件夹会被直接删除，不可恢复" : @"主题文件夹会被直接删除，不可恢复"),
                          @"取消", @"删除", YES, ^(BOOL ok) {
-            if (!ok) { done(NO); return; }
+            if (!ok) return;
             TBLog2(@"[删除] 用户确认删除「%@」（%@）path=%@", t.name, isAsset ? @"素材包" : @"主题包", t.path);
             NSError *err = nil;
             BOOL deleted = [TBThemeScanner deleteTheme:t error:&err];
@@ -657,10 +700,12 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
                 // 失败必须有明确提示，不能静默（原来是 done(NO) 什么都不说）
                 [self tb_showDeleteFailure:err theme:t];
             }
-            done(deleted);
+        });
         });
     }];
-    return [UISwipeActionsConfiguration configurationWithActions:@[del]];
+    UISwipeActionsConfiguration *cfg = [UISwipeActionsConfiguration configurationWithActions:@[del]];
+    cfg.performsFirstActionWithFullSwipe = NO;     // 全滑直接删太危险
+    return cfg;
 }
 
 /// 删除失败：给出【可操作】的提示 —— 完整路径 + 复制到剪贴板 + 建议用 Filza，

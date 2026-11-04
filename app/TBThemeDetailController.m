@@ -259,6 +259,7 @@ static CGFloat TBPreviewCardHeight(CGFloat width) {
 @property (nonatomic, assign) BOOL active;
 @property (nonatomic, strong) UIImage *maskPreviewImage;   // 遮罩预览（已按当前形状裁好）
 @property (nonatomic, copy) NSString *maskPreviewCaption;
+- (void)tb_dismissSearch;
 
 - (void)tb_prefsChanged;   // 偏好变更通知 → 刷新遮罩预览
 @end
@@ -312,6 +313,18 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
     self.search.searchBar.placeholder = @"搜应用名或 bundleID";
     self.navigationItem.searchController = self.search;
     self.navigationItem.hidesSearchBarWhenScrolling = YES;
+
+    // 0.15.53：与列表页同款的三条搜索退出路径（0.15.50 删了系统「取消」按钮）。
+    // ① 点网格任意处收起；cancelsTouchesInView=NO，不影响 cell 点按
+    UITapGestureRecognizer *dismissTap =
+        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tb_dismissSearch)];
+    dismissTap.cancelsTouchesInView = NO;
+    [self.collectionView addGestureRecognizer:dismissTap];
+    // ③ 键盘收起（下拉隐藏键盘 / 系统收起）→ 同步退出搜索态
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(tb_dismissSearch)
+                                                 name:UIKeyboardWillHideNotification
+                                               object:nil];
 
     [self refreshMaskPreview];
     [self refreshApplyState];
@@ -578,6 +591,29 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
         }]];
     }
     [self.collectionView reloadSections:[NSIndexSet indexSetWithIndex:2]];
+}
+
+/// 收起搜索（0.15.53：搜索栏删了系统「取消」按钮后的退出路径）
+- (void)tb_dismissSearch {
+    if (self.search && self.search.active) {
+        self.search.active = NO;   // searchBar 会跟着失焦收起
+        self.bids = self.allBids;
+        if (self.collectionView.numberOfSections > 2) {
+            [self.collectionView reloadSections:[NSIndexSet indexSetWithIndex:2]];
+        }
+    }
+}
+
+/// ② 开始拖动网格 → 收起搜索（用户往下滑是明确的「退出搜索」意图）
+- (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
+    [self tb_dismissSearch];
+}
+
+/// ② 兜底：大位移滚动（只在用户真实拖动/惯性时触发；搜索激活动画也会改 contentOffset，别误收）
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (!self.search.active) return;
+    BOOL userScrolling = scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating;
+    if (userScrolling && fabs(scrollView.contentOffset.y) > 10.0) [self tb_dismissSearch];
 }
 
 #pragma mark - 网格（双列方形卡片）

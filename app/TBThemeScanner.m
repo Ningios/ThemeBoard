@@ -494,6 +494,34 @@ static BOOL TBIsThemeLikeDirectory(NSString *dir) {
     }
     TBLog2(@"[导入][主题] 临时副本=%@", tmp.path);
 
+    // 0.15.53：zip 兜底 —— asCopy 副本 / iCloud 下载副本有时会把 .zip 后缀弄丢
+    // （或用户网盘里的文件本来就没后缀），只按 pathExtension 判断会漏掉解压分支。
+    // 这里按文件魔数 "PK\x03\x04" 识别，是 zip 就把副本补上 .zip 再走原流程。
+    {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:tmp.path isDirectory:&isDir] && !isDir) {
+            NSData *head = nil;
+            NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:tmp.path];
+            if (fh) { head = [fh readDataOfLength:4]; [fh closeFile]; }
+            NSString *ext = tmp.pathExtension.lowercaseString;
+            BOOL isZipMagic = head.length >= 4 &&
+                ((const uint8_t *)head.bytes)[0] == 'P' && ((const uint8_t *)head.bytes)[1] == 'K' &&
+                (((const uint8_t *)head.bytes)[2] == 3 || ((const uint8_t *)head.bytes)[2] == 5 ||
+                 ((const uint8_t *)head.bytes)[2] == 7);
+            NSDictionary *at = [fm attributesOfItemAtPath:tmp.path error:NULL];
+            TBLog2(@"[导入][主题] 副本 字节数=%lu 扩展名=%@ zip魔数=%d",
+                   (unsigned long)[at fileSize], ext.length ? ext : @"(无)", isZipMagic ? 1 : 0);
+            if (isZipMagic && ![ext isEqualToString:@"zip"]) {
+                NSString *fixed = [tmp.path stringByAppendingPathExtension:@"zip"];
+                if (fixed && [fm moveItemAtPath:tmp.path toPath:fixed error:NULL]) {
+                    TBLog2(@"[导入][主题] 副本没有 .zip 后缀但内容是 zip → 改名 %@", fixed.lastPathComponent);
+                    tmp = [NSURL fileURLWithPath:fixed];
+                }
+            }
+        }
+    }
+
     __block NSString *result = nil;
     __block NSError *inner = nil;
     @try {

@@ -2137,8 +2137,8 @@ static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
 
 /// 一次性探针：时钟视图的类链 / ivar / 相关方法 / 子视图树，用来确定表盘图存在哪
 static void TBClockDumpNow(id v);
-static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *iconsOut) {
-    if (!v || depth > 12) return 0;
+static NSInteger TBHealOneView(UIView *v, NSMutableArray *iconsOut) {
+    if (!v) return 0;
     NSInteger fixed = 0;
     NSString *vcls = NSStringFromClass([v class]);
     // 时钟视图：换主题后要重画。顺序完全照 SnowBoard 的 refreshIconView:fully:：
@@ -2309,34 +2309,67 @@ static NSInteger TBHealViewTree(UIView *v, NSInteger depth, NSMutableArray *icon
             } @catch (NSException *e) { }
         }
     }
-    for (UIView *sub in v.subviews) fixed += TBHealViewTree(sub, depth + 1, iconsOut);
+    for (UIView *sub in v.subviews) fixed += TBHealOneView(sub, iconsOut);
     return fixed;
 }
 
-/// 换主题后遍历窗口层级强制重贴（不依赖图标视图是否登记为缓存观察者）
+/// 0.15.53：换主题后整棵窗口树【分批异步】遍历重贴。
+/// 之前 TBHealAllIconViews 一口气在主线程跑完所有窗口（~118 个图标视图 × 每个七八步 msgSend
+/// + 时钟特殊处理），应用主题回到桌面正好撞上这一大坨 → 掉帧卡顿。
+/// 现在：收集（一次快照）→ 每批 36 个视图 dispatch_async，批间让出主线程；不改任何单视图逻辑。
 static void TBHealAllIconViews(void) {
     if (gHealDepth > 0) return;
     gHealDepth++;
-    TBLog(@"heal: 开始遍历窗口树");
+    TBLog(@"heal: 开始收集窗口树（分批异步重贴）");
     @try {
-        NSInteger fixed = 0;
-        NSMutableArray *seen = [NSMutableArray array];
-        for (UIView *w in [[UIApplication sharedApplication] windows]) {
-            fixed += TBHealViewTree(w, 0, seen);
-            if (fixed > 400) break;   // 上限保护
+        // ① 一次性快照：把所有窗口里要处理的视图按序收平（此刻仍是一次遍历，但只做收集，
+        //    不跑每个视图七八步的重贴 msgSend —— 纯收集在主线程是亚毫秒级）
+        NSMutableArray *queue = [NSMutableArray array];
+        NSMutableArray *stack = [NSMutableArray array];
+        for (UIView *w in [[UIApplication sharedApplication] windows]) [stack addObject:w];
+        while (stack.count && queue.count < 600) {
+            UIView *v = stack.firstObject;
+            [stack removeObjectAtIndex:0];
+            if (!v) continue;
+            [queue addObject:v];
+            [stack addObjectsFromArray:[v.subviews copy]];
         }
-        TBLog(@"heal: 遍历完成 fixed=%ld seen=%lu", (long)fixed, (unsigned long)seen.count);
-        if (fixed > 0) TBLog(@"换主题后重贴 %ld 个图标视图（%lu 个图标）", (long)fixed, (unsigned long)seen.count);
+        TBLog(@"heal: 收集 %lu 个视图待处理（每批 36）", (unsigned long)queue.count);
+        if (queue.count == 0) { gHealDepth--; return; }
 
-        // 只清「屏幕上真正碰到」的这些图标，避免 purgeAllCachedImages 一次清掉
-        // 上千张图、紧接着全量重绘造成尖峰（曾被系统看门狗杀掉）。
-        // 注意：这里【不要】清缓存。对屏幕上正在显示的图标调
-        // purgeCachedImagesForIcons: 会把 SpringBoard 搞崩（14:33 那次注销的元凶），
-        // 而且实测 fixed 恒为 0，本来就没有效果。
-        (void)seen;
-    } @catch (NSException *e) { }
-    TBLog(@"heal: 结束");
-    gHealDepth--;
+        // ② 分批异步重贴：每批 36 个视图一批批 dispatch_async，批间让出主线程
+        __block NSInteger cursor = 0;          // 已处理到的下标（heal 返回值是修复数不是视图数，用游标推进）
+        __block NSInteger fixed = 0;
+        __block NSMutableArray *seen = [NSMutableArray array];
+        __block NSInteger batch = 0;
+        __block void (^drain)(void) = nil;   // 链式强引用在结尾 drain=nil 时断开（队列有限必会走完）
+        drain = ^{
+            if (cursor >= (NSInteger)queue.count) {
+                TBLog(@"heal: 分批重贴完成 fixed=%ld seen=%lu（%ld 批）",
+                      (long)fixed, (unsigned long)seen.count, (long)batch);
+                gHealDepth--;
+                drain = nil;
+                return;
+            }
+            NSInteger start = cursor;
+            NSInteger end = MIN(start + 36, (NSInteger)queue.count);
+            for (NSInteger i = start; i < end; i++) {
+                UIView *v = queue[i];
+                if (!v.window && ![v isKindOfClass:[UIWindow class]]) continue;   // 已离屏
+                fixed += TBHealOneView(v, seen);
+            }
+            cursor = end;
+            batch++;
+            if (batch <= 3 || batch % 5 == 0) {
+                TBLog(@"heal: 批 %ld 完成（%ld/%lu）", (long)batch, (long)end, (unsigned long)queue.count);
+            }
+            dispatch_async(dispatch_get_main_queue(), drain);
+        };
+        dispatch_async(dispatch_get_main_queue(), drain);
+    } @catch (NSException *e) {
+        TBLog(@"heal: 异常 %@", e.reason);
+        gHealDepth--;
+    }
 }
 
 static __weak UIView *gLastClockView;   // 最近一次看到的时钟视图
@@ -2932,6 +2965,22 @@ static UIImage *tb_appIconImageForBID(id self, SEL _cmd, id identifier, int form
                       sized.size.width, sized.size.height);
             return sized;
         }
+        // 0.15.53：主题【没覆盖】的 App 也走全局效果 —— 之前这条链只对主题覆盖的 App 出
+        // 主题图，其余 App 原样返回系统图，于是 App 切换器多任务卡片里一部分 App 还是
+        // 系统圆角矩形、和套了遮罩的混在一起。这里对系统原图先 TBArtSquareFilled →
+        // TBApplyIconShape → TBApplyIconEffects（TBGlobalEffectImage 内部就是这个顺序），
+        // 再按请求尺寸重绘；开关门控（GlobalIconEffect / 形状参数开关）都在函数里。
+        UIImage *sys = o_appIcon ? o_appIcon(self, _cmd, identifier, format) : nil;
+        UIImage *g = TBGlobalEffectImage(sys, identifier);
+        if (g && g != sys) {
+            gServe++;
+            UIImage *sized = TBUIKitSizedThemeIcon(g, self, _cmd, identifier, format, 0, NO) ?: g;
+            TBLogOnce([@"uikitfx|" stringByAppendingFormat:@"%@|%d", identifier, format],
+                      @"切换器遮罩：%@（%.0f×%.0f）未覆盖主题，已套全局效果 fmt=%d",
+                      identifier, sys.size.width, sys.size.height, format);
+            return sized;
+        }
+        return sys;
     }
     return o_appIcon ? o_appIcon(self, _cmd, identifier, format) : nil;
 }
@@ -2945,6 +2994,17 @@ static UIImage *tb_appIconImageForBIDScale(id self, SEL _cmd, id identifier, int
             TBLogOnce([@"uikiticons|" stringByAppendingFormat:@"%@|%d", identifier, format],
                       @"serve 应用图标 %@ fmt=%d scale=%.1f → %.0fx%.0fpt", identifier, format, scale,
                       sized.size.width, sized.size.height);
+            return sized;
+        }
+        // 0.15.53：:scale: 变体同样接全局效果（理由同上）
+        UIImage *sys = o_appIconScale ? o_appIconScale(self, _cmd, identifier, format, scale) : nil;
+        UIImage *g = TBGlobalEffectImage(sys, identifier);
+        if (g && g != sys) {
+            gServe++;
+            UIImage *sized = TBUIKitSizedThemeIcon(g, self, _cmd, identifier, format, scale, YES) ?: g;
+            TBLogOnce([@"uikitfxs|" stringByAppendingFormat:@"%@|%d", identifier, format],
+                      @"切换器遮罩：%@（%.0f×%.0f）未覆盖主题，已套全局效果 fmt=%d scale=%.1f",
+                      identifier, sys.size.width, sys.size.height, format, scale);
             return sized;
         }
     }
@@ -4404,31 +4464,8 @@ static void TBPurgeThemedIcons(void) {
     });
 }
 
-/// 让所有注册过的图标缓存通知观察者（图标视图）重新取图 —— 换主题后即时生效的关键
-static NSInteger TBInvalidateIconViews(NSArray *icons) {
-    if (!icons.count) return 0;
-    [gLock lock];
-    NSArray *cacheList = gCaches.allObjects;
-    [gLock unlock];
-    SEL upd = NSSelectorFromString(@"notifyObserversOfUpdateForIcon:");
-    SEL updU = NSSelectorFromString(@"notifyObserversOfUnmaskedUpdateForIcon:");
-    NSInteger sent = 0;
-    for (NSValue *v in cacheList) {
-        id cache = v.nonretainedObjectValue;
-        if (!cache) continue;
-        BOOL canUpd = [cache respondsToSelector:upd];
-        BOOL canUpdU = [cache respondsToSelector:updU];
-        if (!canUpd && !canUpdU) continue;
-        for (id icon in icons) {
-            @try {
-                if (canUpd) ((void (*)(id, SEL, id))objc_msgSend)(cache, upd, icon);
-                if (canUpdU) ((void (*)(id, SEL, id))objc_msgSend)(cache, updU, icon);
-                sent++;
-            } @catch (NSException *e) { }
-        }
-    }
-    return sent;
-}
+/// （0.15.53：原来的 TBInvalidateIconViews 同步整表循环已并入 TBRunReload 的分批异步版，
+///   这里不再保留独立函数 —— 通知逻辑只有这一处使用方。）
 
 /// 正在执行的那次刷新序号（延迟任务用它判断自己是不是过期了）
 static NSUInteger gReloadRunSeq = 0;
@@ -4577,14 +4614,19 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
 
     // 主线程：先（可选）分批清缓存，再通知图标视图重取，最后让 SpringBoard 重排
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 角标还原（0.15.49 根因修复）：换主题 / 关角标开关 / 取消应用 / 任何设置变更
-        // 都要先把上次换上的底板写回【系统原图】—— 否则旧角标一直赖在图标上，
-        // 看起来就像"两个角标叠着"，只有注销才会消失。
-        if (gBadgeApplied) TBBadgeRestoreAll(@"设置变更（换主题/开关/取消应用）");
-        // 角标素材图缓存按主题名失效：App 往同一主题里重导/覆盖 SBBadgeBG 素材后，
-        // 旧主题名命中不了变化 —— 这里跟着 TBReload 一起清（主线程，与读端同队列）
-        gBadgeThemeImgCache = nil;
-        gBadgeThemeImgCacheTheme = nil;
+        // 0.15.53：角标还原 + 屏上角标素材缓存失效【延后一个 tick】——
+        // 它要逐个写回 plate.layer.contents，应用主题回桌面的第一帧别让它插队
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (mySeq != gReloadRunSeq) return;
+            // 角标还原（0.15.49 根因修复）：换主题 / 关角标开关 / 取消应用 / 任何设置变更
+            // 都要先把上次换上的底板写回【系统原图】—— 否则旧角标一直赖在图标上。
+            if (gBadgeApplied) TBBadgeRestoreAll(@"设置变更（换主题/开关/取消应用）");
+            // 角标素材图缓存按主题名失效：App 往同一主题里重导/覆盖 SBBadgeBG 素材后，
+            // 旧主题名命中不了变化 —— 这里跟着 TBReload 一起清（主线程，与读端同队列）
+            gBadgeThemeImgCache = nil;
+            gBadgeThemeImgCacheTheme = nil;
+        });
 
         NSArray *icons = TBAllIcons();
         NSArray *cacheList = caches;
@@ -4611,12 +4653,47 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
                 TBLog(@"已分批清理 %lu 个图标的缓存（%ld 批）", (unsigned long)icons.count, (long)round);
         }
 
-        // 通知是 O(图标数 × 缓存数)，主题可能覆盖上千个图标；
-        // 超过上限就跳过，靠下面的窗口遍历（只碰屏幕上的几十个视图）刷新，
-        // 避免主线程被几千次调用堵死触发 watchdog。
+        // 0.15.53：通知图标视图重取改为【分批异步】。原来是同步循环 O(图标数 × 缓存数)，
+        // 主题覆盖几百个图标时这一下能把主线程按住几百毫秒（应用主题回桌面卡顿主因之一）。
+        // 每批 40 个图标 dispatch_async，批间让出主线程；总量超上限时仍走窗口遍历兜底。
         if (icons.count > 0 && icons.count <= 250) {
-            NSInteger sent = TBInvalidateIconViews(icons);
-            TBLog(@"已通知图标视图重取 %ld 次", (long)sent);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [gLock lock];
+                NSArray *cacheList2 = gCaches.allObjects;
+                [gLock unlock];
+                SEL upd = NSSelectorFromString(@"notifyObserversOfUpdateForIcon:");
+                SEL updU = NSSelectorFromString(@"notifyObserversOfUnmaskedUpdateForIcon:");
+                __block NSInteger sent = 0;
+                const NSUInteger kChunk = 40;
+                __block NSUInteger idx = 0;
+                __block void (^drainNotify)(void) = nil;
+                drainNotify = ^{
+                    if (idx >= icons.count) {
+                        TBLog(@"已通知图标视图重取 %ld 次（分批异步）", (long)sent);
+                        drainNotify = nil;
+                        return;
+                    }
+                    NSUInteger end = MIN(idx + kChunk, icons.count);
+                    NSArray *part = [icons subarrayWithRange:NSMakeRange(idx, end - idx)];
+                    for (NSValue *v in cacheList2) {
+                        id cache = v.nonretainedObjectValue;
+                        if (!cache) continue;
+                        BOOL canUpd = [cache respondsToSelector:upd];
+                        BOOL canUpdU = [cache respondsToSelector:updU];
+                        if (!canUpd && !canUpdU) continue;
+                        for (id icon in part) {
+                            @try {
+                                if (canUpd) ((void (*)(id, SEL, id))objc_msgSend)(cache, upd, icon);
+                                if (canUpdU) ((void (*)(id, SEL, id))objc_msgSend)(cache, updU, icon);
+                                sent++;
+                            } @catch (NSException *e) { }
+                        }
+                    }
+                    idx = end;
+                    dispatch_async(dispatch_get_main_queue(), drainNotify);
+                };
+                dispatch_async(dispatch_get_main_queue(), drainNotify);
+            });
         } else {
             TBLog(@"图标数 %lu 超过通知上限，跳过逐个通知，改用窗口遍历刷新", (unsigned long)icons.count);
         }

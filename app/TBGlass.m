@@ -296,6 +296,7 @@ static UIView *TBFindSearchField(UIView *v, NSInteger depth) {
 
 static const void *kTBSearchGlassKey = &kTBSearchGlassKey;
 static const void *kTBSBStyledKey = &kTBSBStyledKey;   // searchBar 级外观只设一次的标记
+static const void *kTBSearchPHKey = &kTBSearchPHKey;   // placeholder 颜色只设一次的标记
 
 void TBStyleSearchBarGlass(UISearchBar *sb) {
     if (!sb) return;
@@ -321,13 +322,22 @@ void TBStyleSearchBarGlass(UISearchBar *sb) {
     tf.borderStyle = UITextBorderStyleNone;
     tf.textColor = [UIColor labelColor];
     // ★ 文字聚焦后"会动/错位"：系统在聚焦时会改 tf 的左右内边距（给取消按钮腾位）。
-    //   固定成对称内边距，聚焦前后文字位置一致。
+    //   固定成条件内边距，聚焦前后文字位置一致。
     // ★ 保留系统放大镜（leftView）和清除按钮（rightView）：不要每帧强制置 nil——
-    //   那会把系统图标挤没（0.15.50 回归）。存在时只把对应侧内边距调小对齐。
+    //   那会把系统图标挤没（0.15.50 回归）。存在时只把对应侧内边距调小对齐：
+    //   有放大镜 → 6pt（贴着放大镜），没有 → 12pt（原来写死的值，按需求复查后保留为兜底）。
     CGFloat lpad = (tf.leftView && tf.leftViewMode != UITextFieldViewModeNever) ? 6.0 : 12.0;
     CGFloat rpad = (tf.rightView && tf.rightViewMode != UITextFieldViewModeNever) ? 6.0 : 12.0;
     [tf setValue:@(lpad) forKey:@"paddingLeft"];
     [tf setValue:@(rpad) forKey:@"paddingRight"];
+    // 0.15.53：placeholder 用次要标签色（之前跟随系统默认灰，玻璃底上显得又黑又挤）。
+    // attributedPlaceholder 带动态色，深浅色模式自动跟随；关联标记保证只设一次不每帧重建。
+    if (tf.placeholder.length && !objc_getAssociatedObject(tf, kTBSearchPHKey)) {
+        NSDictionary *attrs = @{NSForegroundColorAttributeName: [UIColor secondaryLabelColor]};
+        tf.attributedPlaceholder =
+            [[NSAttributedString alloc] initWithString:tf.placeholder attributes:attrs];
+        objc_setAssociatedObject(tf, kTBSearchPHKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 
     UIView *glass = objc_getAssociatedObject(tf, kTBSearchGlassKey);
     if (!glass) {

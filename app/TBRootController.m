@@ -75,6 +75,20 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
     self.pages.firstObject.view.hidden = NO;
     self.current = 0;
 
+    // 0.15.53：页面左右滑切 Tab（水平主导才触发，cancelsTouchesInView=NO 不干扰列表滚动；
+    // dock 上的 tb_dockPan 手势在 dock 视图上，优先级天然高于这个加在主视图上的）
+    UIPanGestureRecognizer *pagePan =
+        [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(tb_pagePan:)];
+    pagePan.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:pagePan];
+
+    // 0.15.53：各 nav 启用边缘右滑返回；根页面禁用 pop（防与切 Tab 手势打架/卡死）
+    for (UINavigationController *nav in self.pages) {
+        nav.delegate = self;
+        nav.interactivePopGestureRecognizer.enabled = YES;
+        nav.interactivePopGestureRecognizer.delegate = self;
+    }
+
     [self buildDock];
     [self relayout];
 }
@@ -203,6 +217,39 @@ static const CGFloat        kTBTabPageShift   = 12.0;   // 页面水平位移（
 }
 
 #pragma mark - Tab 切换（水滴：前沿先到、后沿慢半拍 + 轻微回弹，共 400ms）
+
+/// 0.15.53：主视图左右滑切 Tab —— 向左滑（content 向左）→ 右边 Tab，向右滑 → 左边 Tab。
+/// 水平主导（|vx| > |vy| 且位移够大）才算切页，竖向滚动 / 斜向拖动不触发。
+- (void)tb_pagePan:(UIPanGestureRecognizer *)g {
+    if (self.draggingDock) return;                 // dock 拖动优先
+    if (self.switching) return;                    // 切页动画中不叠发
+    CGPoint v = [g velocityInView:self.view];
+    CGPoint t = [g translationInView:self.view];
+    if (g.state == UIGestureRecognizerStateEnded) {
+        BOOL horizontal = fabs(v.x) > fabs(v.y) * 1.2;
+        BOOL farEnough = fabs(t.x) > 44.0 || fabs(v.x) > 500.0;
+        if (!horizontal || !farEnough) return;
+        NSInteger n = (NSInteger)self.pages.count;
+        NSInteger target = (t.x < 0) ? self.current + 1 : self.current - 1;   // 左滑→下一个
+        target = MAX(0, MIN(target, n - 1));
+        if (target != self.current) [self tb_switchToTab:target];
+    }
+}
+
+#pragma mark - 边缘右滑返回（UINavigationControllerDelegate / 手势代理）
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gr {
+    // interactivePop 手势：只在真的有页面可弹时放行（根页面禁用，防和切 Tab 打架）
+    if ([gr isKindOfClass:[UIScreenEdgePanGestureRecognizer class]] ||
+        [gr.view isKindOfClass:[UINavigationBar class]]) {
+        UINavigationController *nav = nil;
+        for (UINavigationController *cand in self.pages) {
+            if (cand.interactivePopGestureRecognizer == gr) { nav = cand; break; }
+        }
+        if (nav) return (nav.viewControllers.count > 1);
+    }
+    return YES;
+}
 
 - (void)tabTapped:(UIButton *)sender {
     // 拖动中（第二根手指）或拖动刚松手（cancelsTouchesInView=NO，抬起会同时落进按钮）都不算点击

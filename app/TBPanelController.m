@@ -7,10 +7,14 @@
 
 
 /// 简单日志：写 /var/mobile/Library/ThemeBoard/app.log（便于真机排查）
+/// 0.15.53：同时 NSLog 到系统日志 —— 之前只写 app.log，而 app.log 落在 App 容器里，
+/// 用户抓的 engine.log（/var/mobile/Library/ThemeBoard/engine.log）里完全看不到 App 侧
+/// 导入日志，云盘导入排障时等于两眼一抹黑。
 void TBLog2(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     NSString *m = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
+    NSLog(@"[TBApp] %@", m ?: @"");
     NSString *dir = @"/var/mobile/Library/ThemeBoard";
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
                                                attributes:nil error:NULL];

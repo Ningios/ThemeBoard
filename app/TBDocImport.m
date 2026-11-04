@@ -165,8 +165,18 @@ NSData *TBReadCoordinatedData(NSURL *url, NSError **error) {
                                byAccessor:^(NSURL *newURL) {
             TBLog2(@"[导入][读] accessor url=%@ 本地存在=%d",
                    newURL.path ?: @"(nil)", [fm fileExistsAtPath:newURL.path]);
+            // 0.15.53：ReadingForUploading 后系统给的应是本地临时副本；若还是没有，
+            // 说明文件仍在云端没下载下来 —— 直接给用户明确指引，不要傻读。
+            if (![fm fileExistsAtPath:newURL.path]) {
+                TBLog2(@"[导入][读] ❌ accessor 给的副本不存在 → 文件还在云端未下载");
+                readErr = TBMakeError(@"文件还在 iCloud 云端没有下载到本机，"
+                                      @"请先在「文件」App 里长按它 → 下载，再回来重新导入", nil);
+                return;
+            }
             NSError *e = nil;
             data = [NSData dataWithContentsOfURL:newURL options:0 error:&e];
+            TBLog2(@"[导入][读] 读出 %lu 字节 %@",
+                   (unsigned long)data.length, e.localizedDescription ?: @"");
             if (!data.length && e) readErr = e;
         }];
     } @catch (NSException *ex) {
@@ -228,17 +238,33 @@ NSURL *TBCopyCoordinatedItemToTemp(NSURL *url, NSError **error) {
             BOOL isDirNow = NO;
             BOOL there = [fm fileExistsAtPath:newURL.path isDirectory:&isDirNow];
             TBLog2(@"[导入][复制] accessor url=%@ 存在=%d 目录=%d", newURL.path ?: @"(nil)", there, isDirNow);
+            // 0.15.53：asCopy/ReadingForUploading 之后系统给的已经是本地临时副本，
+            // 上面 TBURLIsICloud/占位判断只做【日志】，不再做 iCloud 特判或二次下载 ——
+            // 对系统给的副本再走 iCloud 分支是画蛇添足，还可能把好端端的副本读成空。
+            if (!there) {
+                TBLog2(@"[导入][复制] ❌ accessor 给的副本不存在 → 文件还在云端未下载");
+                copyErr = TBMakeError(@"文件还在 iCloud 云端没有下载到本机，"
+                                      @"请先在「文件」App 里长按它 → 下载，再回来重新导入", nil);
+                return;
+            }
             // 目标一定在 App 沙盒内（NSTemporaryDirectory()），目录会递归复制
             ok = [fm copyItemAtURL:newURL toURL:dstURL error:&e];
+            TBLog2(@"[导入][复制] copyItemAtURL=%d 失败原因=%@", ok, e.localizedDescription ?: @"-");
             if (!ok && !e) {
                 // 有些 provider 给的是占位 URL：退一步用数据读取（只对文件有效）
                 BOOL isDir = NO;
                 if ([fm fileExistsAtPath:newURL.path isDirectory:&isDir] && !isDir) {
                     NSData *d = [NSData dataWithContentsOfURL:newURL options:0 error:&e];
+                    TBLog2(@"[导入][复制] 兜底直读 %lu 字节", (unsigned long)d.length);
                     if (d.length) ok = [d writeToURL:dstURL options:NSDataWritingAtomic error:&e];
                 }
             }
             if (!ok) copyErr = e;
+            if (ok) {
+                NSDictionary *at = [fm attributesOfItemAtPath:dstPath error:NULL];
+                TBLog2(@"[导入][复制] ✅ 成功 字节数=%lu 目录=%d",
+                       (unsigned long)[at fileSize], isDirNow);
+            }
         }];
     } @catch (NSException *ex) {
         TBLog2(@"[导入][复制] ❌ 协调复制异常：%@ — %@", ex.name, ex.reason);
