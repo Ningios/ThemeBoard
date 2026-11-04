@@ -4140,11 +4140,13 @@ static void TBInstall(void) {
             }
         }
     }
-        // 左滑删除：装一次观测，把滑动容器的层级结构打进日志
-        {
-            Class pull = NSClassFromString(@"UISwipeActionPullView");
-            if (pull) TBHook(pull, @"layoutSubviews", (IMP)tb_swipePullLayout, "左滑层级观测");
-        }
+        // ★★ 0.15.58 起彻底移除 UISwipeActionPullView -layoutSubviews 的 hook。
+        //    真凶找到了：tb_swipePullLayout 替换了系统的 layoutSubviews 却**没有调用原实现**，
+        //    滑动容器因此不做布局 → UIKit 校验「动作数 == 按钮数」永远不通过 →
+        //    任何 App（不只 ThemeBoard，Filza 也一样）一左滑就抛
+        //    NSInternalInconsistencyException: The swipe action count does not match ...
+        //    之前所有在 App 侧的猜测（completionHandler / editingStyle / 模态弹窗）全是误判。
+        //    这里永久不再安装该 hook（函数体保留，仅作记录）。
         // 不接管 iconImageWithImageInfo:includingMask:
         // 那一层返回的是「表盘+指针」的合成图，接管后系统画的指针会变形
         //（三根一样粗、橙秒针消失）。改由资源重定向提供 ClockIconBackgroundSquare，
