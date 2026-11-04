@@ -30,6 +30,12 @@ UIButton *TBGlassButton(NSString *title, BOOL danger);
 /// 表格 cell 的玻璃底（带左右内缩）
 UIView *TBGlassCellBG(CGFloat inset);
 
+/// 表格 cell 的玻璃卡（按页面边距对齐）：卡片左右边缘始终落在距 UITableView
+/// 左右边缘 pageSide 处。.insetGrouped 的 section inset 在不同屏幕/系统上是 20 或 24，
+/// 写死 "pageSide - 20" 会得到 16 或 20 —— 这个版本改成运行时按实际 cell 位置换算，
+/// 不再依赖魔法数。上下仍保留 2pt 间隙（卡片高度 = 行高 - 4）。
+UIView *TBGlassCellAtPageSide(CGFloat pageSide);
+
 /// 表格统一外观：透明底、透明 cell、无分隔线
 void TBGlassTable(UITableView *tv);
 

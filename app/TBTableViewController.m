@@ -45,6 +45,15 @@
     ]];
 }
 
+/// 玻璃卡要按页面 16pt 对齐时，可能在 cell 左右各外扩几 pt；cell 默认会裁剪，
+/// 这里统一放开（卡片本身仍在 cell 的上下 2pt 内缩，不会压到相邻行）。
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell
+ forRowAtIndexPath:(NSIndexPath *)indexPath {
+    cell.clipsToBounds = NO;
+    cell.contentView.clipsToBounds = NO;
+    cell.backgroundView.clipsToBounds = NO;
+}
+
 - (UIRefreshControl *)refreshControl {
     return self.tableView.refreshControl;
 }

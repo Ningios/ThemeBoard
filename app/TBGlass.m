@@ -272,6 +272,48 @@ UIView *TBGlassCellBG(CGFloat inset) {
     return bg;
 }
 
+// ── 按页面边距对齐的表格玻璃卡 ─────────────────────────────────────────────
+// .insetGrouped 的左右 section inset 不是固定值：不同屏幕宽度/系统上实测有 20 和 24
+// 两种。0.15.59 写死 "16 - 20 = -4" 时，在 24pt inset 的机器上卡片落在 24-4=20，
+// 比目标 16 多 4pt（这就是「部分页面卡片边距不对」的来源）。
+// 这里改成运行时把 cell 换算到 UITableView 坐标系，再反推卡片需要的外扩量，
+// 任何 section inset 下卡片边缘都精确落在 pageSide。
+@interface TBPageSideCellBG : UIView
+@property (nonatomic, strong) UIView *card;
+@property (nonatomic, assign) CGFloat pageSide;
+@end
+
+@implementation TBPageSideCellBG
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    UIView *cell = self.superview;
+    while (cell && ![cell isKindOfClass:[UITableViewCell class]]) cell = cell.superview;
+    UITableView *tv = nil;
+    for (UIView *v = cell ?: self; v; v = v.superview) {
+        if ([v isKindOfClass:[UITableView class]]) { tv = (UITableView *)v; break; }
+    }
+
+    CGFloat left = 0.0, right = 0.0;
+    if (cell && tv) {
+        CGRect r = [cell convertRect:cell.bounds toView:tv];
+        left  = self.pageSide - CGRectGetMinX(r);
+        right = self.pageSide - (CGRectGetWidth(tv.bounds) - CGRectGetMaxX(r));
+    }
+    CGFloat w = MAX(0.0, CGRectGetWidth(self.bounds) - left - right);
+    self.card.frame = CGRectMake(left, 2.0, w, MAX(0.0, CGRectGetHeight(self.bounds) - 4.0));
+}
+@end
+
+UIView *TBGlassCellAtPageSide(CGFloat pageSide) {
+    TBPageSideCellBG *bg = [[TBPageSideCellBG alloc] init];
+    bg.backgroundColor = [UIColor clearColor];
+    bg.pageSide = pageSide;
+    bg.card = TBGlassCard(20);
+    [bg addSubview:bg.card];
+    return bg;
+}
+
 void TBGlassTable(UITableView *tv) {
     // 表格背景必须透明，否则它会盖住页面底色（默认是白色）
     // 页面底色由 TBSetPageBackground / TBTableViewController 的背景视图提供

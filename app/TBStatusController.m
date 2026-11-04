@@ -202,7 +202,7 @@ static NSString *TBReadLogLossy(NSString *path) {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
     cell.backgroundColor = [UIColor clearColor];
     cell.contentView.backgroundColor = [UIColor clearColor];
-    cell.backgroundView = TBGlassCellBG(kTBSpaceTableCellCardInset);
+    cell.backgroundView = TBGlassCellAtPageSide(kTBSpacePageSide);
     cell.selectedBackgroundView = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
