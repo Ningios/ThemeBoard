@@ -709,52 +709,56 @@ static const CGFloat kTBListHeaderInset = 32.0;
     }
 }
 
-- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
-trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    // 主题包（section 2）和素材包（section 3）都可以左滑删除
-    if (indexPath.section != 2 && indexPath.section != 3) return nil;
+// 左滑删除改用【原生编辑模式】(editingStyle + commitEditingStyle)。
+// 之前用 UIContextualAction：只要 action 的数量在两次回调间不一致，UIKit 就抛
+// NSInternalInconsistencyException: The swipe action count does not match...（用户实测必崩）
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
+    return (indexPath.section == 2 || indexPath.section == 3);
+}
+
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tableView
+           editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == 2 || indexPath.section == 3) return UITableViewCellEditingStyleDelete;
+    return UITableViewCellEditingStyleNone;
+}
+
+- (void)tableView:(UITableView *)tableView
+commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
+forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (editingStyle != UITableViewCellEditingStyleDelete) return;
     NSArray<TBTheme *> *list = [self themesInSection:indexPath.section];
-    if (indexPath.row >= (NSInteger)list.count) return nil;
+    if (indexPath.row >= (NSInteger)list.count) { [tableView setEditing:NO animated:YES]; return; }
     TBTheme *t = list[indexPath.row];
     BOOL isAsset = (indexPath.section == 3) || t.isAssetPack;
-    UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
-                                                                     title:@"删除"
-                                                                   handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
-        // ★★ 必须先、且只调一次 completionHandler：UIKit 会校验「动作数 == 按钮数」，
-        //    如果等用户在确认弹窗里点完才调，就抛
-        //    NSInternalInconsistencyException: The swipe action count does not match ...
-        //    —— 这就是"任何一行左滑直接闪退"的根因（0.15.52 崩溃日志实锤）。
-        done(YES);
-        dispatch_async(dispatch_get_main_queue(), ^{     // 让左滑收尾事务先跑完，再弹确认
-        TBPresentConfirm(self, [NSString stringWithFormat:@"删除「%@」？", t.name],
+    [tableView setEditing:NO animated:YES];          // 先收起左滑按钮，避免删除后 UIKit 校验
+    __weak typeof(self) wself = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __strong typeof(self) s = wself;
+        if (!s) return;
+        TBPresentConfirm(s, [NSString stringWithFormat:@"删除「%@」？", t.name],
                          (isAsset ? @"素材包文件夹会被直接删除，不可恢复" : @"主题文件夹会被直接删除，不可恢复"),
                          @"取消", @"删除", YES, ^(BOOL ok) {
             if (!ok) return;
-            TBLog2(@"[删除] 用户确认删除「%@」（%@）path=%@", t.name, isAsset ? @"素材包" : @"主题包", t.path);
+            __strong typeof(self) ss = wself;
+            if (!ss) return;
+            NSArray<TBTheme *> *now = [ss themesInSection:indexPath.section];
+            if (indexPath.row >= (NSInteger)now.count) return;
+            TBTheme *cur = now[indexPath.row];
+            TBLog2(@"[删除] 用户确认删除「%@」（%@）path=%@", cur.name, isAsset ? @"素材包" : @"主题包", cur.path);
             NSError *err = nil;
-            BOOL deleted = [TBThemeScanner deleteTheme:t error:&err];
+            BOOL deleted = [TBThemeScanner deleteTheme:cur error:&err];
             TBLog2(@"[删除] 结果 ok=%d err=%@（%@）", deleted, err.domain ?: @"-",
                    err.localizedDescription ?: @"-");
-            if (deleted) {
-                [self tb_clearPrefsPointingInto:t.path];
-                NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
-                if ([active isEqualToString:t.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
-                [TBPrefs notifyChanged];
-                [self reload];
-            } else {
-                // 失败必须有明确提示，不能静默（原来是 done(NO) 什么都不说）
-                [self tb_showDeleteFailure:err theme:t];
-            }
+            if (!deleted) { [ss tb_showDeleteFailure:err theme:cur]; return; }
+            [ss tb_clearPrefsPointingInto:cur.path];
+            NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
+            if ([active isEqualToString:cur.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
+            [TBPrefs notifyChanged];
+            [ss reload];
         });
-        });
-    }];
-    UISwipeActionsConfiguration *cfg = [UISwipeActionsConfiguration configurationWithActions:@[del]];
-    cfg.performsFirstActionWithFullSwipe = NO;     // 全滑直接删太危险
-    return cfg;
+    });
 }
 
-/// 删除失败：给出【可操作】的提示 —— 完整路径 + 复制到剪贴板 + 建议用 Filza，
-/// 并把引擎重试时记下的 errno 一起说清楚（0.15.49：素材包删不掉就是这个）。
 - (void)tb_showDeleteFailure:(NSError *)err theme:(TBTheme *)t {
     NSString *path = t.path.length ? t.path : (err.userInfo[NSFilePathErrorKey] ?: @"");
     NSString *why = err.localizedDescription.length ? err.localizedDescription : @"未知原因";
@@ -810,31 +814,6 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
 
 
 /// 主题包（2）和素材包（3）都可删除；其它行（当前使用 / 按钮行）不可
-- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    return (indexPath.section == 2 || indexPath.section == 3);
-}
-
-/// 系统「编辑模式」的删除入口（当前 UI 走左滑，这里兜底，保证两条路都能删素材包）
-- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
-                                            forRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (editingStyle != UITableViewCellEditingStyleDelete) return;
-    if (indexPath.section != 2 && indexPath.section != 3) return;
-    NSArray<TBTheme *> *list = [self themesInSection:indexPath.section];
-    if (indexPath.row >= (NSInteger)list.count) return;
-    TBTheme *t = list[indexPath.row];
-    NSError *err = nil;
-    BOOL ok = [TBThemeScanner deleteTheme:t error:&err];
-    TBLog2(@"[删除][编辑模式] 「%@」ok=%d err=%@", t.name, ok, err.localizedDescription ?: @"-");
-    if (ok) {
-        [self tb_clearPrefsPointingInto:t.path];
-        NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
-        if ([active isEqualToString:t.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
-        [TBPrefs notifyChanged];
-        [self reload];
-    } else {
-        [self tb_showDeleteFailure:err theme:t];
-    }
-}
 
 - (void)alertTitle:(NSString *)title message:(NSString *)msg {
     TBPresentAlert(self, title, msg);      // 自绘玻璃提示弹窗

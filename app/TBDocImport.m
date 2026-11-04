@@ -58,9 +58,12 @@ UIDocumentPickerViewController *TBNewImportPicker(NSArray *contentTypes,
             // 统一走 asCopy:YES：系统把选中的文件（或整个目录）先复制进 App 的临时区，
             // iCloud 文件由系统负责下载，拿到的是可读的本地副本。
             if (types.count) {
+                // 不用 asCopy：asCopy:YES 在 iCloud 云盘 + 根less 环境下会把"点文件"变成
+                // documentPickerWasCancelled（用户日志实测：三次点选全是 cancel）。
+                // 改用 open-in-place，下载/复制由我们自己用 NSFileCoordinator 完成。
                 p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types
-                                                                               asCopy:YES];
-                mode = @"initForOpeningContentTypes:asCopy:YES";
+                                                                               asCopy:NO];
+                mode = @"initForOpeningContentTypes:asCopy:NO";
             }
         } else {
             p = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:(legacyTypes ?: @[@"public.item"])

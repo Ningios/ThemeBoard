@@ -175,26 +175,20 @@ static void TBApplyPanelGlass(UIButton *b) {
 - (void)tb_closeWithCompletion:(void (^)(void))done {
     if (self.tbClosing) return;
     self.tbClosing = YES;
+    // 用户实测：淡出后再 dismiss，dismiss 那一帧会闪一下（OverFullScreen 会用快照合成）。
+    // 干脆关掉淡出：立刻整层隐藏（hidden+alpha），下一拍再 dismiss —— 保证零闪帧。
+    self.dimView.hidden = YES;
+    self.cardView.hidden = YES;
+    self.dimView.alpha = 0;
+    self.cardView.alpha = 0;
+    self.view.alpha = 0;
+    self.view.hidden = YES;
     __weak typeof(self) wself = self;
-    [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionCurveEaseIn
-                     animations:^{
-        __strong typeof(self) s = wself;
-        if (!s) return;
-        s.dimView.alpha = 0;
-        s.cardView.alpha = 0;
-        s.cardView.transform = CGAffineTransformMakeScale(0.97, 0.97);
-    } completion:^(BOOL finished) {
+    dispatch_async(dispatch_get_main_queue(), ^{
         __strong typeof(self) s = wself;
         if (!s) { if (done) done(); return; }
-        // ★ 0.15.54：先整屏隐藏再 dismiss。原来 dim/card 归零后直接 dismiss，
-        //   dismiss 那一帧窗口会先把「已经全透明」的 self.view 重新显示出来，
-        //   用户看到的正是「取消时弹窗闪一下 / 全亮一帧」。
-        s.view.hidden = YES;
-        s.view.alpha = 0;
-        s.dimView.alpha = 0;
-        s.cardView.alpha = 0;
         [s dismissViewControllerAnimated:NO completion:done];
-    }];
+    });
 }
 
 #pragma mark 布局
