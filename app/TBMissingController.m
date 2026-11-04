@@ -55,7 +55,7 @@
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.backgroundColor = [UIColor clearColor];
     cell.contentView.backgroundColor = [UIColor clearColor];
-    cell.backgroundView = TBGlassCellAtPageSide(kTBSpacePageSide);
+    cell.backgroundView = TBGlassCellBG(kTBSpaceTableCellCardInset);
     cell.selectedBackgroundView = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     NSDictionary *row = _rows[indexPath.row];

@@ -45,14 +45,8 @@
     ]];
 }
 
-/// 玻璃卡要按页面 16pt 对齐时，可能在 cell 左右各外扩几 pt；cell 默认会裁剪，
-/// 这里统一放开（卡片本身仍在 cell 的上下 2pt 内缩，不会压到相邻行）。
-- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell
- forRowAtIndexPath:(NSIndexPath *)indexPath {
-    cell.clipsToBounds = NO;
-    cell.contentView.clipsToBounds = NO;
-    cell.backgroundView.clipsToBounds = NO;
-}
+// 0.15.61：0.15.60 在这里给所有 cell 放开 clipsToBounds（配合「卡片按页面 16pt 外扩」的
+// 运行时 hack）。hack 已整体撤掉，这里也一并删除，恢复 UIKit 默认裁剪。
 
 - (UIRefreshControl *)refreshControl {
     return self.tableView.refreshControl;

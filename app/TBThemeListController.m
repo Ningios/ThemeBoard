@@ -37,125 +37,72 @@ static UIView *TBFindSwipePullView(UIView *root, NSInteger depth) {
     return nil;
 }
 
-/// 删除按钮文字：白色 / 红色按对比度选（浅色玻璃上用红，深色玻璃上用白），居中 16pt 半粗。
-/// dx：玻璃底相对按钮中心右移了多少 —— 文字跟着一起移，才在玻璃底里视觉居中。
-static void TBStyleSwipeLabels(UIView *v, NSInteger depth, CGFloat dx) {
+/// 删除按钮的文字：浅色玻璃上用红、深色玻璃上用白（跟玻璃底色成对，保证对比度）。
+static void TBStyleSwipeLabels(UIView *v, NSInteger depth) {
     if (!v || depth > 3) return;
     for (UIView *sub in v.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
-            UILabel *lab = (UILabel *)sub;
-            lab.textColor = TBDynamicColor([UIColor systemRedColor], [UIColor whiteColor]);
-            lab.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-            lab.textAlignment = NSTextAlignmentCenter;
-            lab.transform = CGAffineTransformMakeTranslation(dx, 0);
+            ((UILabel *)sub).textColor =
+                TBDynamicColor([UIColor systemRedColor], [UIColor whiteColor]);
         } else {
-            TBStyleSwipeLabels(sub, depth + 1, dx);
+            TBStyleSwipeLabels(sub, depth + 1);
         }
     }
 }
 
-/// 「删除」按钮的玻璃底：放在按钮 layer 里的 **CALayer 子层**（不是 UIView，
-/// 所以永远不会改变 UIKit 的 swipe action 视图树 → 不会触发动作数断言）。
-/// 上下铺满按钮（= cell 高度，和左边卡片同高）、左内缩 8pt 与卡片留缝、右侧贴按钮右边缘。
+/// 「删除」按钮的玻璃底：画在按钮 **layer 的一个 CALayer 子层**里（不是 UIView，
+/// 所以永远不改变 UIKit 的 swipe action 视图树 → 不会触发动作数断言）。
+/// frame 每次布局都按 button.bounds 重算：左右 0（完全交给系统，不缩进、不留缝），
+/// 上下各内缩 5pt —— 卡片在 cell 里就是上下各留 5pt 左右，这样玻璃高度正好等于卡片高度。
 static CALayer *TBSwipeGlassLayer(UIView *btn) {
     for (CALayer *l in btn.layer.sublayers) {
         if ([l.name isEqualToString:@"tbSwipeGlass"]) return l;
     }
     CALayer *l = [CALayer layer];
     l.name = @"tbSwipeGlass";
-    l.cornerRadius = 13;                       // 与主题卡圆角一致
-    l.cornerCurve = kCACornerCurveContinuous;
-    l.masksToBounds = YES;
-    [btn.layer insertSublayer:l atIndex:0];
+    [btn.layer insertSublayer:l atIndex:0];   // 垫在文字 label 之下
     return l;
 }
 
-static void TBStyleSwipeButton(UIView *btn) {
-    // 按钮自身不做任何底色/圆角/描边：只让 CALayer 子层画，frame 完全交给系统布局
-    btn.backgroundColor = [UIColor clearColor];
-    btn.layer.cornerRadius = 0;
-    btn.layer.borderWidth = 0;
-    btn.clipsToBounds = NO;
-
-    // 卡片按页面 16pt 对齐后会向 cell 外扩 overhang（section inset 20 时 4pt、24 时 8pt）。
-    // 滑动到底时卡片右边缘正好落在按钮左边缘 + overhang，所以：
-    //   玻璃左边 = 按钮左 + overhang + 8   → 与卡片保持 8pt 缝
-    //   玻璃右边 = 表格右边 − 16           → 与卡片右边缘对齐
-    UITableView *tv = nil;
-    UITableViewCell *cell = nil;
-    for (UIView *v = btn.superview; v; v = v.superview) {
-        if (!tv && [v isKindOfClass:[UITableView class]]) tv = (UITableView *)v;
-        if (!cell && [v isKindOfClass:[UITableViewCell class]]) cell = (UITableViewCell *)v;
-    }
-
-    CGFloat leftInBtn = 8.0, rightInBtn = CGRectGetWidth(btn.bounds);
-    if (tv && cell) {
-        CGRect cr = [cell convertRect:cell.bounds toView:tv];
-        CGRect br = [btn convertRect:btn.bounds toView:tv];
-        CGFloat overhang = MAX(0.0, (CGRectGetWidth(tv.bounds) - CGRectGetMaxX(cr)) - kTBSpacePageSide);
-        leftInBtn  = (CGRectGetMinX(br) + overhang + 8.0) - CGRectGetMinX(br);
-        rightInBtn = (CGRectGetWidth(tv.bounds) - kTBSpacePageSide) - CGRectGetMinX(br);
-    }
-    CGFloat glassW = MAX(0.0, rightInBtn - leftInBtn);
-    CGFloat glassH = CGRectGetHeight(btn.bounds);
-
-    CALayer *glass = TBSwipeGlassLayer(btn);
-    glass.frame = CGRectMake(leftInBtn, 0.0, glassW, glassH);
-    glass.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                           [UIColor colorWithWhite:1 alpha:0.12]).CGColor;
-    glass.borderWidth = 1.0 / [UIScreen mainScreen].scale;
-    glass.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
-                                       [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
-
-    // 玻璃中心相对按钮中心的偏移（文字跟着移才居中）
-    CGFloat dx = (leftInBtn + rightInBtn) / 2.0 - CGRectGetWidth(btn.bounds) / 2.0;
-    TBStyleSwipeLabels(btn, 0, dx);
-}
-
+/// 0.15.61：玻璃观感，照 11/02 那版截图 1:1 复现 —— 白色玻璃按钮，高度与左侧卡片一致。
+/// 与 0.15.60 的区别只在「几何」：0.15.60 按表格/屏幕坐标自己算 left/right inset 和 8pt 缝，
+/// 结果左右压住卡片、上下越界。这一版：
+///   · 按钮自身 backgroundColor = clear、cornerRadius = 0（圆角只由子层画）
+///   · 子层 frame = CGRectInset(button.bounds, 0, 5) —— **左右严格 0**，上下各内缩 5pt
+///   · 子层：cornerRadius 13 / cornerCurve continuous / masksToBounds / 白 0.55(浅)·0.12(深)
+///     + 1px 亮边
+///   · 文字只改颜色（浅色 systemRed / 深色白），字号、位置、transform 一律不碰
+/// 不增删任何 UIView，不动按钮 frame —— 左右位置/右边缘完全由系统给。
 static void TBStyleSwipePullView(UIView *pull) {
-    // 容器保持完全透明：不再给整个滑动区做圆角/裁剪，避免「独立白卡片」的观感
-    pull.backgroundColor = [UIColor clearColor];
-    pull.layer.cornerRadius = 0;
-    pull.layer.borderWidth = 0;
-    pull.clipsToBounds = NO;
+    pull.backgroundColor = [UIColor clearColor];   // 容器只去掉底色，圆角/裁剪一律不动
+    for (UIView *btn in pull.subviews) {
+        btn.backgroundColor = [UIColor clearColor];
+        btn.layer.cornerRadius = 0;
 
-    for (UIView *btn in pull.subviews) TBStyleSwipeButton(btn);
+        CALayer *glass = TBSwipeGlassLayer(btn);
+        glass.frame = CGRectInset(btn.bounds, 0.0, 5.0);
+        glass.cornerRadius = 13;
+        glass.cornerCurve = kCACornerCurveContinuous;
+        glass.masksToBounds = YES;
+        glass.backgroundColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                                [UIColor colorWithWhite:1 alpha:0.12]).CGColor;
+        glass.borderWidth = 1.0 / [UIScreen mainScreen].scale;
+        glass.borderColor = TBDynamicColor([UIColor colorWithWhite:1 alpha:0.55],
+                                            [UIColor colorWithWhite:1 alpha:0.20]).CGColor;
+
+        TBStyleSwipeLabels(btn, 0);
+    }
 }
 
-/// 滑动容器每次布局都重新套样式：样式和原来一模一样，只是时机提前到首帧之前，
-/// 不会先闪一下系统灰底，也不会因为「那次没抓到」而整行变灰。
+/// 滑动容器每次布局都套一次：**先调原实现**，再只改颜色/圆角/文字色。
+/// 顺序绝不能反 —— 0.15.58 的崩溃就是引擎侧替换了 layoutSubviews 却没调原实现
+/// （容器不布局 → UIKit 动作数校验失败）。这里也不增删任何子视图，所以按钮计数不变。
 static void (*o_swipePullLayout)(id, SEL);
 static void tb_swipePullLayout(id self, SEL _cmd) {
     if (o_swipePullLayout) o_swipePullLayout(self, _cmd);
     if ([self isKindOfClass:[UIView class]]) TBStyleSwipePullView((UIView *)self);
 }
 
-
-/// 按钮行专用 cell：三个按钮要和卡片一样贴在页面 16pt，而不是在 cell 的内缩上
-/// 再叠一层固定 16pt（0.15.59 的按钮行因此比卡片多缩进 16pt）。
-/// cell 的 section inset 不同机型是 20 或 24，这里运行时换算，任何机型都落 16。
-@interface TBButtonRowCell : UITableViewCell
-@property (nonatomic, strong) UIView *bar;
-@end
-
-@implementation TBButtonRowCell
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    if (!self.bar) return;
-    UITableView *tv = nil;
-    for (UIView *v = self.superview; v; v = v.superview) {
-        if ([v isKindOfClass:[UITableView class]]) { tv = (UITableView *)v; break; }
-    }
-    CGFloat left = kTBSpacePageSide;
-    if (tv) {
-        CGRect r = [self convertRect:self.bounds toView:tv];
-        left = kTBSpacePageSide - CGRectGetMinX(r);
-    }
-    self.bar.frame = CGRectMake(left, 0.0,
-                                MAX(0.0, CGRectGetWidth(self.contentView.bounds) - left * 2.0),
-                                CGRectGetHeight(self.contentView.bounds));
-}
-@end
 
 @implementation TBThemeListController
 
@@ -402,9 +349,20 @@ didPickDocumentAtURL:(NSURL *)url {
 #pragma mark - 顶部工具条
 
 - (UIView *)buildToolbarBar {
-    // 只返回按钮条本身；它贴在页面 16pt 的位置由 TBButtonRowCell 在 layoutSubviews 里算
+    CGFloat w = MAX(320.0, self.tableView.bounds.size.width);
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, kTBSpaceRowMin)];
+    head.backgroundColor = [UIColor clearColor];
+    head.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
     UIView *bar = [[UIView alloc] init];
-    bar.backgroundColor = [UIColor clearColor];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    [head addSubview:bar];
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.leadingAnchor constraintEqualToAnchor:head.leadingAnchor constant:kTBSpacePageSide],
+        [bar.trailingAnchor constraintEqualToAnchor:head.trailingAnchor constant:-kTBSpacePageSide],
+        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:0],
+        [bar.heightAnchor constraintEqualToConstant:kTBSpaceRowMin],   // 按钮本体 44
+    ]];
 
     // 与主题详情页的按钮同款：圆角 13、高 44、16 号半粗、白色玻璃底 + 细边
     NSArray *titles = @[@"重新扫描", @"导入主题", @"清除主题"];
@@ -447,7 +405,7 @@ didPickDocumentAtURL:(NSURL *)url {
         [clr.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor],
         [clr.widthAnchor constraintEqualToAnchor:imp.widthAnchor],
     ]];
-    return bar;
+    return head;
 }
 
 - (void)toolbarTapped:(UIButton *)b {
@@ -572,7 +530,7 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
         sort.layer.cornerRadius = 10;
         sort.layer.cornerCurve = kCACornerCurveContinuous;
         TBApplyRim(sort, 0.55);
-        sort.frame = CGRectMake(w - kTBListHeaderInset - 40.0, (h - 32.0) / 2.0 - 5.0, 40.0, 32.0);
+        sort.frame = CGRectMake(w - kTBListHeaderInset - 40.0, (h - 32.0) / 2.0 - 5.0, 40.0, 32.0);   // 0.15.60 起：上移 5pt，与分组标题文字视觉居中
         sort.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
         [sort addTarget:self action:@selector(sortTapped) forControlEvents:UIControlEventTouchUpInside];
         [head addSubview:sort];
@@ -599,16 +557,20 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     // 第 1 段：三个操作按钮（在「当前使用」下面）
     if (indexPath.section == 1) {
-        TBButtonRowCell *bc = [[TBButtonRowCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                                    reuseIdentifier:nil];
+        UITableViewCell *bc = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                                     reuseIdentifier:nil];
         bc.backgroundColor = [UIColor clearColor];
         bc.contentView.backgroundColor = [UIColor clearColor];
-        bc.clipsToBounds = NO;
-        bc.contentView.clipsToBounds = NO;
         bc.selectionStyle = UITableViewCellSelectionStyleNone;
         UIView *bar = [self buildToolbarBar];
+        bar.translatesAutoresizingMaskIntoConstraints = NO;
         [bc.contentView addSubview:bar];
-        bc.bar = bar;
+        [NSLayoutConstraint activateConstraints:@[
+            [bar.leadingAnchor constraintEqualToAnchor:bc.contentView.leadingAnchor],
+            [bar.trailingAnchor constraintEqualToAnchor:bc.contentView.trailingAnchor],
+            [bar.topAnchor constraintEqualToAnchor:bc.contentView.topAnchor constant:0],
+            [bar.heightAnchor constraintEqualToConstant:50],
+        ]];
         return bc;
     }
 
@@ -620,7 +582,7 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
         cell.contentView.backgroundColor = [UIColor clearColor];
         // 卡片必须放进 contentView：系统左滑只平移 contentView，挂在 backgroundView
         // 上的卡片不会跟着走（表现就是内容左移、卡片留在原地，内容跑到卡片外面）。
-        UIView *bg = TBGlassCellAtPageSide(kTBSpacePageSide);
+        UIView *bg = TBGlassCellBG(kTBSpaceTableCellCardInset);
         bg.translatesAutoresizingMaskIntoConstraints = NO;
         [cell.contentView insertSubview:bg atIndex:0];
         [NSLayoutConstraint activateConstraints:@[
@@ -761,14 +723,13 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
 
 #pragma mark - 删除
 
-/// 给这一行套上样式；找不到滑动容器返回 NO（外观与原来完全一致，只是把
-/// 「找容器」这件事做得更彻底：cell / cell 的父视图 / 表格 / 整个窗口都试一遍）
+/// 安装 UISwipeActionPullView -layoutSubviews 的 hook：每次都先调原实现，
+/// 再只改按钮的底色 / 圆角 / 文字颜色（形状和尺寸完全不碰）。
 + (void)tb_installSwipeStyle {
-    // ★ 0.15.59：恢复安装。真凶已确认在引擎侧：ThemeBoardEngine 也 hook 了
-    //   UISwipeActionPullView -layoutSubviews 但**替换后没调原实现** → 滑动容器不布局 →
-    //   UIKit 动作数校验永远失败（连 Filza 左滑都崩）。引擎那条 hook 已永久移除。
-    //   本 hook 是安全的：先调 o_swipePullLayout(self, _cmd) 原实现，再只改颜色/圆角/描边
-    //   （**不增删任何子视图**），不会影响 UIKit 的按钮计数。
+    // ★ 0.15.61：恢复安装，但只做「颜色 + 圆角 + 文字色」这三件最朴素的事。
+    //   历史教训：ThemeBoardEngine 曾替换 UISwipeActionPullView -layoutSubviews 却不调
+    //   原实现 → 滑动容器不布局 → UIKit 动作数校验永远失败（连 Filza 左滑都崩）。
+    //   引擎那条 hook 已永久移除；App 侧这条严格「先调原实现」，且不增删任何子视图。
     static BOOL done = NO;
     if (done) return;
     done = YES;
@@ -781,6 +742,9 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
     }
 }
 
+
+/// 兜底：万一某个系统版本先建容器后调 willBeginEditing，0.05s 后再套一次同样的
+/// 颜色/圆角（幂等，纯改属性，不增删视图）。
 - (BOOL)styleSwipeForRowAtIndexPath:(NSIndexPath *)indexPath tableView:(UITableView *)tableView {
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
     UIView *root = cell ? (cell.superview ?: cell) : tableView;
@@ -809,9 +773,6 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         cell.accessoryType = UITableViewCellAccessoryNone;
     }
-    // 0.15.59：恢复「0.05 秒后给滑动容器补一次玻璃样式」。
-    // 首帧前 layoutSubviews 的 hook 已经套过一次；这里再补一次是兜底（有的系统版本
-    // 是先建容器后调 willBeginEditing）。只改颜色/圆角/描边，不增删子视图。
     __weak typeof(self) wself = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -858,8 +819,10 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
            t.name ?: @"?", (long)section, (long)row, identity ?: @"(空)");
 
     __weak typeof(self) wself = self;
+    // 0.15.61：必须是 Normal —— Destructive 会被系统强制刷成红底（就是之前那块大红块的来源）。
+    // 也不设 backgroundColor、不设 image：底色/圆角由 TBStyleSwipePullView 统一给玻璃。
     UIContextualAction *del =
-        [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+        [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                 title:@"删除"
                                               handler:^(UIContextualAction *action,
                                                         UIView *sourceView,
@@ -873,7 +836,6 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
             [s tb_deleteThemeAtSection:section row:row identity:identity];
         });
     }];
-    del.backgroundColor = [UIColor systemRedColor];
 
     UISwipeActionsConfiguration *cfg =
         [UISwipeActionsConfiguration configurationWithActions:@[del]];
