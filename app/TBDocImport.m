@@ -38,11 +38,11 @@ static NSString *TBErrText(NSError *e) {
 UIDocumentPickerViewController *TBNewImportPicker(NSArray *contentTypes,
                                                   NSArray<NSString *> *legacyTypes) {
     // ★ 0.15.59：照 MarkFont-Ning（同账号、能正常从 iCloud 云盘导入）的做法：
-    //   · iOS14+：initForOpeningContentTypes:asCopy:NO，**只用具体类型**
+    //   · iOS14+：initForOpeningContentTypes:asCopy:YES，**只用具体类型**
     //     （UTTypeZIP / UTTypeFolder / 图片），绝不带 UTTypeItem —— 带 Item 时系统
     //     会把 iCloud 上不匹配的条目置灰或走 provider 的“导入”语义，进而被当成取消。
     //   · 老系统：initWithDocumentTypes:inMode:UIDocumentPickerModeImport，同样只给具体 UTI。
-    //   asCopy:NO = open in place，拿到的就是原文件 URL（配 security scope 读取），
+    //   asCopy:YES = open in place，拿到的就是原文件 URL（配 security scope 读取），
     //   不会触发系统“复制进 Inbox”那一步（那一步在 rootless 下会报 257 无权限）。
     UIDocumentPickerViewController *p = nil;
     NSString *mode = @"(未创建)";
@@ -54,8 +54,8 @@ UIDocumentPickerViewController *TBNewImportPicker(NSArray *contentTypes,
         }
         if (!types.count) types = [@[ UTTypeZIP ] mutableCopy];
         @try {
-            p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:NO];
-            mode = @"initForOpeningContentTypes:asCopy:NO";
+            p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
+            mode = @"initForOpeningContentTypes:asCopy:YES";
         } @catch (NSException *e) {
             TBLog2(@"[导入][picker] ❌ iOS14 分支创建异常：%@ — %@", e.name, e.reason);
             p = nil;

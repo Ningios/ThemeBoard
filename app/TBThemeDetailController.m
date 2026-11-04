@@ -30,7 +30,7 @@ static const CGFloat kTBGridIconCapGap = 3.0;  // 说明 top = 图标 bottom + 3
 static const CGFloat kTBGridBottomPad = 5.0;   // 说明 bottom ≤ 卡.bottom − 5
 static const CGFloat kTBGridIconScale = 0.86;  // 图标宽 = 卡宽 × 0.86（原来 0.80）
 /// 图标卡高度里除图标以外的固定占用（标题最多 2 行 + 各段间隙 + 底边距），实测 48 刚好贴身
-static const CGFloat kTBGridTextBlock = 48.0;
+static const CGFloat kTBGridTextBlock = 26.0;   // 只留标题那一行的高度（说明行已隐藏，不再预留空白）
 
 @interface TBSquareCardCell : UICollectionViewCell
 @property (nonatomic, assign) BOOL compact;          // 四功能小卡
