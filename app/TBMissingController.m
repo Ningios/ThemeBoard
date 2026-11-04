@@ -27,8 +27,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"缺少图标";
-    self.tableView.rowHeight = MAX(60.0, kTBSpaceRowMin);   // 行高 ≥44
-    if (@available(iOS 15.0, *)) self.tableView.sectionHeaderTopPadding = 0;
+    self.tableView.rowHeight = 60;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -39,14 +38,6 @@
     return @"这些应用在桌面上会显示系统原图。想补齐就把它们对应的 PNG 放进主题的 IconBundles 目录。";
 }
 
-- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
-    return kTBSpaceGroupTitle;     // 28，全 App 统一
-}
-
-- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
-    return UITableViewAutomaticDimension;   // 说明文案可能换行
-}
-
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return _rows.count;
 }
@@ -55,7 +46,7 @@
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.backgroundColor = [UIColor clearColor];
     cell.contentView.backgroundColor = [UIColor clearColor];
-    cell.backgroundView = TBGlassCellBG(kTBSpaceTableCellCardInset);
+    cell.backgroundView = TBGlassCellBG(12);
     cell.selectedBackgroundView = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     NSDictionary *row = _rows[indexPath.row];

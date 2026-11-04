@@ -18,8 +18,8 @@ static NSString *const kTBKeyUseThemeIconShadow  = @"UseThemeIconShadow";
 static const double  kTBDefaultMaskCornerRadius = 13.42;
 
 static const CGFloat kTBCardRadius   = 20.0;   // 与 TBGlassCard(20) / 列表卡片一致
-static const CGFloat kTBCardGap      = kTBSpaceCardGap;  // 卡片间距（全 App 统一）
-static const CGFloat kTBSideInset    = kTBSpacePageSide; // 页面左右边距（全 App 统一）
+static const CGFloat kTBCardGap      = 12.0;   // 卡片间距（= v0.15.56 的 12，四列/两列/预览都用它）
+static const CGFloat kTBSideInset    = 16.0;   // 左右内缩（= v0.15.56）
 
 #pragma mark - 方形卡片 cell（双列网格的通用卡片）
 
@@ -536,7 +536,7 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
     layout.minimumInteritemSpacing = kTBCardGap;
     layout.minimumLineSpacing = kTBCardGap;
-    layout.sectionInset = UIEdgeInsetsMake(kTBSpaceSectionTop, kTBSideInset, kTBSpaceSectionBot, kTBSideInset);   // 6 / 8
+    layout.sectionInset = UIEdgeInsetsMake(8, kTBSideInset, 28, kTBSideInset);   // 上 8 / 下 28（= v0.15.56）
 
     self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:layout];
     self.collectionView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -808,15 +808,15 @@ static void TBDetailPrefsChanged(CFNotificationCenterRef center, void *observer,
 - (CGFloat)collectionView:(UICollectionView *)cv
 layout:(UICollectionViewLayout *)layout
 heightForHeaderInSection:(NSInteger)s {
-    return s == 0 ? 0.0 : kTBSpaceGroupTitle;   // 分组标题 28（全 App 统一）
+    return s == 0 ? 0.0 : 30.0;   // 分组标题 30（= v0.15.56）
 }
 
 /// 预览区只有两张卡：算成「一行居中」，左右各留 (W - (2w + 12)) / 2
 - (UIEdgeInsets)collectionView:(UICollectionView *)cv
                         layout:(UICollectionViewLayout *)layout
         insetForSectionAtIndex:(NSInteger)s {
-    // 全 App 统一：左右 16、上 6、下 8
-    if (s != 1) return UIEdgeInsetsMake(kTBSpaceSectionTop, kTBSideInset, kTBSpaceSectionBot, kTBSideInset);
+    // 左右 16、上 8、下 28（= v0.15.56）
+    if (s != 1) return UIEdgeInsetsMake(8, kTBSideInset, 28, kTBSideInset);
     CGFloat W = cv.bounds.size.width;
     if (W < 1) W = [UIScreen mainScreen].bounds.size.width;
     CGFloat w = floor((W - kTBSideInset * 2 - kTBCardGap * 3) / 4.0);
@@ -824,7 +824,7 @@ heightForHeaderInSection:(NSInteger)s {
     CGFloat side = floor((W - (2 * w + kTBCardGap)) / 2.0);
     while (side > 0 && (2 * w + kTBCardGap + 2 * side) > W) side -= 1;   // 防浮点把两卡挤成两行
     if (side < 0) side = 0;
-    return UIEdgeInsetsMake(kTBSpaceSectionTop, side, kTBSpaceSectionBot, side);
+    return UIEdgeInsetsMake(8, side, 28, side);
 }
 
 - (UICollectionReusableView *)collectionView:(UICollectionView *)cv

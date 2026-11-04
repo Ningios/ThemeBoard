@@ -88,10 +88,6 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
     [super viewDidLoad];
     self.title = @"主题";
     self.tableView.rowHeight = 76;
-    if (@available(iOS 15.0, *)) {
-        // 全 App 统一间距：去掉 iOS15 给分组标题额外加的那段顶部留白
-        self.tableView.sectionHeaderTopPadding = 0;
-    }
 
     self.search = [[UISearchController alloc] initWithSearchResultsController:nil];
     self.search.searchResultsUpdater = self;
@@ -327,7 +323,7 @@ didPickDocumentAtURL:(NSURL *)url {
 
 - (UIView *)buildToolbarBar {
     CGFloat w = MAX(320.0, self.tableView.bounds.size.width);
-    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, kTBSpaceRowMin)];
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 56)];
     head.backgroundColor = [UIColor clearColor];
     head.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
@@ -335,10 +331,10 @@ didPickDocumentAtURL:(NSURL *)url {
     bar.translatesAutoresizingMaskIntoConstraints = NO;
     [head addSubview:bar];
     [NSLayoutConstraint activateConstraints:@[
-        [bar.leadingAnchor constraintEqualToAnchor:head.leadingAnchor constant:kTBSpacePageSide],
-        [bar.trailingAnchor constraintEqualToAnchor:head.trailingAnchor constant:-kTBSpacePageSide],
-        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:0],
-        [bar.heightAnchor constraintEqualToConstant:kTBSpaceRowMin],   // 按钮本体 44
+        [bar.leadingAnchor constraintEqualToAnchor:head.leadingAnchor constant:20],
+        [bar.trailingAnchor constraintEqualToAnchor:head.trailingAnchor constant:-20],
+        [bar.topAnchor constraintEqualToAnchor:head.topAnchor constant:8],
+        [bar.heightAnchor constraintEqualToConstant:44],
     ]];
 
     // 与主题详情页的按钮同款：圆角 13、高 44、16 号半粗、白色玻璃底 + 细边
@@ -450,24 +446,12 @@ didPickDocumentAtURL:(NSURL *)url {
 #pragma mark - 分组标题（「主题」右侧挂排序按钮）
 
 /// 分组标题的左缩进：和玻璃卡片左边对齐（系统内缩 20 + 卡片自身 12）
-static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻璃卡内文对齐
+static const CGFloat kTBListHeaderInset = 32.0;
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
-    // 0.15.59：全 App 统一间距，只引用 TBSpacing.h
-    // 段与段之间只留 8pt：上一段的 footer(8) 已经给了间隔，按钮行这一组不再额外加 header
-    if (section == 1) return 0.0;
-    NSString *title = [self tableView:tableView titleForHeaderInSection:section];
-    if (!title.length) return kTBSpaceHeaderH;     // 8
-    return kTBSpaceGroupTitle;                     // 28
-}
-
-- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
-    // 只有最后一段有统计/空态文案，按内容自适应；其余一律 8pt
-    if (section == 3) {
-        NSString *txt = [self tableView:tableView titleForFooterInSection:section];
-        if (txt.length) return UITableViewAutomaticDimension;
-    }
-    return kTBSpaceSectionBot;                     // 8
+    if (section == 2) return 56.0;   // 「主题」标题 + 右侧排序按钮
+    if (section == 1) return 8.0;    // 按钮行上方的小间距（这一组本来就没有标题）
+    return 34.0;
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
@@ -528,7 +512,7 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    return indexPath.section == 1 ? kTBSpaceRowMin : 76;   // 按钮行 44（行高下限）
+    return indexPath.section == 1 ? 62 : 76;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -545,8 +529,8 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
         [NSLayoutConstraint activateConstraints:@[
             [bar.leadingAnchor constraintEqualToAnchor:bc.contentView.leadingAnchor],
             [bar.trailingAnchor constraintEqualToAnchor:bc.contentView.trailingAnchor],
-            [bar.topAnchor constraintEqualToAnchor:bc.contentView.topAnchor constant:0],
-            [bar.heightAnchor constraintEqualToConstant:50],
+            [bar.topAnchor constraintEqualToAnchor:bc.contentView.topAnchor constant:4],
+            [bar.heightAnchor constraintEqualToConstant:56],
         ]];
         return bc;
     }
@@ -559,7 +543,7 @@ static const CGFloat kTBListHeaderInset = kTBSpacePageSide + 12.0;   // 与玻�
         cell.contentView.backgroundColor = [UIColor clearColor];
         // 卡片必须放进 contentView：系统左滑只平移 contentView，挂在 backgroundView
         // 上的卡片不会跟着走（表现就是内容左移、卡片留在原地，内容跑到卡片外面）。
-        UIView *bg = TBGlassCellBG(kTBSpaceTableCellCardInset);
+        UIView *bg = TBGlassCellBG(12);
         bg.translatesAutoresizingMaskIntoConstraints = NO;
         [cell.contentView insertSubview:bg atIndex:0];
         [NSLayoutConstraint activateConstraints:@[

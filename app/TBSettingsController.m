@@ -19,8 +19,7 @@
     [super viewDidLoad];
     self.title = @"设置";
 
-    self.tableView.rowHeight = MAX(50.0, kTBSpaceRowMin);   // 行高 ≥44
-    if (@available(iOS 15.0, *)) self.tableView.sectionHeaderTopPadding = 0;
+    self.tableView.rowHeight = 56;
 
     self.model = @[
         @[ @{@"t": @"引擎状态", @"act": @"engineInfo"},
@@ -118,17 +117,6 @@
     return nil;
 }
 
-/// 0.15.59：全 App 统一间距（TBSpacing.h）
-- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
-    NSString *t = [self tableView:tableView titleForHeaderInSection:section];
-    return t.length ? kTBSpaceGroupTitle : kTBSpaceHeaderH;
-}
-
-- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
-    NSString *t = [self tableView:tableView titleForFooterInSection:section];
-    return t.length ? UITableViewAutomaticDimension : kTBSpaceSectionBot;
-}
-
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return self.model[section].count;
 }
@@ -139,7 +127,7 @@
                                                    reuseIdentifier:nil];
     cell.backgroundColor = [UIColor clearColor];
     cell.contentView.backgroundColor = [UIColor clearColor];
-    cell.backgroundView = TBGlassCellBG(kTBSpaceTableCellCardInset);
+    cell.backgroundView = TBGlassCellBG(12);
     cell.selectedBackgroundView = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.textLabel.text = row[@"t"];
