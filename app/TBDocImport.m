@@ -54,7 +54,7 @@ UIDocumentPickerViewController *TBNewImportPicker(NSArray *contentTypes,
         }
         if (!types.count) types = [@[ UTTypeZIP ] mutableCopy];
         @try {
-            p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:NO];
+            p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeData, UTTypeZIP, UTTypeFolder ] asCopy:NO];
             mode = @"initForOpeningContentTypes:asCopy:NO";
         } @catch (NSException *e) {
             TBLog2(@"[导入][picker] ❌ iOS14 分支创建异常：%@ — %@", e.name, e.reason);
@@ -356,7 +356,7 @@ NSURL *TBCopyCoordinatedItemToTemp(NSURL *url, NSError **error) {
         int ls = lstat(newURL.path.fileSystemRepresentation, &st);
         if (ls != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
             // iCloud 未下载时这里 size = 0（占位文件）。先让系统下载，最多等 15 秒再复检。
-            // （asCopy:YES 会让 iCloud 文件在 Files 里直接点不动，所以只能走这条。）
+            // （asCopy:NO 会让 iCloud 文件在 Files 里直接点不动，所以只能走这条。）
             [[NSFileManager defaultManager] startDownloadingUbiquitousItemAtURL:newURL error:NULL];
             NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:15.0];
             while ([deadline timeIntervalSinceNow] > 0) {
