@@ -651,6 +651,13 @@ static const CGFloat kTBListHeaderInset = 32.0;
 /// 给这一行套上样式；找不到滑动容器返回 NO（外观与原来完全一致，只是把
 /// 「找容器」这件事做得更彻底：cell / cell 的父视图 / 表格 / 整个窗口都试一遍）
 + (void)tb_installSwipeStyle {
+    // ★★ 0.15.56：整段禁用。我们曾在 UISwipeActionPullView -layoutSubviews 里改它的子视图
+    //    （想把左滑按钮做成玻璃），只要改动让 UIKit 数出来的按钮数对不上，就会抛
+    //    NSInternalInconsistencyException: The swipe action count does not match the number
+    //    of swipe action buttons —— 用户"任何一行左滑直接闪退"的真凶（换成原生
+    //    editingStyle 也照样崩，因为崩的是这个 hook，不是 swipe action 本身）。
+    TBLog2(@"[左滑] 已停用 UISwipeActionPullView 样式 hook（避免动作数校验崩溃）");
+    return;
     static BOOL done = NO;
     if (done) return;
     done = YES;

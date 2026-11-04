@@ -378,9 +378,14 @@ void TBStyleSearchBarGlass(UISearchBar *sb) {
     // ③ 每帧贴合输入框：圆角 = 高/2
     CGRect f = tf.frame;
     if (f.size.height < 2) return;
+    // ★ 搜索框"文字会动"的真凶：glass 跟随 tf.frame 时落在系统的聚焦动画 block 里，
+    //   隐式动画让玻璃底从旧位置滑到新位置，视觉上就像"字在动"。这里禁掉隐式动画。
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     glass.frame = f;
     glass.layer.cornerRadius = f.size.height / 2.0;
     glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [CATransaction commit];
 }
 
 static void (*o_searchBarLayout)(id, SEL);

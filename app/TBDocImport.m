@@ -61,9 +61,14 @@ UIDocumentPickerViewController *TBNewImportPicker(NSArray *contentTypes,
                 // 不用 asCopy：asCopy:YES 在 iCloud 云盘 + 根less 环境下会把"点文件"变成
                 // documentPickerWasCancelled（用户日志实测：三次点选全是 cancel）。
                 // 改用 open-in-place，下载/复制由我们自己用 NSFileCoordinator 完成。
-                p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types
-                                                                               asCopy:NO];
-                mode = @"initForOpeningContentTypes:asCopy:NO";
+                // 根less + 非沙盒环境下，iCloud 文件的 security-scoped 读取会 EPERM(257)：
+                //   ① asCopy:YES → 点文件被系统当成 cancel
+                //   ② asCopy:NO  → startAccessing 成功但 coordinator 读不了（257 无权限）
+                // 走 8~13 的 Import 模式：系统把文件直接复制进 App 的 Inbox，返回普通 file:// URL，
+                // 不需要 security scope（这套在越狱环境最稳）。
+                p = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:(legacyTypes ?: @[@"public.item"])
+                                                                           inMode:UIDocumentPickerModeImport];
+                mode = @"initWithDocumentTypes:UIDocumentPickerModeImport(legacy)";
             }
         } else {
             p = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:(legacyTypes ?: @[@"public.item"])
