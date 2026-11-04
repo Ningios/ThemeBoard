@@ -1,4 +1,6 @@
 #import "TBDocImport.h"
+#include <sys/stat.h>
+#include <errno.h>
 #if __has_include(<UniformTypeIdentifiers/UniformTypeIdentifiers.h>)
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #define TB_HAS_UTTYPE 1
@@ -144,10 +146,24 @@ static BOOL TBRawCopyItem(NSURL *src, NSURL *dst, NSError **err) {
     NSFileManager *fm = [NSFileManager defaultManager];
     BOOL isDir = NO;
     if (![fm fileExistsAtPath:src.path isDirectory:&isDir]) {
-        if (err) *err = [NSError errorWithDomain:@"ThemeBoard.Import" code:11 userInfo:@{
-            NSLocalizedDescriptionKey: @"源文件不在本机（等下载之后再读）",
-            NSFilePathErrorKey: src.path ?: @""}];
-        return NO;
+        // ★★ iCloud 未下载时，这里原本直接报 code 11 退出 —— 这就是"永远导不进来"的原因。
+        //   现在改为：先让系统去下载，最多等 12 秒（轮询 + 跑 runloop），期间一旦文件出现就继续；
+        //   仍然没有才报错（并保留系统给的错误信息）。
+        [fm startDownloadingUbiquitousItemAtURL:src error:NULL];
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:12.0];
+        while ([deadline timeIntervalSinceNow] > 0) {
+            [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                     beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
+            if ([fm fileExistsAtPath:src.path isDirectory:&isDir]) break;
+            [NSThread sleepForTimeInterval:0.1];
+        }
+        if (![fm fileExistsAtPath:src.path isDirectory:&isDir]) {
+            if (err) *err = [NSError errorWithDomain:NSCocoaErrorDomain code:260 userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                    @"读不到 %@（iCloud 未下载完成，或文件已被移动）", src.lastPathComponent ?: @""],
+                NSFilePathErrorKey: src.path ?: @""}];
+            return NO;
+        }
     }
     if (isDir) return TBRawCopyDirectory(src, dst, err) >= 0;
 
@@ -307,151 +323,61 @@ NSData *TBReadCoordinatedData(NSURL *url, NSError **error) {
 }
 
 NSURL *TBCopyCoordinatedItemToTemp(NSURL *url, NSError **error) {
+    // ★ 完全照 MarkFont-Ning 的 FMFontPackageImportSession 写法，不额外加任何东西：
+    //   startAccessingSecurityScopedResource → NSFileCoordinator(ReadingWithoutChanges)
+    //   → accessor 里 lstat 校验普通文件且 size>0 → copyItemAtURL 到 App 私有临时目录
+    //   → chmod 0600 → 校验大小一致。coordinator 会在这一步自动把 iCloud 文件下载下来。
     if (!url) {
-        TBLog2(@"[导入][复制] ❌ 没有选择文件（url=nil）");
-        if (error) *error = TBMakeError(@"没有选择文件", nil);
+        if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:260 userInfo:@{
+            NSLocalizedDescriptionKey: @"没有选择文件"}];
         return nil;
     }
     NSFileManager *fm = [NSFileManager defaultManager];
-    BOOL placeholder = TBIsICloudPlaceholder(url);
-    NSString *tmpRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                         [NSString stringWithFormat:@"tb-import-%@", [NSUUID UUID].UUIDString]];
+    NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      [@"tb-import-" stringByAppendingString:NSUUID.UUID.UUIDString.lowercaseString]];
     NSError *mkErr = nil;
-    if (![fm createDirectoryAtPath:tmpRoot withIntermediateDirectories:YES attributes:nil error:&mkErr]) {
-        TBLog2(@"[导入][复制] ❌ 建不了临时目录 %@：%@", tmpRoot, TBErrText(mkErr));
-        if (error) *error = TBMakeError(@"建不了临时目录", mkErr);
+    if (![fm createDirectoryAtPath:root withIntermediateDirectories:NO
+                        attributes:@{NSFilePosixPermissions:@0700} error:&mkErr]) {
+        if (error) *error = mkErr;
         return nil;
     }
     NSString *name = url.lastPathComponent.length ? url.lastPathComponent : @"import";
-    if (placeholder) {
-        // ".xxx.zip.icloud" → "xxx.zip"
-        if ([name hasPrefix:@"."]) name = [name substringFromIndex:1];
-        if ([name.lowercaseString hasSuffix:@".icloud"]) {
-            name = [name substringToIndex:name.length - @".icloud".length];
-        }
-        if (!name.length) name = @"import";
-    }
-    NSString *dstPath = [tmpRoot stringByAppendingPathComponent:name];
-    NSURL *dstURL = [NSURL fileURLWithPath:dstPath];
-    [fm removeItemAtURL:dstURL error:NULL];
-    TBLog2(@"[导入][复制] 开始 url=%@ iCloud=%d 占位=%@ → 临时 %@",
-           url.absoluteString ?: @"(nil)", TBURLIsICloud(url),
-           placeholder ? @"是" : @"否", dstPath);
+    NSURL *dst = [NSURL fileURLWithPath:[root stringByAppendingPathComponent:name]];
 
-    __block BOOL ok = NO;
-    __block NSError *copyErr = nil;
-    __block NSURL *srcUsed = nil;          // 真正复制成功的源（用于字节校验）
-    NSError *coordErr = nil;
-
-    BOOL scoped = [url startAccessingSecurityScopedResource];
-    TBLog2(@"[导入][复制] startAccessingSecurityScopedResource=%d", scoped);
+    BOOL accessed = [url startAccessingSecurityScopedResource];
     NSFileCoordinator *coord = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
-    @try {
-        [coord coordinateReadingItemAtURL:url
-                                  options:NSFileCoordinatorReadingWithoutChanges
-                                    error:&coordErr
-                               byAccessor:^(NSURL *newURL) {
-            BOOL isDirNow = NO;
-            BOOL there = [fm fileExistsAtPath:newURL.path isDirectory:&isDirNow];
-            TBLog2(@"[导入][复制] accessor url=%@ 存在=%d 目录=%d",
-                   newURL.path ?: @"(nil)", there, isDirNow);
-            // ★ 0.15.63：核心修复 —— 这里【不再】因为「副本不在本机」就报
-            //   「文件还在 iCloud 云端没有下载到本机…」并 return。MarkFont 之所以能导
-            //   iCloud 文件，就是因为它不做这个前置拒绝，交给系统在复制时下载。
-            if (!there) {
-                TBLog2(@"[导入][复制] accessor 没给到本地文件 → 交给直读/等下载兜底");
-                return;
-            }
-            NSError *e = nil;
-            srcUsed = newURL;
-            [fm removeItemAtURL:dstURL error:NULL];   // 清掉上一次失败留下的半成品
-            ok = [fm copyItemAtURL:newURL toURL:dstURL error:&e];
-            TBLog2(@"[导入][复制] copyItemAtURL=%d 失败原因=%@", ok, TBErrText(e));
-            if (!ok && !isDirNow) {
-                // 有些 provider 给的是占位 URL：退一步按字节读
-                NSData *d = [NSData dataWithContentsOfURL:newURL options:0 error:&e];
-                TBLog2(@"[导入][复制] 退一步直读 %lu 字节", (unsigned long)d.length);
-                if (d.length) ok = [d writeToURL:dstURL options:NSDataWritingAtomic error:&e];
-            }
-            if (!ok) copyErr = e;
-        }];
-    } @catch (NSException *ex) {
-        TBLog2(@"[导入][复制] ❌ 协调复制异常：%@ — %@", ex.name, ex.reason);
-        copyErr = TBMakeError([NSString stringWithFormat:@"复制异常：%@", ex.reason ?: ex.name], nil);
-    }
-
-    // 兜底 1：coordinator 没给出可用源 / 复制失败 → 直接用原始 URL 复制
-    if (!ok && [fm fileExistsAtPath:url.path]) {
-        NSError *e = nil;
-        [fm removeItemAtURL:dstURL error:NULL];
-        ok = [fm copyItemAtURL:url toURL:dstURL error:&e];
-        TBLog2(@"[导入][复制] 兜底1 原始 URL 复制=%d 失败原因=%@", ok, TBErrText(e));
-        if (ok) srcUsed = url;
-        else if (!copyErr) copyErr = e;
-    }
-    // 兜底 2：原始 URL 不在本机（iCloud 未下载）→ 触发下载 + 有界等待 → 再复制
-    if (!ok && ![fm fileExistsAtPath:url.path]) {
-        if (TBWaitForICloudDownload(url, 3.0)) {
-            NSError *e = nil;
-            [fm removeItemAtURL:dstURL error:NULL];
-            ok = [fm copyItemAtURL:url toURL:dstURL error:&e];
-            TBLog2(@"[导入][复制] 兜底2 下载后复制=%d 失败原因=%@", ok, TBErrText(e));
-            if (ok) srcUsed = url;
-            else if (!copyErr) copyErr = e;
+    __block NSError *copyErr = nil;
+    NSError *coordErr = nil;
+    [coord coordinateReadingItemAtURL:url
+                              options:NSFileCoordinatorReadingWithoutChanges
+                                error:&coordErr
+                           byAccessor:^(NSURL *newURL) {
+        struct stat st = {0};
+        if (lstat(newURL.path.fileSystemRepresentation, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+            int e = (st.st_size <= 0 && S_ISREG(st.st_mode)) ? EINVAL : errno;
+            copyErr = [NSError errorWithDomain:NSPOSIXErrorDomain code:(e ? e : EINVAL) userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                    @"所选文件不可读或大小为 0（%@）", newURL.lastPathComponent ?: @""],
+                NSFilePathErrorKey: newURL.path ?: @""}];
+            return;
         }
-    }
-    // 兜底 3：完全绕过 coordinator，按字节读原始 URL 再写临时文件（rootless 257/EPERM 的解）
-    if (!ok) {
-        NSError *e = nil;
-        ok = TBRawCopyItem(url, dstURL, &e);
-        TBLog2(@"[导入][复制] 兜底3 直读=%d 原因=%@", ok, TBErrText(e));
-        if (ok) srcUsed = url;
-        else if (!copyErr) copyErr = e;
-    }
-    if (scoped) [url stopAccessingSecurityScopedResource];
-
-    if (ok) {
-        // 复制后收紧权限 + 字节校验（目录跳过校验）
-        BOOL dstIsDir = NO;
-        BOOL dstThere = [fm fileExistsAtPath:dstPath isDirectory:&dstIsDir];
-        if (!dstThere) {
-            ok = NO;
-            copyErr = [NSError errorWithDomain:@"ThemeBoard.Import" code:13 userInfo:@{
-                NSLocalizedDescriptionKey: @"复制完成后临时副本不存在"}];
-        } else if (!dstIsDir) {
-            [fm setAttributes:@{NSFilePosixPermissions: @0600} ofItemAtPath:dstPath error:NULL];
-            NSDictionary *at = [fm attributesOfItemAtPath:dstPath error:NULL];
-            NSDictionary *srcAt = srcUsed ? [fm attributesOfItemAtPath:srcUsed.path error:NULL] : nil;
-            unsigned long long srcSize = [srcAt fileSize];
-            unsigned long long dstSize = [at fileSize];
-            TBLog2(@"[导入][复制] 字节校验 源=%llu 副本=%llu", srcSize, dstSize);
-            // 源大小取不到（provider 不给属性）时只打日志，不误判失败
-            if (srcSize > 0 && srcSize != dstSize) {
-                ok = NO;
-                copyErr = [NSError errorWithDomain:@"ThemeBoard.Import" code:9 userInfo:@{
-                    NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:@"复制后大小不一致（源 %llu / 副本 %llu）",
-                         srcSize, dstSize]}];
-                TBLog2(@"[导入][复制] ❌ 大小不一致：%@", TBErrText(copyErr));
-            }
+        [fm removeItemAtURL:dst error:NULL];
+        if (![fm copyItemAtURL:newURL toURL:dst error:&copyErr]) return;
+        [fm setAttributes:@{NSFilePosixPermissions:@0600} ofItemAtPath:dst.path error:&copyErr];
+        struct stat d = {0};
+        if (lstat(dst.path.fileSystemRepresentation, &d) != 0 || d.st_size != st.st_size) {
+            copyErr = [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:@{
+                NSLocalizedDescriptionKey: @"临时副本不完整"}];
         }
-        if (ok) {
-            TBLog2(@"[导入][复制] ✅ 成功 → %@（目录=%d）", dstPath, dstIsDir);
-            return dstURL;
-        }
-    }
+    }];
+    if (accessed) [url stopAccessingSecurityScopedResource];
 
-    [fm removeItemAtPath:tmpRoot error:NULL];
-    NSError *under = copyErr ?: coordErr;
-    TBLog2(@"[导入][复制] ❌ 失败 %@ → coordinator=%@ 复制=%@ 占位=%d",
-           url.lastPathComponent ?: @"?", TBErrText(coordErr), TBErrText(copyErr), placeholder);
-    TBLog2(@"[导入][复制] 失败详情 domain=%@ code=%ld desc=%@ userInfo=%@",
-           under.domain ?: @"-", (long)under.code, under.localizedDescription ?: @"-",
-           under.userInfo ?: @{});
-    if (error) {
-        *error = TBMakeError(TBImportFailureMessage(url, under, @"复制到 App 临时目录失败"), under);
+    if (copyErr || coordErr) {
+        [fm removeItemAtPath:root error:NULL];
+        if (error) *error = copyErr ?: coordErr;
+        return nil;
     }
-    return nil;
+    return dst;
 }
 
 void TBRemoveTempCopy(NSURL *tempURL) {

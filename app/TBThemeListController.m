@@ -822,8 +822,8 @@ willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPa
 - (void)tableView:(UITableView *)tableView willBeginEditingRowAtIndexPath:(NSIndexPath *)indexPath {
     // 右侧 ✓ 是 cell 的附件，不跟着 contentView 一起平移 → 滑开时会露在卡片外面，
     // 先收起来。0.15.63 起不再把旧值塞进 associated object：结束时按 active 主题重算。
-    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-    if (cell) cell.accessoryType = UITableViewCellAccessoryNone;
+    // ★★ 0.15.64：滑动开始时【不再清空勾】。用户必现路径：先滑别的行 → 再滑带 ✓ 那行，
+    //    勾会消失（就是这行清空造成的），取消滑动才回来。现在让 ✓ 全程显示。
     [self tb_startSwipeWatch];
     // 原版：0.05 秒后给这一行套样式（现在 swizzle 也会套，这里保留做兜底）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
