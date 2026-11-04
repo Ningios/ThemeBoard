@@ -24,6 +24,13 @@
 /// 但一旦被提前 dismiss（比如 search 控制器抢了呈现）就会连回调一起消失，
 /// 表现正是「点了文件完全没反应」。留住它 + delegate 自查日志。
 @property (nonatomic, strong) UIDocumentPickerViewController *activePicker;
+/// 0.15.63：左滑看门狗 —— didEndEditingRow 不一定会被调用（滑一半松手 / 直接滚动），
+/// 用轻量轮询等左滑容器消失后再把 ✓ 补回来
+@property (nonatomic, strong) NSTimer *tb_swipeWatchTimer;
+- (void)tb_applyCheckmarkForCell:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)ip;
+- (void)tb_applyCheckmarkForCell:(UITableViewCell *)cell
+                     atIndexPath:(NSIndexPath *)ip
+                           force:(BOOL)force;
 - (void)tb_dismissSearch;
 @end
 
@@ -150,7 +157,18 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
     if (userScrolling && fabs(scrollView.contentOffset.y) > 10.0) [self tb_dismissSearch];
 }
 
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self tb_stopSwipeWatch];
+}
+
+- (void)dealloc {
+    [_tb_swipeWatchTimer invalidate];
+}
+
 - (void)reload {
+    // 0.15.63：reload 时先收掉左滑看门狗（行会重建，扫描旧 cell 没意义）
+    [self tb_stopSwipeWatch];
     self.themes = [TBThemeScanner scanThemes];
     [self applyFilter];
     [self.refreshControl endRefreshing];
@@ -242,7 +260,7 @@ static void tb_swipePullLayout(id self, SEL _cmd) {
 }
 
 - (void)tb_presentImportPicker {
-    // iOS14+：initForOpeningContentTypes:asCopy:YES（系统先把文件/目录复制进 App 临时区）
+    // iOS14+：initForOpeningContentTypes:asCopy:NO（open in place，只用具体类型，见 TBNewImportPicker）
     // 老系统：initWithDocumentTypes:inMode:UIDocumentPickerModeImport
     // 搜索态下 self.presentedViewController 是搜索控制器，会抢走呈现 → 先退出搜索
     if (self.search.isActive) [self tb_dismissSearch];
@@ -571,11 +589,13 @@ static const CGFloat kTBListHeaderInset = 32.0;
         cell.detailTextLabel.text = t ? [NSString stringWithFormat:@"%lu 个图标 · 已应用", (unsigned long)t.iconCount]
                                       : @"从下方选择一个主题";
         cell.imageView.image = t ? [self thumbFor:t] : [UIImage systemImageNamed:@"circle.dashed"];
-        cell.accessoryType = UITableViewCellAccessoryNone;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if (indexPath.section == 2) {
         NSArray<TBTheme *> *list = self.themePacks;
-        if (indexPath.row >= (NSInteger)list.count) return cell;
+        if (indexPath.row >= (NSInteger)list.count) {
+            [self tb_applyCheckmarkForCell:cell atIndexPath:indexPath];
+            return cell;
+        }
         TBTheme *t = list[indexPath.row];
         [t loadIndex];
         cell.textLabel.text = t.name;
@@ -583,22 +603,76 @@ static const CGFloat kTBListHeaderInset = 32.0;
         cell.detailTextLabel.text = [NSString stringWithFormat:@"%lu 个图标 · %lu 个文件",
                                      (unsigned long)t.iconCount, (unsigned long)t.fileCount];
         cell.imageView.image = [self thumbFor:t];
-        cell.accessoryType = [[self activeThemeName] isEqualToString:t.name]
-            ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else {
         NSArray<TBTheme *> *list = self.assetPacks;
-        if (indexPath.row >= (NSInteger)list.count) return cell;
+        if (indexPath.row >= (NSInteger)list.count) {
+            [self tb_applyCheckmarkForCell:cell atIndexPath:indexPath];
+            return cell;
+        }
         TBTheme *t = list[indexPath.row];
         cell.textLabel.text = t.name;
         cell.textLabel.textColor = [UIColor labelColor];
         // 副标题只列这个人素材包实际提供的项：遮罩 / 边框 / 阴影 / 角标
         cell.detailTextLabel.text = [self tb_assetSubtitleFor:t];
         cell.imageView.image = [self thumbFor:t];
-        cell.accessoryType = UITableViewCellAccessoryNone;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     }
+    // 0.15.63：✓ 不再在各分支各写一次，统一按「当前 active 主题」重算
+    [self tb_applyCheckmarkForCell:cell atIndexPath:indexPath];
     return cell;
+}
+
+#pragma mark - ✓ 勾选（0.15.63）
+
+/// 唯一的 ✓ 计算入口：任何时刻（首次配置、复用、滚动、左滑开始/结束、reload）
+/// 都以「当前 active 主题」为准重新算，不看任何缓存（0.15.41 存 associated object
+/// 的做法会在「滑一半松手 / reload / reuse / didEndEditingRow 没被调用」时丢掉勾）。
+/// 段 2 = 主题包行 → active 打勾；段 0/1/3 → 一律无勾（与之前外观一致）。
+- (void)tb_applyCheckmarkForCell:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)ip {
+    if (!cell || !ip) return;
+    [self tb_applyCheckmarkForCell:cell atIndexPath:ip force:NO];
+}
+
+- (void)tb_applyCheckmarkForCell:(UITableViewCell *)cell
+                     atIndexPath:(NSIndexPath *)ip
+                           force:(BOOL)force {
+    if (!cell || !ip) return;
+    UITableViewCellAccessoryType acc = UITableViewCellAccessoryNone;
+    if (ip.section == 2) {
+        NSArray<TBTheme *> *list = self.themePacks;
+        if (ip.row >= 0 && ip.row < (NSInteger)list.count) {
+            NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
+            BOOL isActive = active.length > 0 &&
+                            [list[ip.row].name isEqualToString:active];
+            acc = isActive ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        }
+    }
+    if (force) {
+        // 左滑结束：UIKit 可能把附件那层留在隐藏/复位中间态，
+        // 先归零再设一次，强制它重建附件（外观不变，只是让 ✓ 一定回来）
+        cell.accessoryType = UITableViewCellAccessoryNone;
+    }
+    if (force || cell.accessoryType != acc) {
+        cell.accessoryType = acc;
+    }
+}
+
+/// 屏幕上的每一行都按当前 active 主题重算一次 ✓（供左滑 watch / 滚动结束调用）
+- (void)tb_refreshVisibleCheckmarksForce:(BOOL)force {
+    for (NSIndexPath *ip in [self.tableView indexPathsForVisibleRows]) {
+        UITableViewCell *c = [self.tableView cellForRowAtIndexPath:ip];
+        if (c) [self tb_applyCheckmarkForCell:c atIndexPath:ip force:force];
+    }
+}
+
+/// 这一行（含子视图）里是否还挂着左滑容器 —— 用来判断「左滑是不是真的结束了」
+- (BOOL)tb_rowHasActiveSwipePull:(UITableViewCell *)cell {
+    UIView *pull = TBFindSwipePullView(cell, 0);
+    if (!pull) return NO;
+    if (pull.hidden || pull.alpha < 0.01) return NO;
+    if (pull.bounds.size.width < 1.0) return NO;
+    return YES;
 }
 
 /// 素材包副标题：「遮罩 · 边框 · 阴影 · 角标」里实际有的项
@@ -726,16 +800,18 @@ static const CGFloat kTBListHeaderInset = 32.0;
     return YES;
 }
 
+- (void)tableView:(UITableView *)tableView
+willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    // 复用/滚动/刷新进入屏幕时都按「当前 active 主题」重算一次 ✓，不依赖任何缓存
+    [self tb_applyCheckmarkForCell:cell atIndexPath:indexPath];
+}
+
 - (void)tableView:(UITableView *)tableView willBeginEditingRowAtIndexPath:(NSIndexPath *)indexPath {
     // 右侧 ✓ 是 cell 的附件，不跟着 contentView 一起平移 → 滑开时会露在卡片外面，
-    // 先收起来，滑完再恢复
+    // 先收起来。0.15.63 起不再把旧值塞进 associated object：结束时按 active 主题重算。
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-    if (cell) {
-        static char kAccKey;
-        objc_setAssociatedObject(cell, &kAccKey, @(cell.accessoryType),
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        cell.accessoryType = UITableViewCellAccessoryNone;
-    }
+    if (cell) cell.accessoryType = UITableViewCellAccessoryNone;
+    [self tb_startSwipeWatch];
     // 原版：0.05 秒后给这一行套样式（现在 swizzle 也会套，这里保留做兜底）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -744,14 +820,47 @@ static const CGFloat kTBListHeaderInset = 32.0;
 }
 
 - (void)tableView:(UITableView *)tableView didEndEditingRowAtIndexPath:(NSIndexPath *)indexPath {
+    [self tb_stopSwipeWatch];
+    // 0.15.63：不还原 associated object，直接重算「这一行现在是不是 active 主题」。
+    // 即使期间发生过 reload / cell 复用（关联值丢了、对象换了一个）也算得回来。
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-    if (!cell) return;
-    static char kAccKey;
-    NSNumber *acc = objc_getAssociatedObject(cell, &kAccKey);
-    if (acc) {
-        cell.accessoryType = (UITableViewCellAccessoryType)acc.integerValue;
-        objc_setAssociatedObject(cell, &kAccKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (cell) {
+        [self tb_applyCheckmarkForCell:cell atIndexPath:indexPath force:YES];
+    } else {
+        // 行已经不在了（刚删掉 / 划出去了）→ 其它可见行的 ✓ 也要保住
+        [self tb_refreshVisibleCheckmarksForce:YES];
     }
+}
+
+#pragma mark - 左滑看门狗（didEndEditingRow 没被调用时的兜底）
+
+- (void)tb_startSwipeWatch {
+    [self tb_stopSwipeWatch];
+    NSDate *beganAt = [NSDate date];
+    __weak typeof(self) wself = self;
+    NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *tm) {
+        __strong typeof(self) s = wself;
+        if (!s) { [tm invalidate]; return; }
+        // 前 0.35s 是左滑容器出现/收起的动画窗口，这段时间不碰 accessory（避免闪）
+        if ([[NSDate date] timeIntervalSinceDate:beganAt] < 0.35) return;
+        BOOL swiping = NO;
+        for (NSIndexPath *ip in [s.tableView indexPathsForVisibleRows]) {
+            UITableViewCell *c = [s.tableView cellForRowAtIndexPath:ip];
+            if (c && [s tb_rowHasActiveSwipePull:c]) { swiping = YES; break; }
+        }
+        if (swiping) return;
+        // 左滑容器已不在任何一行上 → 这次左滑真的结束了（不管有没有回调 didEndEditingRow）
+        [tm invalidate];
+        s.tb_swipeWatchTimer = nil;
+        [s tb_refreshVisibleCheckmarksForce:YES];
+        TBLog2(@"[勾选] 左滑看门狗：左滑容器已消失 → 重算可见行 ✓");
+    }];
+    self.tb_swipeWatchTimer = t;
+}
+
+- (void)tb_stopSwipeWatch {
+    [self.tb_swipeWatchTimer invalidate];
+    self.tb_swipeWatchTimer = nil;
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView

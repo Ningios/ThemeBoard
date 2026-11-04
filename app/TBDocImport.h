@@ -21,21 +21,24 @@ void TBLog2(NSString *fmt, ...);
 UIDocumentPickerViewController *_Nullable TBNewImportPicker(NSArray *contentTypes,
                                                             NSArray<NSString *> *legacyTypes);
 
-/// 协调读取单个文件 → NSData（会触发 iCloud 下载）。失败返回 nil 并写 error。
+/// 协调读取单个文件 → NSData。0.15.63：coordinator 拿不到就退回
+/// 直读原始 URL / 触发 iCloud 下载后重读 / NSFileHandle 读，全都失败才返回 nil。
 NSData *_Nullable TBReadCoordinatedData(NSURL *url, NSError *_Nullable *_Nullable error);
 
 /// 协调读取并把条目（文件或整个目录，目录递归）复制到 NSTemporaryDirectory() 下的
-/// 独立临时目录，返回副本 URL。失败返回 nil 并写 error。
+/// 独立临时目录，返回副本 URL。0.15.63：不再因「副本不在本机」提前报错，
+/// coordinator 失败还有「原始 URL 复制 / 等 iCloud 下载 / 按字节直读」三级兜底。
 /// 调用方负责在用完后删除返回值的父目录（用 TBRemoveTempCopy）。
 NSURL *_Nullable TBCopyCoordinatedItemToTemp(NSURL *url, NSError *_Nullable *_Nullable error);
 
 /// 删除 TBCopyCoordinatedItemToTemp 产生的整个临时目录
 void TBRemoveTempCopy(NSURL *_Nullable tempURL);
 
-/// 这个 URL 是不是 iCloud 云盘路径（用来决定要不要提示「先去文件 App 下载」）
+/// 这个 URL 是不是 iCloud 云盘路径 —— 0.15.63 起【只用于日志】，
+/// 绝不用来提前拒绝导入（iCloud 未下载的文件由 coordinator/直读兜底去拿）
 BOOL TBURLIsICloud(NSURL *_Nullable url);
 
-/// 统一的失败提示文案（带 iCloud 说明 + 原始错误）
+/// 统一的失败提示文案：只写真实错误（描述 + domain/code），不编「先去下载」这类前置文案
 NSString *TBImportFailureMessage(NSURL *_Nullable url, NSError *_Nullable error, NSString *fallback);
 
 /// 0.15.54：从 from 沿 presentedViewController 链找到「真正的最顶层」可呈现 VC。
