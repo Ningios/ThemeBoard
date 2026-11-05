@@ -1816,37 +1816,84 @@ static void tb_ncConfigure(id self, SEL _cmd, id arg) {
     if (o_ncConfigure) o_ncConfigure(self, _cmd, arg);
 }
 
-// ---- 通知中心图标（0.15.84）：长度守恒地替换 icons 数组 ----
-// 语义（用户实测）：有头像的通知用小图标、没头像的用大图标；数组长度/顺序不固定。
-// 规则：逐元素替换，长度与顺序严格不变；每张用【它自己的】size/scale；单张失败保留原图。
-static id (*o_ncIcons)(id, SEL);
-
-static id tb_ncIcons(id self, SEL _cmd) {
-    id orig = o_ncIcons ? o_ncIcons(self, _cmd) : nil;
-    NSArray *arr = [orig isKindOfClass:[NSArray class]] ? (NSArray *)orig : nil;
-    if (!arr.count || !TBApplyEnabled(@"ApplyNotification")) return orig;
-    @try {
-        NSString *sid = [self valueForKey:@"sectionIdentifier"];
-        if (![sid isKindOfClass:[NSString class]] || !sid.length) return orig;
-        UIImage *theme = TBImageForBundle(sid);
-        if (![theme isKindOfClass:[UIImage class]]) return orig;
-        UIImage *shaped = TBApplyIconShape(theme, NO) ?: theme;
-        NSMutableArray *out = [NSMutableArray arrayWithCapacity:arr.count];
-        for (UIImage *img in arr) {
-            if (![img isKindOfClass:[UIImage class]] || img.size.width < 1) { [out addObject:img]; continue; }
-            TBInfo info = { img.size, img.scale > 0.5 ? img.scale : 3.0, 0 };
-            UIImage *sized = TBFitCached(shaped, info, sid);
-            [out addObject:(sized ?: img)];
-        }
-        TBLogOnce([@"ncicons|" stringByAppendingString:sid],
-                  @"NC 图标：%@ 替换 %lu 张（原 %lu 张）", sid,
-                  (unsigned long)out.count, (unsigned long)arr.count);
-        return out;
-    } @catch (NSException *e) {
-        TBLogOnce(@"ncicons.ex", @"NC 图标：异常 %@（原样返回）", e.reason ?: e.name);
-    }
-    return orig;
+// ---- 通知中心图标（0.15.88）：照 SystemX 1.5-8 的 NCBadgedIconView 段 ----
+// hook 全表对应的 5 个方法：initWithIconView: / ...andIntegerIndicatorBadgeWithCount: /
+// setIconView: / setBadgeViews: / layoutSubviews。姿势：init/set 换图 + layout 复用保护。
+static UIImage *TBNCThemeImage(NSString *bid) {
+    if (!bid.length) return nil;
+    UIImage *img = TBImageForBundle(bid);
+    if (![img isKindOfClass:[UIImage class]]) return nil;
+    return TBApplyIconEffects(TBApplyIconShape(img, NO)) ?: img;
 }
+static NSString *TBNCBidFromBadgedView(id view) {
+    @try {
+        id d = nil;
+        @try { d = [view valueForKey:@"_badgedIconDescription"]; } @catch (NSException *e) {}
+        if (!d) return nil;
+        id bid = nil;
+        @try { bid = [d valueForKey:@"_bundleIdentifier"]; } @catch (NSException *e) {}
+        return ([bid isKindOfClass:[NSString class]] && [(NSString *)bid length]) ? bid : nil;
+    } @catch (NSException *e) { return nil; }
+}
+static void TBNCApplyToView(id badgedView) {
+    @try {
+        NSString *bid = TBNCBidFromBadgedView(badgedView);
+        if (!bid.length) return;
+        UIImage *out = TBNCThemeImage(bid);
+        if (!out) return;
+        id iconView = nil;
+        @try { iconView = [badgedView valueForKey:@"_iconView"]; } @catch (NSException *e) {}
+        @try { if (!iconView) iconView = [badgedView valueForKey:@"iconView"]; } @catch (NSException *e) {}
+        if (![iconView isKindOfClass:[UIImageView class]]) return;
+        UIImageView *iv = (UIImageView *)iconView;
+        if (iv.image == out) return;
+        iv.image = out;
+        iv.contentMode = UIViewContentModeScaleAspectFit;
+        CGFloat side = MIN(iv.bounds.size.width, iv.bounds.size.height);
+        if (side > 1) {
+            iv.layer.cornerRadius = side * 0.2237;
+            iv.layer.cornerCurve = kCACornerCurveContinuous;
+            iv.layer.masksToBounds = YES;
+        }
+        TBLogOnce([@"nc|" stringByAppendingString:bid], @"NC 图标：%@ 已替换", bid);
+    } @catch (NSException *e) {}
+}
+static void (*o_ncInit)(id, SEL, id);
+static void tb_ncInit(id self, SEL _cmd, id iconView) {
+    if (o_ncInit) o_ncInit(self, _cmd, iconView);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([self isKindOfClass:NSClassFromString(@"NCBadgedIconView")]) TBNCApplyToView(self);
+    });
+}
+static void (*o_ncInitBadge)(id, SEL, id, NSInteger);
+static void tb_ncInitBadge(id self, SEL _cmd, id iconView, NSInteger count) {
+    if (o_ncInitBadge) o_ncInitBadge(self, _cmd, iconView, count);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([self isKindOfClass:NSClassFromString(@"NCBadgedIconView")]) TBNCApplyToView(self);
+    });
+}
+static void (*o_ncSetIconView)(id, SEL, id);
+static void tb_ncSetIconView(id self, SEL _cmd, id iconView) {
+    if (o_ncSetIconView) o_ncSetIconView(self, _cmd, iconView);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([self isKindOfClass:NSClassFromString(@"NCBadgedIconView")]) TBNCApplyToView(self);
+    });
+}
+static void (*o_ncSetBadgeViews)(id, SEL, id);
+static void tb_ncSetBadgeViews(id self, SEL _cmd, id views) {
+    if (o_ncSetBadgeViews) o_ncSetBadgeViews(self, _cmd, views);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([self isKindOfClass:NSClassFromString(@"NCBadgedIconView")]) TBNCApplyToView(self);
+    });
+}
+static void (*o_ncLayout)(id, SEL);
+static void tb_ncLayout(id self, SEL _cmd) {
+    if (o_ncLayout) o_ncLayout(self, _cmd);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([self isKindOfClass:NSClassFromString(@"NCBadgedIconView")]) TBNCApplyToView(self);
+    });
+}
+
 
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
@@ -4195,16 +4242,22 @@ static void TBInstall(void) {
         TBInstallClockContentsHooks();
     }
 
-        // ★★ 通知中心图标：0.15.78 起【彻底不做】。
-        //   实测（17.2.1）：SystemBox 那套 `NCBadgedIconView -_configureBadgedIconViewIfNecessary`
-        //   在这台设备上会导致「横幅不显示」，且替换日志 0 命中、SpringBoard 仍反复重启。
-        //   SnowBoard 的数据层方案（NCNotificationContent -icons）在 17.2 是 0 调用。
-        //   两条路都不可行 → 保命要紧，不做通知中心图标。
-    // ★★★ 通知中心图标：永久移除（0.15.85）。
-    //   0.15.82（照 SB 返回单张）与 0.15.84（长度守恒逐张替换）两次都在真机上造成
-    //   「屏幕一黑一亮 / SpringBoard 崩溃循环」。说明本机 17.2.1 上 NCNotificationContent
-    //   -icons 的调用上下文（线程/缓存/频率）与我们实现不兼容，任何改动都会破坏通知系统。
-    //   结论：不再尝试。要做得先真机 dump 该方法的入参/返回值/线程，否则必崩。
+    // 通知中心图标：照 SystemX 的 NCBadgedIconView 段（init/set 换图 + layout 复用保护）
+    if (TBApplyEnabled(@"ApplyNotification")) {
+        Class ncb = NSClassFromString(@"NCBadgedIconView");
+        if (ncb) {
+            if (TBHasMethod(ncb, @"initWithIconView:"))
+                o_ncInit = (void (*)(id, SEL, id))TBHook(ncb, @"initWithIconView:", (IMP)tb_ncInit, "NC 图标");
+            if (TBHasMethod(ncb, @"initWithIconView:andIntegerIndicatorBadgeWithCount:"))
+                o_ncInitBadge = (void (*)(id, SEL, id, NSInteger))TBHook(ncb, @"initWithIconView:andIntegerIndicatorBadgeWithCount:", (IMP)tb_ncInitBadge, "NC 图标");
+            if (TBHasMethod(ncb, @"setIconView:"))
+                o_ncSetIconView = (void (*)(id, SEL, id))TBHook(ncb, @"setIconView:", (IMP)tb_ncSetIconView, "NC 图标");
+            if (TBHasMethod(ncb, @"setBadgeViews:"))
+                o_ncSetBadgeViews = (void (*)(id, SEL, id))TBHook(ncb, @"setBadgeViews:", (IMP)tb_ncSetBadgeViews, "NC 图标");
+            if (TBHasMethod(ncb, @"layoutSubviews"))
+                o_ncLayout = (void (*)(id, SEL))TBHook(ncb, @"layoutSubviews", (IMP)tb_ncLayout, "NC 图标");
+        }
+    }
     // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）。
     // ★ 0.15.51 拷问修复：这个块原来被嵌进了上面 clockView 的 if 里（0.15.49 少一个闭括号），
     //   桌面上没有时钟图标视图时整个角标 hook 都装不上（替换/还原全失效，表现即 0.15.49 的
