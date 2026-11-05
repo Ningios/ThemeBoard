@@ -1901,29 +1901,42 @@ static NSDictionary *gNameToBID;
 static BOOL sInIVHook = NO;
 
 static void TBBuildNameMap(void) {
-    if (gNameToBID) return;
-    NSMutableDictionary *m = [NSMutableDictionary dictionary];
-    @try {
-        Class ws = NSClassFromString(@"LSApplicationWorkspace");
-        id w = ws ? ((id (*)(id, SEL))objc_msgSend)(ws, NSSelectorFromString(@"defaultWorkspace")) : nil;
-        NSArray *apps = w ? ((id (*)(id, SEL))objc_msgSend)(w, NSSelectorFromString(@"allApplications")) : nil;
-        for (id app in apps) {
-            @try {
-                NSString *bid = ((id (*)(id, SEL))objc_msgSend)(app, NSSelectorFromString(@"bundleIdentifier"));
-                if (![bid isKindOfClass:[NSString class]] || !bid.length) continue;
-                for (NSString *sel in @[ @"localizedName", @"itemName", @"applicationIdentifier" ]) {
-                    if (![app respondsToSelector:NSSelectorFromString(sel)]) continue;
-                    NSString *nm = ((id (*)(id, SEL))objc_msgSend)(app, NSSelectorFromString(sel));
-                    if ([nm isKindOfClass:[NSString class]] && nm.length) m[nm] = bid;
-                }
-            } @catch (NSException *e) {}
-        }
-    } @catch (NSException *e) {}
-    gNameToBID = [m copy];
-    TBLog(@"设置页图标：显示名映射表 %lu 条", (unsigned long)m.count);
+    // ★ 0.16.2：这个表在设置进程里要遍历所有已装 App（几十~几百个），
+    //   在 setImage: 里同步建会把主线程卡死（用户实测"设置滑不动"）。
+    //   改成后台队列建一次，建好前一律跳过替换。
+    static BOOL building = NO;
+    if (gNameToBID || building) return;
+    building = YES;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSMutableDictionary *m = [NSMutableDictionary dictionary];
+        @try {
+            Class ws = NSClassFromString(@"LSApplicationWorkspace");
+            id w = ws ? ((id (*)(id, SEL))objc_msgSend)(ws, NSSelectorFromString(@"defaultWorkspace")) : nil;
+            NSArray *apps = w ? ((id (*)(id, SEL))objc_msgSend)(w, NSSelectorFromString(@"allApplications")) : nil;
+            for (id app in apps) {
+                @try {
+                    NSString *bid = ((id (*)(id, SEL))objc_msgSend)(app, NSSelectorFromString(@"bundleIdentifier"));
+                    if (![bid isKindOfClass:[NSString class]] || !bid.length) continue;
+                    for (NSString *sel in @[ @"localizedName", @"itemName" ]) {
+                        if (![app respondsToSelector:NSSelectorFromString(sel)]) continue;
+                        NSString *nm = ((id (*)(id, SEL))objc_msgSend)(app, NSSelectorFromString(sel));
+                        if ([nm isKindOfClass:[NSString class]] && nm.length) m[nm] = bid;
+                    }
+                } @catch (NSException *e) {}
+            }
+        } @catch (NSException *e) {}
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gNameToBID = [m copy];
+            building = NO;
+            TBLog(@"设置页图标：显示名映射表 %lu 条（后台构建完成）", (unsigned long)m.count);
+        });
+    });
 }
 
-/// 取 cell 的标题文字（新架构里不一定用 textLabel，所以再兜底找第一个 UILabel）
+static NSMutableDictionary *gTitleImg;      // 行标题 → 已缩放的图（NSNull 表示无主题）
+static const void *kTBDoneKey = &kTBDoneKey; // cell 上打标记，一行只处理一次
+
+/// 取 cell 的标题文字（先 textLabel，再浅层搜第一个 UILabel，最多 15 个节点）
 static NSString *TBCellTitleText(id cell) {
     @try {
         if ([cell respondsToSelector:@selector(textLabel)]) {
@@ -1933,12 +1946,9 @@ static NSString *TBCellTitleText(id cell) {
     } @catch (NSException *e) {}
     NSMutableArray *stack = [NSMutableArray arrayWithObject:cell];
     NSInteger n = 0;
-    while (stack.count && n < 40) {
+    while (stack.count && n < 15) {
         UIView *v = stack.firstObject; [stack removeObjectAtIndex:0]; n++;
-        if ([v isKindOfClass:[UILabel class]]) {
-            UILabel *l = (UILabel *)v;
-            if (l.text.length) return l.text;
-        }
+        if ([v isKindOfClass:[UILabel class]] && ((UILabel *)v).text.length) return ((UILabel *)v).text;
         [stack addObjectsFromArray:[v.subviews copy]];
     }
     return nil;
@@ -1950,34 +1960,46 @@ static void tb_ivSetImage(id self, SEL _cmd, id img) {
     if (sInIVHook) return;
     @try {
         if (!TBEnabled() || TBSafeMode() || !TBUIKitIconEnabled()) return;
+        if (!gNameToBID) { TBBuildNameMap(); return; }      // 表还没建好 → 不做任何事
         UIImageView *iv = (UIImageView *)self;
         if (![iv isKindOfClass:[UIImageView class]]) return;
         CGSize sz = iv.bounds.size;
-        if (sz.width < 8 || sz.width > 64 || fabs(sz.width - sz.height) > 4) return;   // 只看近方形小图
+        if (sz.width < 8 || sz.width > 64 || fabs(sz.width - sz.height) > 4) return;
         UITableViewCell *cell = nil;
         UIView *pv = iv.superview;
         for (int d = 0; pv && d < 6; d++, pv = pv.superview) {
             if ([pv isKindOfClass:[UITableViewCell class]]) { cell = (UITableViewCell *)pv; break; }
         }
         if (!cell) return;
+        if (objc_getAssociatedObject(cell, kTBDoneKey)) return;   // 一行只处理一次，避免 setImage 反复触发
+        objc_setAssociatedObject(cell, kTBDoneKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         NSString *title = TBCellTitleText(cell);
         if (!title.length) return;
-        TBBuildNameMap();
-        NSString *bid = gNameToBID[title];
-        if (!bid.length) return;
-        UIImage *theme = TBImageForBundle(bid);
-        if (![theme isKindOfClass:[UIImage class]]) return;
-        TBInfo info = { sz, [UIScreen mainScreen].scale, 0 };
-        UIImage *sized = TBFitCached(theme, info, bid) ?: theme;
-        if (iv.image == sized) return;
+        if (!gTitleImg) gTitleImg = [NSMutableDictionary dictionary];
+        id cached = gTitleImg[title];
+        UIImage *sized = nil;
+        if ([cached isKindOfClass:[UIImage class]]) {
+            sized = cached;
+        } else if (cached) {
+            return;                                             // NSNull = 无主题
+        } else {
+            NSString *bid = gNameToBID[title];
+            UIImage *theme = bid.length ? TBImageForBundle(bid) : nil;
+            if (![theme isKindOfClass:[UIImage class]]) { gTitleImg[title] = [NSNull null]; return; }
+            TBInfo info = { sz, [UIScreen mainScreen].scale, 0 };
+            sized = TBFitCached(theme, info, bid) ?: theme;
+            gTitleImg[title] = sized ?: (id)[NSNull null];
+            TBLogOnce([@"ivrow|" stringByAppendingString:bid ?: title],
+                      @"设置页图标(UIImageView)：%@（行「%@」）已替换", bid, title);
+        }
+        if (![sized isKindOfClass:[UIImage class]] || iv.image == sized) return;
         sInIVHook = YES;
         iv.image = sized;
         iv.contentMode = UIViewContentModeScaleAspectFit;
         sInIVHook = NO;
-        TBLogOnce([@"ivrow|" stringByAppendingString:bid], @"设置页图标(UIImageView)：%@（行「%@」）已替换",
-                  bid, title);
     } @catch (NSException *e) { sInIVHook = NO; }
 }
+
 
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
