@@ -4595,6 +4595,20 @@ static void TBInstall(void) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ TBRefreshSettingsIconsBatch(@"启动"); });
         }
+        // ★ 0.16.7：系统会在之后（滚动/复用/reloadData）把原图写回，症状是"过一会又变回默认"。
+        //   这里加一个很轻的定时补刷：每 1.2 秒只扫【可见行】并做一次字典比对，命中已正确就跳过。
+        static NSTimer *sTimer = nil;
+        if (!sTimer) {
+            sTimer = [NSTimer timerWithTimeInterval:1.2 repeats:YES block:^(NSTimer *t) {
+                TBRefreshSettingsIconsBatch(@"定时");
+            }];
+            sTimer.tolerance = 0.3;
+            [[NSRunLoop mainRunLoop] addTimer:sTimer forMode:NSRunLoopCommonModes];
+            [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                                              object:nil queue:[NSOperationQueue mainQueue]
+                                                          usingBlock:^(NSNotification *n) { [sTimer invalidate]; }];
+            TBLog(@"设置页图标：已启动定时补刷（1.2s，只扫可见行）");
+        }
     }
 
     // UIActivity 分享面板图标（运行时检测）
