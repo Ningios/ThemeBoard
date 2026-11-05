@@ -1824,6 +1824,7 @@ static void tb_ncConfigure(id self, SEL _cmd, id arg) {
 
 static void TBRefreshVisibleTablesLight(NSString *why);
 static void TBRefreshSettingsIconsBatch(NSString *why);
+static void TBApplyIconToCellByTitle(UITableViewCell *cell);
 
 // ---- 设置列表 App 行图标（0.16.0）----
 // 视频里的 View Hierarchy 实锤：设置列表每行是 `PSTableCell`，图标是它内置的
@@ -1988,9 +1989,38 @@ static void TBApplyIconToCellByTitle(UITableViewCell *cell) {
             TBLogOnce([@"ivrow|" stringByAppendingString:bid], @"设置页图标(批量)：%@（行「%@」）已替换", bid, title);
         }
         if (![sized isKindOfClass:[UIImage class]]) return;
-        for (UIImageView *iv in @[ cell.imageView ?: [NSNull null] ]) {
-            if (![iv isKindOfClass:[UIImageView class]]) continue;
-            if (iv.image != sized) { iv.image = sized; iv.contentMode = UIViewContentModeScaleAspectFit; }
+        // 0.16.8：不只改 cell.imageView —— 视频显示行的图标是 cell 里那个近方形 UIImageView，
+        //   它未必就是 cell.imageView。这里把 cell 内【所有】近方形小 UIImageView 都换上。
+        NSMutableArray *stack2 = [NSMutableArray arrayWithObject:(id)cell];
+        NSInteger m = 0, hit = 0;
+        while (stack2.count && m < 40) {
+            UIView *v = stack2.firstObject; [stack2 removeObjectAtIndex:0]; m++;
+            if ([v isKindOfClass:[UIImageView class]]) {
+                CGSize isz = v.bounds.size;
+                if (isz.width >= 8 && isz.width <= 64 && fabs(isz.width - isz.height) <= 4) {
+                    UIImageView *iv2 = (UIImageView *)v;
+                    if (iv2.image != sized) {
+                        iv2.image = sized;
+                        iv2.contentMode = UIViewContentModeScaleAspectFit;
+                    }
+                    hit++;
+                }
+            }
+            [stack2 addObjectsFromArray:[v.subviews copy]];
+        }
+        (void)hit;
+    } @catch (NSException *e) {}
+}
+
+static void (*o_prepareReuse)(id, SEL);
+static void tb_prepareReuse(id self, SEL _cmd) {
+    if (o_prepareReuse) o_prepareReuse(self, _cmd);
+    // 0.16.8：cell 复用会把图换回系统图 → 复用后立刻按标题再贴一次（很轻：字典查表）
+    @try {
+        if ([[NSProcessInfo processInfo].processName isEqualToString:@"Preferences"]) {
+            if ([self isKindOfClass:[UITableViewCell class]]) {
+                dispatch_async(dispatch_get_main_queue(), ^{ TBApplyIconToCellByTitle((UITableViewCell *)self); });
+            }
         }
     } @catch (NSException *e) {}
 }
@@ -4571,6 +4601,14 @@ static void TBInstall(void) {
         // 设置列表 App 行：PSTableCell 内置 imageView（29×29）才是真正的图标出口
         // ★ 0.16.6：**不再** hook UIImageView -setImage:（那是滚动热路径，图/箭头/占位都要过一遍 → 设置卡死）。
         //   改为"批量扫描可见行"的方式，见 TBRefreshSettingsIconsBatch()。
+        // 0.16.8：cell 复用时补一次（不在 setImage 热路径，只在整行复用时触发）
+        if ([[NSProcessInfo processInfo].processName isEqualToString:@"Preferences"]) {
+            Class cellCls = NSClassFromString(@"UITableViewCell");
+            if (cellCls && TBHasMethod(cellCls, @"prepareForReuse")) {
+                o_prepareReuse = (void (*)(id, SEL))TBHook(cellCls, @"prepareForReuse",
+                                                           (IMP)tb_prepareReuse, "cell 复用补图");
+            }
+        }
 
         Class psCell = NSClassFromString(@"PSTableCell");
         if (psCell) {
