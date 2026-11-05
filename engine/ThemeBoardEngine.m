@@ -3316,23 +3316,51 @@ static void tb_specSetIcon(id self, SEL _cmd, id icon) {
 
 static void tb_setupIconWithBundle(id self, SEL _cmd, id bundle) {
     if (o_setupIconBundle) o_setupIconBundle(self, _cmd, bundle);
+    // 0.15.95：先无条件确认这个 hook 到底有没有被调用（17.2 头文件里 PSSpecifier 只有
+    //   setupIconImageWithBundle: / setupIconImageWithPath: 两条图标方法，没有 icon/setIconImage:，
+    //   所以之前"设置了但没生效"很可能是写入方式不对）
+    static int sCalls = 0;
+    if (sCalls < 3) {
+        sCalls++;
+        TBLog(@"设置页图标 setup 被调用：cls=%@ bundle=%@", NSStringFromClass([self class]), bundle);
+    }
     if (!TBEnabled() || TBSafeMode() || !TBUIKitIconEnabled()) return;
     @try {
         NSString *bid = nil;
-        for (NSString *k in @[@"identifier", @"bundleIdentifier"]) {
-            if ([self respondsToSelector:NSSelectorFromString(k)]) {
-                id v = ((id (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(k));
-                if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) { bid = v; break; }
+        id b = bundle;
+        if ([b isKindOfClass:[NSString class]]) bid = (NSString *)b;
+        if (![bid containsString:@"."] && [bundle respondsToSelector:NSSelectorFromString(@"bundleIdentifier")]) {
+            id v = ((id (*)(id, SEL))objc_msgSend)(bundle, NSSelectorFromString(@"bundleIdentifier"));
+            if ([v isKindOfClass:[NSString class]]) bid = v;
+        }
+        if (!bid.length || ![bid containsString:@"."]) {
+            for (NSString *k in @[@"identifier", @"bundleIdentifier"]) {
+                if ([self respondsToSelector:NSSelectorFromString(k)]) {
+                    id v = ((id (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(k));
+                    if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) { bid = v; break; }
+                }
             }
         }
         if (!bid.length) return;
         UIImage *img = TBImageForBundle(bid);
-        if (!img) { TBLog(@"miss(设置页) %@", bid); return; }
-        SEL setIcon = NSSelectorFromString(@"setIconImage:");
-        if ([self respondsToSelector:setIcon]) {
-            ((void (*)(id, SEL, id))objc_msgSend)(self, setIcon, img);
-            TBLog(@"serve(设置页) %@", bid);
+        if (!img) { TBLogOnce([@"spmiss|" stringByAppendingString:bid], @"miss(设置页) %@", bid); return; }
+        BOOL done = NO;
+        // ① setIconImage:（若存在）
+        if ([self respondsToSelector:NSSelectorFromString(@"setIconImage:")]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(self, NSSelectorFromString(@"setIconImage:"), img);
+            done = YES;
         }
+        // ② KVC 写 icon（PSSpecifier 内部有 _icon，KVC 能直接命中）
+        if (!done) {
+            @try { [self setValue:img forKey:@"icon"]; done = YES; } @catch (NSException *e) {}
+        }
+        // ③ setProperty:forKey:@"icon"
+        if (!done && [self respondsToSelector:NSSelectorFromString(@"setProperty:forKey:")]) {
+            ((void (*)(id, SEL, id, id))objc_msgSend)(self, NSSelectorFromString(@"setProperty:forKey:"), img, @"icon");
+            done = YES;
+        }
+        if (done) TBLogOnce([@"spserve|" stringByAppendingString:bid], @"serve(设置页) %@", bid);
+        else TBLogOnce([@"spfail|" stringByAppendingString:bid], @"设置页图标写入失败（无可用 setter）%@", bid);
     } @catch (NSException *e) { }
 }
 
