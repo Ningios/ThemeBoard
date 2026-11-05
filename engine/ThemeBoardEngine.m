@@ -3278,7 +3278,7 @@ static NSString *TBBidFromSpecifier(id spec) {
 /// setupIconImageWithBundle: 在 17.2 上不触发，所以补 getter/setter 两条）
 static UIImage *TBThemedIconLike(UIImage *orig, NSString *bid) {
     if (!bid.length) return nil;
-    if (!TBUIKitIconEnabled() || TBSafetyOff()) return nil;
+    if (!TBUIKitIconEnabled() || !TBEnabled() || TBSafeMode()) return nil;
     UIImage *img = TBImageForBundle(bid);
     if (![img isKindOfClass:[UIImage class]]) return nil;
     UIImage *out = TBApplyIconEffects(TBApplyIconShape(img, NO)) ?: img;
@@ -3313,8 +3313,6 @@ static void tb_specSetIcon(id self, SEL _cmd, id icon) {
     } @catch (NSException *e) {}
     if (o_specSetIcon) o_specSetIcon(self, _cmd, icon);
 }
-
-static BOOL TBSafetyOff(void) { return !TBEnabled() || TBSafeMode(); }
 
 static void tb_setupIconWithBundle(id self, SEL _cmd, id bundle) {
     if (o_setupIconBundle) o_setupIconBundle(self, _cmd, bundle);
