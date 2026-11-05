@@ -4324,6 +4324,14 @@ static void TBInstall(void) {
         }
     }
 
+    // 设置进程：启动后自动轻量刷新两次 —— 让设置页那列 App 图标重新取图（不必先去 App 里点应用）
+    if ([[NSProcessInfo processInfo].processName isEqualToString:@"Preferences"]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ TBRefreshVisibleTablesLight(@"启动1"); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ TBRefreshVisibleTablesLight(@"启动2"); });
+    }
+
     // UIActivity 分享面板图标（运行时检测）
     if (activity && !gDoneActivity) {
         gDoneActivity = YES;
@@ -4742,6 +4750,28 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n,
     TBRunReload(seq, why);
 }
 
+/// 轻量刷新：只把屏幕上可见的 UITableView 重载一遍（让设置页那列行重新取图标）
+static void TBRefreshVisibleTablesLight(NSString *why) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            NSMutableArray<UIView *> *stack = [NSMutableArray array];
+            for (UIView *w in [[UIApplication sharedApplication] windows]) [stack addObject:w];
+            NSInteger n = 0, hit = 0;
+            while (stack.count && n < 400) {
+                UIView *v = stack.firstObject;
+                [stack removeObjectAtIndex:0];
+                n++;
+                if ([v isKindOfClass:[UITableView class]]) {
+                    [(UITableView *)v reloadData];
+                    hit++;
+                }
+                [stack addObjectsFromArray:[v.subviews copy]];
+            }
+            if (hit) TBLog(@"轻量刷新(%@)：reloadData %ld 个表格", why ?: @"?", (long)hit);
+        } @catch (NSException *e) { }
+    });
+}
+
 static void TBRunReload(NSUInteger mySeq, NSString *why) {
     NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
     TBLog(@"重活开始：%@", why);
@@ -4760,26 +4790,7 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
             gIndex = nil; gBundleRes = nil; gBundleResTheme = nil;
             [gLock unlock];
             TBLog(@"重活跳过（非 SpringBoard，只做轻量刷新）：%@", why);
-            // ★ 0.15.96：设置页那列 App 图标是【行自己缓存】的 —— 进程收到 changed 却什么都不做，
-            //   行就不会重新取图（表现：储存空间页有色，设置主页那列还是原图，因为它早就建好了）。
-            //   这里只做一件很轻的事：让可见的 UITableView 重新取一遍行内容。
-            dispatch_async(dispatch_get_main_queue(), ^{
-                @try {
-                    NSMutableArray<UIView *> *stack = [NSMutableArray array];
-                    for (UIView *w in [[UIApplication sharedApplication] windows]) [stack addObject:w];
-                    NSInteger n = 0;
-                    while (stack.count && n < 400) {
-                        UIView *v = stack.firstObject;
-                        [stack removeObjectAtIndex:0];
-                        n++;
-                        if ([v isKindOfClass:[UITableView class]]) {
-                            [(UITableView *)v reloadData];
-                            TBLog(@"轻量刷新：reloadData %@", NSStringFromClass([v class]));
-                        }
-                        [stack addObjectsFromArray:[v.subviews copy]];
-                    }
-                } @catch (NSException *e) { }
-            });
+            TBRefreshVisibleTablesLight(why);
             return;
         }
     }
