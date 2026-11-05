@@ -869,16 +869,19 @@ static BOOL TBIsThemeLikeDirectory(NSString *dir) {
 /// App(mobile) 连 chmod 都做不了（errno=1/513）。这里用 posix_spawn 调系统 chown。
 static int TBChownMobile(NSString *path) {
     if (path.length == 0) return -1;
-    if (access("/usr/bin/chown", X_OK) != 0) {
-        NSString *jb = @"/var/jb/usr/bin/chown";
-        if (access(jb.fileSystemRepresentation, X_OK) != 0) return -2;
-        path = jb;
+    // 真机上 chown 常见位置：/usr/bin/chown（rootless jbroot）、/bin/chown、/usr/sbin/chown。
+    // iSH 里是 /bin/chown → coreutils。逐个探测，用第一个可执行的那个。
+    NSString *bin = nil;
+    for (NSString *c in @[@"/usr/bin/chown", @"/bin/chown", @"/usr/sbin/chown",
+                          @"/var/jb/usr/bin/chown", @"/var/jb/bin/chown"]) {
+        if (access(c.fileSystemRepresentation, X_OK) == 0) { bin = c; break; }
     }
+    if (!bin) return -2;   // 没有 chown 可用
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     pid_t pid = -1;
-    char *argv[] = { (char*)"/usr/bin/chown", (char*)"mobile:mobile",
-                     (char*)path.fileSystemRepresentation, NULL };
+    char *argv[] = { (char*)bin.fileSystemRepresentation, (char*)"-R",
+                     (char*)"mobile:mobile", (char*)path.fileSystemRepresentation, NULL };
     int rc = posix_spawn(&pid, argv[0], NULL, &attr, argv, environ);
     posix_spawnattr_destroy(&attr);
     if (rc != 0) return rc;
@@ -888,11 +891,14 @@ static int TBChownMobile(NSString *path) {
 
 /// 递归 chown：先改目录本身，再遍历内容（目录大也够快，主题包几百个文件毫秒级）
 static void TBRecursiveChownMobile(NSString *path) {
-    TBChownMobile(path);
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *kids = [[fm subpathsAtPath:path] copy];
-    for (NSString *k in kids) {
-        TBChownMobile([path stringByAppendingPathComponent:k]);
+    int rc = TBChownMobile(path);
+    TBLog2(@"[删除] chown -R mobile:mobile rc=%d %@", rc, path);
+    if (rc != 0) {
+        // chown 不可用/失败时退回逐文件（老路径）
+        NSFileManager *fm = [NSFileManager defaultManager];
+        TBChownMobile(path);
+        NSArray *kids = [[fm subpathsAtPath:path] copy];
+        for (NSString *k in kids) TBChownMobile([path stringByAppendingPathComponent:k]);
     }
 }
 
