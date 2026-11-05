@@ -1816,11 +1816,57 @@ static void tb_ncConfigure(id self, SEL _cmd, id arg) {
     if (o_ncConfigure) o_ncConfigure(self, _cmd, arg);
 }
 
-// ---- 通知中心图标（0.15.84）：长度守恒地替换 icons 数组 ----
-// 语义（用户实测）：有头像的通知用小图标、没头像的用大图标；数组长度/顺序不固定。
-// 规则：逐元素替换，长度与顺序严格不变；每张用【它自己的】size/scale；单张失败保留原图。
+// ---- 通知中心图标（0.15.86）：回调里"只取不算" ----
+// 前两次崩因：在 -icons 里做 UIKit 渲染。这版主线程预渲染 master 图存缓存，
+// 回调里只用 CoreGraphics 等比缩放；未命中就原样返回并异步预热。
+static NSMutableDictionary *gNCArt;
+static NSMutableSet *gNCWarming;
+static void TBNCWarm(NSString *bid);
+static CGImageRef TBNCArtCopy(NSString *bid) {
+    if (!bid.length || !gNCArt) return NULL;
+    NSValue *v = gNCArt[bid];
+    return v ? (CGImageRef)(void *)v.pointerValue : NULL;
+}
+static CGImageRef TBNCScale(CGImageRef src, CGSize size, CGFloat scale) {
+    if (!src || size.width < 1 || size.height < 1) return NULL;
+    CGFloat sc = scale > 0.5 ? scale : 3.0;
+    size_t w = (size_t)MAX(1, lround(size.width * sc));
+    size_t h = (size_t)MAX(1, lround(size.height * sc));
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return NULL;
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, (CGFloat)w, (CGFloat)h), src);
+    CGImageRef out = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    return out;
+}
+static void TBNCWarm(NSString *bid) {
+    if (!bid.length) return;
+    @synchronized ([NSNull null]) {
+        if (!gNCWarming) gNCWarming = [NSMutableSet set];
+        if ([gNCWarming containsObject:bid]) return;
+        [gNCWarming addObject:bid];
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIImage *img = TBImageForBundle(bid);
+            if ([img isKindOfClass:[UIImage class]]) {
+                UIImage *shaped = TBApplyIconShape(img, NO) ?: img;
+                UIImage *out = TBApplyIconEffects(shaped) ?: shaped;
+                CGImageRef cg = out.CGImage;
+                if (cg) {
+                    if (!gNCArt) gNCArt = [NSMutableDictionary dictionary];
+                    gNCArt[bid] = [NSValue valueWithPointer:(void *)cg];
+                    TBLogOnce([@"ncwarm|" stringByAppendingString:bid], @"NC 图标预热：%@ 已缓存", bid);
+                }
+            }
+        } @catch (NSException *e) { }
+        @synchronized ([NSNull null]) { [gNCWarming removeObject:bid]; }
+    });
+}
 static id (*o_ncIcons)(id, SEL);
-
 static id tb_ncIcons(id self, SEL _cmd) {
     id orig = o_ncIcons ? o_ncIcons(self, _cmd) : nil;
     NSArray *arr = [orig isKindOfClass:[NSArray class]] ? (NSArray *)orig : nil;
@@ -1828,23 +1874,22 @@ static id tb_ncIcons(id self, SEL _cmd) {
     @try {
         NSString *sid = [self valueForKey:@"sectionIdentifier"];
         if (![sid isKindOfClass:[NSString class]] || !sid.length) return orig;
-        UIImage *theme = TBImageForBundle(sid);
-        if (![theme isKindOfClass:[UIImage class]]) return orig;
-        UIImage *shaped = TBApplyIconShape(theme, NO) ?: theme;
+        CGImageRef master = TBNCArtCopy(sid);
+        if (!master) { TBNCWarm(sid); return orig; }
         NSMutableArray *out = [NSMutableArray arrayWithCapacity:arr.count];
         for (UIImage *img in arr) {
             if (![img isKindOfClass:[UIImage class]] || img.size.width < 1) { [out addObject:img]; continue; }
-            TBInfo info = { img.size, img.scale > 0.5 ? img.scale : 3.0, 0 };
-            UIImage *sized = TBFitCached(shaped, info, sid);
-            [out addObject:(sized ?: img)];
+            CGImageRef scaled = TBNCScale(master, img.size, img.scale);
+            if (!scaled) { [out addObject:img]; continue; }
+            UIImage *u = [UIImage imageWithCGImage:scaled scale:(img.scale > 0.5 ? img.scale : 3.0)
+                                       orientation:UIImageOrientationUp];
+            CGImageRelease(scaled);
+            [out addObject:(u ?: img)];
         }
-        TBLogOnce([@"ncicons|" stringByAppendingString:sid],
-                  @"NC 图标：%@ 替换 %lu 张（原 %lu 张）", sid,
-                  (unsigned long)out.count, (unsigned long)arr.count);
+        TBLogOnce([@"ncicons|" stringByAppendingString:sid], @"NC 图标：%@ 替换 %lu 张（原 %lu）",
+                  sid, (unsigned long)out.count, (unsigned long)arr.count);
         return out;
-    } @catch (NSException *e) {
-        TBLogOnce(@"ncicons.ex", @"NC 图标：异常 %@（原样返回）", e.reason ?: e.name);
-    }
+    } @catch (NSException *e) { }
     return orig;
 }
 
@@ -4200,11 +4245,13 @@ static void TBInstall(void) {
         //   在这台设备上会导致「横幅不显示」，且替换日志 0 命中、SpringBoard 仍反复重启。
         //   SnowBoard 的数据层方案（NCNotificationContent -icons）在 17.2 是 0 调用。
         //   两条路都不可行 → 保命要紧，不做通知中心图标。
-    // ★★★ 通知中心图标：永久移除（0.15.85）。
-    //   0.15.82（照 SB 返回单张）与 0.15.84（长度守恒逐张替换）两次都在真机上造成
-    //   「屏幕一黑一亮 / SpringBoard 崩溃循环」。说明本机 17.2.1 上 NCNotificationContent
-    //   -icons 的调用上下文（线程/缓存/频率）与我们实现不兼容，任何改动都会破坏通知系统。
-    //   结论：不再尝试。要做得先真机 dump 该方法的入参/返回值/线程，否则必崩。
+    // 通知中心图标：只挂 -icons，回调里只查缓存（0.15.86）
+    if (TBApplyEnabled(@"ApplyNotification")) {
+        Class ncc = NSClassFromString(@"NCNotificationContent");
+        if (ncc && TBHasMethod(ncc, @"icons")) {
+            o_ncIcons = (id (*)(id, SEL))TBHook(ncc, @"icons", (IMP)tb_ncIcons, "NC 图标");
+        }
+    }
     // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）。
     // ★ 0.15.51 拷问修复：这个块原来被嵌进了上面 clockView 的 if 里（0.15.49 少一个闭括号），
     //   桌面上没有时钟图标视图时整个角标 hook 都装不上（替换/还原全失效，表现即 0.15.49 的
