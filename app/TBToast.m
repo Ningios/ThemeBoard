@@ -8,7 +8,7 @@ static const CGFloat kTBToastIconSize   = 14.0;
 static const CGFloat kTBToastIconGap    = 7.0;
 static const CGFloat kTBToastDockH      = 64.0;   // 与 TBRootController 的 dock 一致
 static const CGFloat kTBToastDockBottom = 34.0;   // 与 TBRootController 的 dock 下边距一致
-static const CGFloat kTBToastDockGap    = 16.0;   // Tab 栏上方再留 16
+static const CGFloat kTBToastDockGap    = 44.0;   // 0.15.91：16→44，远离底部手势区（原来贴着底栏会干扰上滑返回/退出）
 
 static const NSTimeInterval kTBToastInDuration  = 0.32;
 static const CGFloat        kTBToastInDamping   = 0.78;
@@ -93,7 +93,20 @@ static NSInteger _gToastGen = 0;
 
 @implementation TBToast
 
++ (void)tb_installLifecycleObserver {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *n) {
+        [TBToast dismissNow];          // 退到后台/开始上滑时立刻摘掉，不残留
+    }];
+}
+
 + (void)show:(NSString *)text icon:(NSString *)systemImageName in:(UIViewController *)host {
+    [self tb_installLifecycleObserver];
     if (!text.length) return;
     UIView *root = host.view.window ?: host.view;
     if (!root) return;
