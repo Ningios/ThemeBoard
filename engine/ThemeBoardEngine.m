@@ -1811,9 +1811,21 @@ static NSString *TBNCBIDFromBadgedView(id self) {
     return nil;
 }
 
+static void (*o_ncBadgedConfigure)(id, SEL);
+static void tb_ncBadgedApply(id self);
 static void tb_ncBadgedLayout(id self, SEL _cmd) {
     if (o_ncBadgedLayout) o_ncBadgedLayout(self, _cmd);
     if (!TBApplyEnabled(@"ApplyNotification")) return;
+    // 延后一拍再改图：绝不在当前布局/配置事务里动视图
+    __weak UIView *wv = (UIView *)self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIView *v = wv;
+        if (!v) return;
+        tb_ncBadgedApply(v);
+    });
+}
+
+static void tb_ncBadgedApply(id self) {
     @try {
         NSString *bid = TBNCBIDFromBadgedView(self);
         if (!bid.length) return;
@@ -4186,15 +4198,22 @@ static void TBInstall(void) {
         TBInstallClockContentsHooks();
     }
 
-        // 通知中心 / 横幅 / 锁屏 图标：NCBadgedIconView 是内容装载点
-        if (!gDoneNCBadge) {
+        // ★★ 0.15.76：通知中心图标 hook 整段【停用】。
+        //   用户实测：装上后收不到通知了 + SpringBoard 反复退出重启（自动注销）。
+        //   结论：在这台 17.2 上改 NCBadgedIconView 的图会破坏通知链路，风险远大于收益。
+        //   保留下面的代码仅作记录，不再执行（TBApplyEnabled(@"ApplyNotification") 也不生效）。
+        if (NO && !gDoneNCBadge) {
             gDoneNCBadge = YES;
             for (NSString *cn in @[ @"NCBadgedIconView", @"NCNotificationShortLookView",
                                     @"NCNotificationLongLookView", @"NCExpandedPlatterView" ]) {
                 Class c = NSClassFromString(cn);
                 if (!c) continue;
-                if (TBHasMethod(c, @"layoutSubviews")) {
-                    o_ncBadgedLayout = (void (*)(id, SEL))TBHook(c, @"layoutSubviews",
+                // ★ 0.15.76：不再 hook layoutSubviews（在布局事务里改 iconView.image/cornerRadius
+                //   会触发再布局，是"SpringBoard 反复退出重启/自动注销"的真凶）。
+                //   改为 didMoveToWindow（每个视图只来一次），且实际改图延后一个 runloop tick。
+                for (NSString *sel in @[ @"didMoveToWindow", @"_configureBadgedIconViewIfNecessary" ]) {
+                    if (!TBHasMethod(c, sel)) continue;
+                    o_ncBadgedLayout = (void (*)(id, SEL))TBHook(c, sel,
                                                                  (IMP)tb_ncBadgedLayout, "NC 图标");
                 }
             }
