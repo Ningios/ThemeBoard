@@ -1824,6 +1824,73 @@ static void tb_ncConfigure(id self, SEL _cmd, id arg) {
 
 static void TBRefreshVisibleTablesLight(NSString *why);
 
+// ---- 设置列表 App 行图标（0.16.0）----
+// 视频里的 View Hierarchy 实锤：设置列表每行是 `PSTableCell`，图标是它内置的
+//   `cell.imageView`（29×29），并且 `_imageLoader = nil`（同步设图、无异步覆盖）。
+// 而 `setupIconImageWithBundle:` 只对插件设置入口触发，App 行完全不经过那条通道 ——
+// 这就是"储存空间页有色、设置主页那列没色"的全部原因。
+static void (*o_psRetRefresh)(id, SEL, id);
+static void (*o_psRetSetSpec)(id, SEL, id);
+
+/// 从 PSSpecifier 取 bundleID（App 行的 identifier 就是包名）
+static NSString *TBBidFromAnySpecifier(id spec) {
+    if (!spec) return nil;
+    @try {
+        for (NSString *k in @[ @"identifier", @"bundleIdentifier" ]) {
+            if ([spec respondsToSelector:NSSelectorFromString(k)]) {
+                id v = ((id (*)(id, SEL))objc_msgSend)(spec, NSSelectorFromString(k));
+                if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) return v;
+            }
+        }
+        if ([spec respondsToSelector:NSSelectorFromString(@"propertyForKey:")]) {
+            for (NSString *k in @[ @"bundleID", @"applicationBundleIdentifier", @"id" ]) {
+                id v = ((id (*)(id, SEL, id))objc_msgSend)(spec, NSSelectorFromString(@"propertyForKey:"), k);
+                if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) return v;
+            }
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+/// 把某一行的图标换成主题图（只动 cell.imageView，不碰文字/角标）
+static void TBApplySettingsRowIcon(id cell, id spec) {
+    if (![cell isKindOfClass:[UITableViewCell class]]) return;
+    NSString *bid = TBBidFromAnySpecifier(spec);
+    if (!bid.length) return;
+    if (!TBEnabled() || TBSafeMode() || !TBUIKitIconEnabled()) return;
+    UIImage *img = TBImageForBundle(bid);
+    if (![img isKindOfClass:[UIImage class]]) return;
+    UIImageView *iv = ((UITableViewCell *)cell).imageView;
+    if (![iv isKindOfClass:[UIImageView class]]) return;
+    CGSize sz = iv.bounds.size;
+    if (sz.width < 8) sz = CGSizeMake(29, 29);
+    CGFloat sc = [UIScreen mainScreen].scale;
+    TBInfo info = { sz, sc, 0 };
+    UIImage *sized = TBFitCached(img, info, bid) ?: img;
+    if (iv.image == sized) return;
+    iv.image = sized;
+    iv.contentMode = UIViewContentModeScaleAspectFit;
+    TBLogOnce([@"setrow|" stringByAppendingString:bid], @"设置页图标(PSTableCell)：%@ 已替换（%.0fx%.0f）",
+              bid, sz.width, sz.height);
+}
+
+static void tb_psRefresh(id self, SEL _cmd, id spec) {
+    if (o_psRetRefresh) o_psRetRefresh(self, _cmd, spec);
+    @try {
+        TBApplySettingsRowIcon(self, spec);
+        // 保险：UIKit 有时在 layout 之后才把系统图写回 → 下一拍再补一次
+        __weak id wcell = self; id wspec = spec;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id c = wcell; if (c) TBApplySettingsRowIcon(c, wspec);
+        });
+    } @catch (NSException *e) {}
+}
+
+static void tb_psSetSpec(id self, SEL _cmd, id spec) {
+    if (o_psRetSetSpec) o_psRetSetSpec(self, _cmd, spec);
+    @try { TBApplySettingsRowIcon(self, spec); } @catch (NSException *e) {}
+}
+
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
     Method m = class_getInstanceMethod(cls, NSSelectorFromString(selName));
@@ -4317,6 +4384,16 @@ static void TBInstall(void) {
         if (TBHasMethod(spec, @"setupIconImageWithBundle:")) {
             o_setupIconBundle = (SetupIconFn)TBHook(spec, @"setupIconImageWithBundle:",
                                                     (IMP)tb_setupIconWithBundle, "PSSpecifier 设置页图标");
+        }
+        // 设置列表 App 行：PSTableCell 内置 imageView（29×29）才是真正的图标出口
+        Class psCell = NSClassFromString(@"PSTableCell");
+        if (psCell) {
+            if (TBHasMethod(psCell, @"refreshCellContentsWithSpecifier:"))
+                o_psRetRefresh = (void (*)(id, SEL, id))TBHook(psCell, @"refreshCellContentsWithSpecifier:",
+                                                               (IMP)tb_psRefresh, "PSTableCell 行图标");
+            if (TBHasMethod(psCell, @"setSpecifier:"))
+                o_psRetSetSpec = (void (*)(id, SEL, id))TBHook(psCell, @"setSpecifier:",
+                                                              (IMP)tb_psSetSpec, "PSTableCell setSpecifier");
         }
         if (TBHasMethod(spec, @"icon")) {
             o_specIcon = (UIImage *(*)(id, SEL))TBHook(spec, @"icon", (IMP)tb_specIcon, "PSSpecifier.icon");
