@@ -2029,9 +2029,13 @@ static void TBRefreshSettingsIconsBatch(NSString *why) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             NSMutableArray<UIView *> *stack = [NSMutableArray array];
-            for (UIView *w in [[UIApplication sharedApplication] windows]) [stack addObject:w];
+            // 0.16.9：只从 keyWindow 起扫、节点上限降到 120（原来扫所有窗口 400 节点，每 1.2s 跑一次有开销）
+            UIWindow *kw = nil;
+            @try { kw = [[UIApplication sharedApplication] keyWindow]; } @catch (NSException *e) {}
+            if (kw) [stack addObject:kw];
+            else for (UIView *w in [[UIApplication sharedApplication] windows]) [stack addObject:w];
             NSInteger n = 0, rows = 0;
-            while (stack.count && n < 400) {
+            while (stack.count && n < 120) {
                 UIView *v = stack.firstObject; [stack removeObjectAtIndex:0]; n++;
                 if ([v isKindOfClass:[UITableView class]]) {
                     UITableView *tv = (UITableView *)v;
@@ -4637,7 +4641,7 @@ static void TBInstall(void) {
         //   这里加一个很轻的定时补刷：每 1.2 秒只扫【可见行】并做一次字典比对，命中已正确就跳过。
         static NSTimer *sTimer = nil;
         if (!sTimer) {
-            sTimer = [NSTimer timerWithTimeInterval:1.2 repeats:YES block:^(NSTimer *t) {
+            sTimer = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) {
                 TBRefreshSettingsIconsBatch(@"定时");
             }];
             sTimer.tolerance = 0.3;
@@ -4645,7 +4649,7 @@ static void TBInstall(void) {
             [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
                                                               object:nil queue:[NSOperationQueue mainQueue]
                                                           usingBlock:^(NSNotification *n) { [sTimer invalidate]; }];
-            TBLog(@"设置页图标：已启动定时补刷（1.2s，只扫可见行）");
+            TBLog(@"设置页图标：已启动定时补刷（2.0s，只扫 keyWindow 可见行）");
         }
     }
 

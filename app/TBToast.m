@@ -120,13 +120,14 @@ static NSInteger _gToastGen = 0;
 
     CGFloat W = root.bounds.size.width;
     CGFloat H = root.bounds.size.height;
+    // ★ 0.16.9：胶囊改到【屏幕顶部】（导航栏下方）—— 底部位置会干扰上滑返回/退出手势。
     CGFloat topSafe = root.safeAreaInsets.top;
-    CGFloat y = H - kTBToastDockBottom - kTBToastDockH - kTBToastDockGap - kTBToastHeight;
-    if (y < topSafe + 8) y = topSafe + 8;      // 小屏兜底
+    CGFloat y = topSafe + 56.0;                 // 导航栏下方
+    if (y + kTBToastHeight > H - 40) y = MAX(topSafe + 8, H - 40 - kTBToastHeight);
     t.center = CGPointMake(W / 2.0, y + kTBToastHeight / 2.0);
     t.alpha = 0.0;
     t.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(0.94, 0.94),
-                                          CGAffineTransformMakeTranslation(0, 18));
+                                          CGAffineTransformMakeTranslation(0, -18));
     [root addSubview:t];
 
     UISpringTimingParameters *inP =
