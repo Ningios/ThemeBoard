@@ -4772,6 +4772,8 @@ static void TBRefreshVisibleTablesLight(NSString *why) {
     });
 }
 
+static void TBRefreshVisibleTablesLight(NSString *why);
+
 static void TBRunReload(NSUInteger mySeq, NSString *why) {
     NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
     TBLog(@"重活开始：%@", why);
