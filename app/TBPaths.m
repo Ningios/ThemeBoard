@@ -78,12 +78,18 @@ NSString *TBThemeBoardRoot(void) {
                      withIntermediateDirectories:YES attributes:nil error:&e2];
             TBPathLog(@"尝试根 %@ Themes=%d(%@) Assets=%d(%@)", jb, okT,
                       e1.localizedDescription ?: @"ok", okA, e2.localizedDescription ?: @"ok");
-            BOOL canWrite = [fm isWritableFileAtPath:jb];
-            if (okT && okA && canWrite) {
+            // 只要 Themes/Assets 真的建出来了（或已存在），就用它。
+            // 不要再依赖 isWritableFileAtPath：越狱路径上它对 mobile 属主目录也会返回 NO，
+            // 上一版就是因此把成功的根又判成"不可写"、退回沙盒（日志 Themes=1(ok) 却仍回退）。
+            BOOL haveT = [fm fileExistsAtPath:[jb stringByAppendingPathComponent:@"Themes"]];
+            BOOL haveA = [fm fileExistsAtPath:[jb stringByAppendingPathComponent:@"Assets"]];
+            if (haveT && haveA) {
                 root = jb;
-                TBPathLog(@"根目录 = %@（jbroot/Library）", root);
+                TBPathLog(@"根目录 = %@（jbroot/Library，写入测试=%d）", root,
+                          (int)[fm isWritableFileAtPath:jb]);
                 return;
             }
+            TBPathLog(@"jbroot 根不可用：Themes=%d Assets=%d", haveT, haveA);
             // <jbroot>/Library 可能是 root:wheel 0755 → mobile 建不了子目录。
             // 依次尝试：/var/jb/Library/ThemeBoard → 沙盒 Documents/ThemeBoard
             for (NSString *c in @[ @"/var/jb/Library/ThemeBoard" ]) {
