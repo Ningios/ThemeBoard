@@ -4163,15 +4163,11 @@ static void TBInstall(void) {
         TBInstallClockContentsHooks();
     }
 
-        // 通知中心图标：只挂 NCBadgedIconView 的内容装载方法（SystemBox 做法）
-        if (TBApplyEnabled(@"ApplyNotification")) {
-            Class ncb = NSClassFromString(@"NCBadgedIconView");
-            if (ncb && TBHasMethod(ncb, @"_configureBadgedIconViewIfNecessary")) {
-                o_ncConfigure = (void (*)(id, SEL, id))TBHook(ncb, @"_configureBadgedIconViewIfNecessary",
-                                                             (IMP)tb_ncConfigure, "NC 图标");
-            }
-        }
-
+        // ★★ 通知中心图标：0.15.78 起【彻底不做】。
+        //   实测（17.2.1）：SystemBox 那套 `NCBadgedIconView -_configureBadgedIconViewIfNecessary`
+        //   在这台设备上会导致「横幅不显示」，且替换日志 0 命中、SpringBoard 仍反复重启。
+        //   SnowBoard 的数据层方案（NCNotificationContent -icons）在 17.2 是 0 调用。
+        //   两条路都不可行 → 保命要紧，不做通知中心图标。
     // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）。
     // ★ 0.15.51 拷问修复：这个块原来被嵌进了上面 clockView 的 if 里（0.15.49 少一个闭括号），
     //   桌面上没有时钟图标视图时整个角标 hook 都装不上（替换/还原全失效，表现即 0.15.49 的
