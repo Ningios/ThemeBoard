@@ -1901,34 +1901,41 @@ static NSDictionary *gNameToBID;
 static BOOL sInIVHook = NO;
 
 static void TBBuildNameMap(void) {
-    // ★ 0.16.2：这个表在设置进程里要遍历所有已装 App（几十~几百个），
-    //   在 setImage: 里同步建会把主线程卡死（用户实测"设置滑不动"）。
-    //   改成后台队列建一次，建好前一律跳过替换。
+    // ★ 0.16.3：直接【按主题索引里的 bundleID】建「显示名→bundleID」表 —— 只查主题覆盖的 App，
+    //   既覆盖了系统 App（邮件/日历…allApplications 里常常没有），又快（百来条）。
     static BOOL building = NO;
     if (gNameToBID || building) return;
     building = YES;
+    NSArray *bids = nil;
+    [gLock lock];
+    TBLoadIndex();
+    bids = gIndex ? [gIndex allKeys] : nil;
+    [gLock unlock];
+    NSArray *snapshot = [bids copy];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSMutableDictionary *m = [NSMutableDictionary dictionary];
-        @try {
-            Class ws = NSClassFromString(@"LSApplicationWorkspace");
-            id w = ws ? ((id (*)(id, SEL))objc_msgSend)(ws, NSSelectorFromString(@"defaultWorkspace")) : nil;
-            NSArray *apps = w ? ((id (*)(id, SEL))objc_msgSend)(w, NSSelectorFromString(@"allApplications")) : nil;
-            for (id app in apps) {
-                @try {
-                    NSString *bid = ((id (*)(id, SEL))objc_msgSend)(app, NSSelectorFromString(@"bundleIdentifier"));
-                    if (![bid isKindOfClass:[NSString class]] || !bid.length) continue;
-                    for (NSString *sel in @[ @"localizedName", @"itemName" ]) {
-                        if (![app respondsToSelector:NSSelectorFromString(sel)]) continue;
-                        NSString *nm = ((id (*)(id, SEL))objc_msgSend)(app, NSSelectorFromString(sel));
-                        if ([nm isKindOfClass:[NSString class]] && nm.length) m[nm] = bid;
+        Class proxyCls = NSClassFromString(@"LSApplicationProxy");
+        SEL selProxy = NSSelectorFromString(@"applicationProxyForIdentifier:");
+        for (NSString *bid in snapshot) {
+            @try {
+                NSString *nm = nil;
+                if (proxyCls && [proxyCls respondsToSelector:selProxy]) {
+                    id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyCls, selProxy, bid);
+                    if (proxy) {
+                        for (NSString *s2 in @[ @"localizedName", @"itemName" ]) {
+                            if (![proxy respondsToSelector:NSSelectorFromString(s2)]) continue;
+                            id v = ((id (*)(id, SEL))objc_msgSend)(proxy, NSSelectorFromString(s2));
+                            if ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) { nm = v; break; }
+                        }
                     }
-                } @catch (NSException *e) {}
-            }
-        } @catch (NSException *e) {}
+                }
+                if (nm.length) m[nm] = bid;
+            } @catch (NSException *e) {}
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             gNameToBID = [m copy];
             building = NO;
-            TBLog(@"设置页图标：显示名映射表 %lu 条（后台构建完成）", (unsigned long)m.count);
+            TBLog(@"设置页图标：按主题索引建映射表 %lu 条", (unsigned long)m.count);
         });
     });
 }
