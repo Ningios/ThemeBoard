@@ -2108,45 +2108,6 @@ static void tb_ivSetImage(id self, SEL _cmd, id img) {
 }
 
 
-// ---- 通知中心【只观测】探针 ----
-static void (*o_ncProbe)(id, SEL);
-static void tb_ncProbe(id self, SEL _cmd) {
-    if (o_ncProbe) o_ncProbe(self, _cmd);
-    @try {
-        static int sMax = 0;
-        if (sMax >= 10) return;
-        sMax++;
-        NSMutableString *o = [NSMutableString string];
-        [o appendFormat:@"NC探针 #%d cls=%@ frame=%@", sMax, NSStringFromClass([self class]),
-                        NSStringFromCGRect(((UIView *)self).frame)];
-        @try {
-            id d = [self valueForKey:@"_badgedIconDescription"];
-            if (d) {
-                id bid = nil;
-                @try { bid = [d valueForKey:@"_bundleIdentifier"]; } @catch (NSException *e) {}
-                [o appendFormat:@" bid=%@", bid ?: @"(nil)"];
-            }
-        } @catch (NSException *e) {}
-        NSMutableArray *st = [NSMutableArray arrayWithObject:self];
-        NSInteger n = 0;
-        while (st.count && n < 20) {
-            UIView *v = st.firstObject; [st removeObjectAtIndex:0]; n++;
-            if ([v isKindOfClass:[UIImageView class]]) {
-                UIImageView *iv = (UIImageView *)v;
-                id ld = nil; BOOL mk = NO;
-                @try { ld = [iv valueForKey:@"_imageLoader"]; } @catch (NSException *e) {}
-                @try { mk = [[iv valueForKey:@"_masksTemplateImages"] boolValue]; } @catch (NSException *e) {}
-                [o appendFormat:@" | iv %@ f=%@ img=%@ ld=%@ mk=%d", NSStringFromClass([iv class]),
-                                NSStringFromCGRect(iv.frame),
-                                iv.image ? NSStringFromCGSize(iv.image.size) : @"nil",
-                                ld ? NSStringFromClass([ld class]) : @"nil", (int)mk];
-            }
-            [st addObjectsFromArray:[v.subviews copy]];
-        }
-        TBLog(@"%@", o);
-    } @catch (NSException *e) { }
-}
-
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
     Method m = class_getInstanceMethod(cls, NSSelectorFromString(selName));
@@ -4597,16 +4558,6 @@ static void TBInstall(void) {
     //   无任何效果 + 闪屏 + 自动注销。与 0.15.73/82/84/86 四次失败一致。
     //   结论（最终）：本机 17.2.1 上 NC 图标替换不可行，任何 NC* 类 hook 都会破坏通知系统。
     //   除非未来做真机运行时 dump 并找到安全插入点，否则不再尝试。
-
-    // 通知中心【只观测探针】：只打日志，不改图
-    {
-        Class ncb2 = NSClassFromString(@"NCBadgedIconView");
-        if (ncb2 && TBHasMethod(ncb2, @"didMoveToWindow")) {
-            o_ncProbe = (void (*)(id, SEL))TBHook(ncb2, @"didMoveToWindow", (IMP)tb_ncProbe, "NC 探针");
-        } else {
-            TBLog(@"NC探针：NCBadgedIconView 或 didMoveToWindow 不存在");
-        }
-    }
 
     // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）。
     // ★ 0.15.51 拷问修复：这个块原来被嵌进了上面 clockView 的 if 里（0.15.49 少一个闭括号），
