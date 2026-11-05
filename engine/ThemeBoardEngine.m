@@ -1822,6 +1822,8 @@ static void tb_ncConfigure(id self, SEL _cmd, id arg) {
     //   结论（最终）：本机 17.2.1 上 NC 图标替换不可行，任何 NC* 类 hook 都会破坏通知系统。
     //   除非未来做真机运行时 dump 并找到安全插入点，否则不再尝试。
 
+static void TBRefreshVisibleTablesLight(NSString *why);
+
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
     Method m = class_getInstanceMethod(cls, NSSelectorFromString(selName));
@@ -4771,8 +4773,6 @@ static void TBRefreshVisibleTablesLight(NSString *why) {
         } @catch (NSException *e) { }
     });
 }
-
-static void TBRefreshVisibleTablesLight(NSString *why);
 
 static void TBRunReload(NSUInteger mySeq, NSString *why) {
     NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
