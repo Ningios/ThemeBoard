@@ -4200,13 +4200,11 @@ static void TBInstall(void) {
         //   在这台设备上会导致「横幅不显示」，且替换日志 0 命中、SpringBoard 仍反复重启。
         //   SnowBoard 的数据层方案（NCNotificationContent -icons）在 17.2 是 0 调用。
         //   两条路都不可行 → 保命要紧，不做通知中心图标。
-    // 通知中心图标：只 hook NCNotificationContent -icons（长度守恒替换）
-    if (TBApplyEnabled(@"ApplyNotification")) {
-        Class ncc = NSClassFromString(@"NCNotificationContent");
-        if (ncc && TBHasMethod(ncc, @"icons")) {
-            o_ncIcons = (id (*)(id, SEL))TBHook(ncc, @"icons", (IMP)tb_ncIcons, "NC 图标");
-        }
-    }
+    // ★★★ 通知中心图标：永久移除（0.15.85）。
+    //   0.15.82（照 SB 返回单张）与 0.15.84（长度守恒逐张替换）两次都在真机上造成
+    //   「屏幕一黑一亮 / SpringBoard 崩溃循环」。说明本机 17.2.1 上 NCNotificationContent
+    //   -icons 的调用上下文（线程/缓存/频率）与我们实现不兼容，任何改动都会破坏通知系统。
+    //   结论：不再尝试。要做得先真机 dump 该方法的入参/返回值/线程，否则必崩。
     // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）。
     // ★ 0.15.51 拷问修复：这个块原来被嵌进了上面 clockView 的 if 里（0.15.49 少一个闭括号），
     //   桌面上没有时钟图标视图时整个角标 hook 都装不上（替换/还原全失效，表现即 0.15.49 的
