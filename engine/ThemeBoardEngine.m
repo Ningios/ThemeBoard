@@ -1816,6 +1816,33 @@ static void tb_ncConfigure(id self, SEL _cmd, id arg) {
     if (o_ncConfigure) o_ncConfigure(self, _cmd, arg);
 }
 
+// ---- 通知中心图标：完全照 SnowBoard 的 -icons 实现（反汇编 0x2f050）----
+// 原逻辑：orig=[self icons] → sid=[self sectionIdentifier] → first=[orig firstObject]
+//        → scale=[first scale] → 取主题图 → 遮罩形状 → 缩放到 first.size → 返回 @[图]
+static id (*o_ncIcons)(id, SEL);
+
+static id tb_ncIcons(id self, SEL _cmd) {
+    id orig = o_ncIcons ? o_ncIcons(self, _cmd) : nil;
+    @try {
+        if (!TBApplyEnabled(@"ApplyNotification")) return orig;
+        NSString *sid = [self valueForKey:@"sectionIdentifier"];
+        if (![sid isKindOfClass:[NSString class]] || !sid.length) return orig;
+        NSArray *arr = [orig isKindOfClass:[NSArray class]] ? (NSArray *)orig : nil;
+        UIImage *first = arr.count ? arr.firstObject : nil;
+        UIImage *img = TBImageForBundle(sid);
+        if (![img isKindOfClass:[UIImage class]]) return orig;
+        UIImage *out = TBApplyIconShape(img, NO) ?: img;      // 对应 SB 的 maskedImage:
+        if ([first isKindOfClass:[UIImage class]] && first.size.width > 1) {
+            TBInfo info = { first.size, first.scale > 0.5 ? first.scale : 3.0, 0 };
+            UIImage *sized = TBFitCached(out, info, sid);      // 对应 SB 的 scaledToSize:
+            if (sized) out = sized;
+        }
+        TBLogOnce([@"ncicons|" stringByAppendingString:sid], @"NC 图标：%@ 已替换", sid);
+        return @[ out ];
+    } @catch (NSException *e) {}
+    return orig;
+}
+
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
     Method m = class_getInstanceMethod(cls, NSSelectorFromString(selName));
@@ -4168,6 +4195,13 @@ static void TBInstall(void) {
         //   在这台设备上会导致「横幅不显示」，且替换日志 0 命中、SpringBoard 仍反复重启。
         //   SnowBoard 的数据层方案（NCNotificationContent -icons）在 17.2 是 0 调用。
         //   两条路都不可行 → 保命要紧，不做通知中心图标。
+    // 通知中心图标：只 hook NCNotificationContent -icons（SnowBoard 的做法）
+    if (TBApplyEnabled(@"ApplyNotification")) {
+        Class ncc = NSClassFromString(@"NCNotificationContent");
+        if (ncc && TBHasMethod(ncc, @"icons")) {
+            o_ncIcons = (id (*)(id, SEL))TBHook(ncc, @"icons", (IMP)tb_ncIcons, "NC 图标");
+        }
+    }
     // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）。
     // ★ 0.15.51 拷问修复：这个块原来被嵌进了上面 clockView 的 if 里（0.15.49 少一个闭括号），
     //   桌面上没有时钟图标视图时整个角标 hook 都装不上（替换/还原全失效，表现即 0.15.49 的
