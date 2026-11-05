@@ -1978,8 +1978,7 @@ static void tb_ivSetImage(id self, SEL _cmd, id img) {
             if ([pv isKindOfClass:[UITableViewCell class]]) { cell = (UITableViewCell *)pv; break; }
         }
         if (!cell) return;
-        if (objc_getAssociatedObject(cell, kTBDoneKey)) return;   // 一行只处理一次，避免 setImage 反复触发
-        objc_setAssociatedObject(cell, kTBDoneKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (objc_getAssociatedObject(cell, kTBDoneKey)) return;   // 只有"替换成功过"才打标记
         NSString *title = TBCellTitleText(cell);
         if (!title.length) return;
         if (!gTitleImg) gTitleImg = [NSMutableDictionary dictionary];
@@ -2004,6 +2003,7 @@ static void tb_ivSetImage(id self, SEL _cmd, id img) {
         iv.image = sized;
         iv.contentMode = UIViewContentModeScaleAspectFit;
         sInIVHook = NO;
+        objc_setAssociatedObject(cell, kTBDoneKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } @catch (NSException *e) { sInIVHook = NO; }
 }
 
