@@ -1816,84 +1816,11 @@ static void tb_ncConfigure(id self, SEL _cmd, id arg) {
     if (o_ncConfigure) o_ncConfigure(self, _cmd, arg);
 }
 
-// ---- 通知中心图标（0.15.88）：照 SystemX 1.5-8 的 NCBadgedIconView 段 ----
-// hook 全表对应的 5 个方法：initWithIconView: / ...andIntegerIndicatorBadgeWithCount: /
-// setIconView: / setBadgeViews: / layoutSubviews。姿势：init/set 换图 + layout 复用保护。
-static UIImage *TBNCThemeImage(NSString *bid) {
-    if (!bid.length) return nil;
-    UIImage *img = TBImageForBundle(bid);
-    if (![img isKindOfClass:[UIImage class]]) return nil;
-    return TBApplyIconEffects(TBApplyIconShape(img, NO)) ?: img;
-}
-static NSString *TBNCBidFromBadgedView(id view) {
-    @try {
-        id d = nil;
-        @try { d = [view valueForKey:@"_badgedIconDescription"]; } @catch (NSException *e) {}
-        if (!d) return nil;
-        id bid = nil;
-        @try { bid = [d valueForKey:@"_bundleIdentifier"]; } @catch (NSException *e) {}
-        return ([bid isKindOfClass:[NSString class]] && [(NSString *)bid length]) ? bid : nil;
-    } @catch (NSException *e) { return nil; }
-}
-static void TBNCApplyToView(id badgedView) {
-    @try {
-        NSString *bid = TBNCBidFromBadgedView(badgedView);
-        if (!bid.length) return;
-        UIImage *out = TBNCThemeImage(bid);
-        if (!out) return;
-        id iconView = nil;
-        @try { iconView = [badgedView valueForKey:@"_iconView"]; } @catch (NSException *e) {}
-        @try { if (!iconView) iconView = [badgedView valueForKey:@"iconView"]; } @catch (NSException *e) {}
-        if (![iconView isKindOfClass:[UIImageView class]]) return;
-        UIImageView *iv = (UIImageView *)iconView;
-        if (iv.image == out) return;
-        iv.image = out;
-        iv.contentMode = UIViewContentModeScaleAspectFit;
-        CGFloat side = MIN(iv.bounds.size.width, iv.bounds.size.height);
-        if (side > 1) {
-            iv.layer.cornerRadius = side * 0.2237;
-            iv.layer.cornerCurve = kCACornerCurveContinuous;
-            iv.layer.masksToBounds = YES;
-        }
-        TBLogOnce([@"nc|" stringByAppendingString:bid], @"NC 图标：%@ 已替换", bid);
-    } @catch (NSException *e) {}
-}
-static void (*o_ncInit)(id, SEL, id);
-static void tb_ncInit(id self, SEL _cmd, id iconView) {
-    if (o_ncInit) o_ncInit(self, _cmd, iconView);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if ([self isKindOfClass:NSClassFromString(@"NCBadgedIconView")]) TBNCApplyToView(self);
-    });
-}
-static void (*o_ncInitBadge)(id, SEL, id, NSInteger);
-static void tb_ncInitBadge(id self, SEL _cmd, id iconView, NSInteger count) {
-    if (o_ncInitBadge) o_ncInitBadge(self, _cmd, iconView, count);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if ([self isKindOfClass:NSClassFromString(@"NCBadgedIconView")]) TBNCApplyToView(self);
-    });
-}
-static void (*o_ncSetIconView)(id, SEL, id);
-static void tb_ncSetIconView(id self, SEL _cmd, id iconView) {
-    if (o_ncSetIconView) o_ncSetIconView(self, _cmd, iconView);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if ([self isKindOfClass:NSClassFromString(@"NCBadgedIconView")]) TBNCApplyToView(self);
-    });
-}
-static void (*o_ncSetBadgeViews)(id, SEL, id);
-static void tb_ncSetBadgeViews(id self, SEL _cmd, id views) {
-    if (o_ncSetBadgeViews) o_ncSetBadgeViews(self, _cmd, views);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if ([self isKindOfClass:NSClassFromString(@"NCBadgedIconView")]) TBNCApplyToView(self);
-    });
-}
-static void (*o_ncLayout)(id, SEL);
-static void tb_ncLayout(id self, SEL _cmd) {
-    if (o_ncLayout) o_ncLayout(self, _cmd);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if ([self isKindOfClass:NSClassFromString(@"NCBadgedIconView")]) TBNCApplyToView(self);
-    });
-}
-
+    // ★★★ 通知中心图标：0.15.89 起永久封存。
+    //   照 SystemX 1.5-8 的 NCBadgedIconView 五连 hook（init×2/set×2/layout）实测：
+    //   无任何效果 + 闪屏 + 自动注销。与 0.15.73/82/84/86 四次失败一致。
+    //   结论（最终）：本机 17.2.1 上 NC 图标替换不可行，任何 NC* 类 hook 都会破坏通知系统。
+    //   除非未来做真机运行时 dump 并找到安全插入点，否则不再尝试。
 
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
@@ -4242,22 +4169,12 @@ static void TBInstall(void) {
         TBInstallClockContentsHooks();
     }
 
-    // 通知中心图标：照 SystemX 的 NCBadgedIconView 段（init/set 换图 + layout 复用保护）
-    if (TBApplyEnabled(@"ApplyNotification")) {
-        Class ncb = NSClassFromString(@"NCBadgedIconView");
-        if (ncb) {
-            if (TBHasMethod(ncb, @"initWithIconView:"))
-                o_ncInit = (void (*)(id, SEL, id))TBHook(ncb, @"initWithIconView:", (IMP)tb_ncInit, "NC 图标");
-            if (TBHasMethod(ncb, @"initWithIconView:andIntegerIndicatorBadgeWithCount:"))
-                o_ncInitBadge = (void (*)(id, SEL, id, NSInteger))TBHook(ncb, @"initWithIconView:andIntegerIndicatorBadgeWithCount:", (IMP)tb_ncInitBadge, "NC 图标");
-            if (TBHasMethod(ncb, @"setIconView:"))
-                o_ncSetIconView = (void (*)(id, SEL, id))TBHook(ncb, @"setIconView:", (IMP)tb_ncSetIconView, "NC 图标");
-            if (TBHasMethod(ncb, @"setBadgeViews:"))
-                o_ncSetBadgeViews = (void (*)(id, SEL, id))TBHook(ncb, @"setBadgeViews:", (IMP)tb_ncSetBadgeViews, "NC 图标");
-            if (TBHasMethod(ncb, @"layoutSubviews"))
-                o_ncLayout = (void (*)(id, SEL))TBHook(ncb, @"layoutSubviews", (IMP)tb_ncLayout, "NC 图标");
-        }
-    }
+    // ★★★ 通知中心图标：0.15.89 起永久封存。
+    //   照 SystemX 1.5-8 的 NCBadgedIconView 五连 hook（init×2/set×2/layout）实测：
+    //   无任何效果 + 闪屏 + 自动注销。与 0.15.73/82/84/86 四次失败一致。
+    //   结论（最终）：本机 17.2.1 上 NC 图标替换不可行，任何 NC* 类 hook 都会破坏通知系统。
+    //   除非未来做真机运行时 dump 并找到安全插入点，否则不再尝试。
+
     // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）。
     // ★ 0.15.51 拷问修复：这个块原来被嵌进了上面 clockView 的 if 里（0.15.49 少一个闭括号），
     //   桌面上没有时钟图标视图时整个角标 hook 都装不上（替换/还原全失效，表现即 0.15.49 的
