@@ -1823,6 +1823,7 @@ static void tb_ncConfigure(id self, SEL _cmd, id arg) {
     //   除非未来做真机运行时 dump 并找到安全插入点，否则不再尝试。
 
 static void TBRefreshVisibleTablesLight(NSString *why);
+static void TBRefreshSettingsIconsBatch(NSString *why);
 
 // ---- 设置列表 App 行图标（0.16.0）----
 // 视频里的 View Hierarchy 实锤：设置列表每行是 `PSTableCell`，图标是它内置的
@@ -1959,6 +1960,61 @@ static NSString *TBCellTitleText(id cell) {
         [stack addObjectsFromArray:[v.subviews copy]];
     }
     return nil;
+}
+
+/// 批量替换：只扫描"屏幕上可见的表格行"，按行标题换成主题图标。
+/// 不进 setImage: 热路径，所以滚动时零开销。
+static void TBApplyIconToCellByTitle(UITableViewCell *cell) {
+    @try {
+        if (!cell) return;
+        NSString *title = TBCellTitleText(cell);
+        if (!title.length) return;
+        if (!gNameToBID) { TBBuildNameMap(); return; }
+        if (!gTitleImg) gTitleImg = [NSMutableDictionary dictionary];
+        id cached = gTitleImg[title];
+        UIImage *sized = nil;
+        if ([cached isKindOfClass:[UIImage class]]) sized = cached;
+        else if (cached) return;
+        else {
+            NSString *bid = gNameToBID[title];
+            UIImage *theme = bid.length ? TBImageForBundle(bid) : nil;
+            if (![theme isKindOfClass:[UIImage class]]) { gTitleImg[title] = [NSNull null]; return; }
+            CGSize sz = CGSizeMake(29, 29);
+            UIImageView *probe = cell.imageView;
+            if ([probe isKindOfClass:[UIImageView class]] && probe.bounds.size.width > 8) sz = probe.bounds.size;
+            TBInfo info = { sz, [UIScreen mainScreen].scale, 0 };
+            sized = TBFitCached(theme, info, bid) ?: theme;
+            gTitleImg[title] = sized ?: (id)[NSNull null];
+            TBLogOnce([@"ivrow|" stringByAppendingString:bid], @"设置页图标(批量)：%@（行「%@」）已替换", bid, title);
+        }
+        if (![sized isKindOfClass:[UIImage class]]) return;
+        for (UIImageView *iv in @[ cell.imageView ?: [NSNull null] ]) {
+            if (![iv isKindOfClass:[UIImageView class]]) continue;
+            if (iv.image != sized) { iv.image = sized; iv.contentMode = UIViewContentModeScaleAspectFit; }
+        }
+    } @catch (NSException *e) {}
+}
+
+static void TBRefreshSettingsIconsBatch(NSString *why) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            NSMutableArray<UIView *> *stack = [NSMutableArray array];
+            for (UIView *w in [[UIApplication sharedApplication] windows]) [stack addObject:w];
+            NSInteger n = 0, rows = 0;
+            while (stack.count && n < 400) {
+                UIView *v = stack.firstObject; [stack removeObjectAtIndex:0]; n++;
+                if ([v isKindOfClass:[UITableView class]]) {
+                    UITableView *tv = (UITableView *)v;
+                    for (NSIndexPath *ip in [tv indexPathsForVisibleRows]) {
+                        UITableViewCell *c = [tv cellForRowAtIndexPath:ip];
+                        if (c) { TBApplyIconToCellByTitle(c); rows++; }
+                    }
+                }
+                [stack addObjectsFromArray:[v.subviews copy]];
+            }
+            if (rows) TBLog(@"设置页图标(批量 %@)：扫描 %ld 行", why ?: @"?", (long)rows);
+        } @catch (NSException *e) { }
+    });
 }
 
 static void (*o_ivSetImage)(id, SEL, id);
@@ -4513,14 +4569,8 @@ static void TBInstall(void) {
                                                     (IMP)tb_setupIconWithBundle, "PSSpecifier 设置页图标");
         }
         // 设置列表 App 行：PSTableCell 内置 imageView（29×29）才是真正的图标出口
-        // 设置列表 App 行：只在设置进程里 hook UIImageView -setImage:（用行标题→bundleID 映射替换）
-        if ([[NSProcessInfo processInfo].processName isEqualToString:@"Preferences"]) {
-            Class ivCls = NSClassFromString(@"UIImageView");
-            if (ivCls && TBHasMethod(ivCls, @"setImage:")) {
-                o_ivSetImage = (void (*)(id, SEL, id))TBHook(ivCls, @"setImage:", (IMP)tb_ivSetImage,
-                                                            "设置页行图标 UIImageView");
-            }
-        }
+        // ★ 0.16.6：**不再** hook UIImageView -setImage:（那是滚动热路径，图/箭头/占位都要过一遍 → 设置卡死）。
+        //   改为"批量扫描可见行"的方式，见 TBRefreshSettingsIconsBatch()。
 
         Class psCell = NSClassFromString(@"PSTableCell");
         if (psCell) {
@@ -4539,12 +4589,12 @@ static void TBInstall(void) {
         }
     }
 
-    // 设置进程：启动后自动轻量刷新两次 —— 让设置页那列 App 图标重新取图（不必先去 App 里点应用）
+    // 设置进程：启动后（以及收到 changed 后）批量替换可见行的图标
     if ([[NSProcessInfo processInfo].processName isEqualToString:@"Preferences"]) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ TBRefreshVisibleTablesLight(@"启动1"); });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ TBRefreshVisibleTablesLight(@"启动2"); });
+        for (double d = 0.9; d <= 3.2; d += 0.7) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ TBRefreshSettingsIconsBatch(@"启动"); });
+        }
     }
 
     // UIActivity 分享面板图标（运行时检测）
@@ -5006,6 +5056,8 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
             [gLock unlock];
             TBLog(@"重活跳过（非 SpringBoard，只做轻量刷新）：%@", why);
             TBRefreshVisibleTablesLight(why);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ TBRefreshSettingsIconsBatch(@"通知"); });
             return;
         }
     }
