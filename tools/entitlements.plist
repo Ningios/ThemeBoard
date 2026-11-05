@@ -4,6 +4,14 @@
 <dict>
     <key>platform-application</key>
     <true/>
+    <key>com.apple.private.security.no-container</key>
+    <true/>
+    <key>com.apple.private.security.storage.MobileDocuments</key>
+    <true/>
+    <key>com.apple.private.security.storage.AppBundles</key>
+    <true/>
+    <key>com.apple.private.skip-library-validation</key>
+    <true/>
     <key>com.apple.private.security.no-sandbox</key>
     <true/>
     <key>com.apple.private.security.storage.AppDataContainers</key>
