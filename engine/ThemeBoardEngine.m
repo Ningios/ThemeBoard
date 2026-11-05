@@ -1816,30 +1816,35 @@ static void tb_ncConfigure(id self, SEL _cmd, id arg) {
     if (o_ncConfigure) o_ncConfigure(self, _cmd, arg);
 }
 
-// ---- 通知中心图标：完全照 SnowBoard 的 -icons 实现（反汇编 0x2f050）----
-// 原逻辑：orig=[self icons] → sid=[self sectionIdentifier] → first=[orig firstObject]
-//        → scale=[first scale] → 取主题图 → 遮罩形状 → 缩放到 first.size → 返回 @[图]
+// ---- 通知中心图标（0.15.84）：长度守恒地替换 icons 数组 ----
+// 语义（用户实测）：有头像的通知用小图标、没头像的用大图标；数组长度/顺序不固定。
+// 规则：逐元素替换，长度与顺序严格不变；每张用【它自己的】size/scale；单张失败保留原图。
 static id (*o_ncIcons)(id, SEL);
 
 static id tb_ncIcons(id self, SEL _cmd) {
     id orig = o_ncIcons ? o_ncIcons(self, _cmd) : nil;
+    NSArray *arr = [orig isKindOfClass:[NSArray class]] ? (NSArray *)orig : nil;
+    if (!arr.count || !TBApplyEnabled(@"ApplyNotification")) return orig;
     @try {
-        if (!TBApplyEnabled(@"ApplyNotification")) return orig;
         NSString *sid = [self valueForKey:@"sectionIdentifier"];
         if (![sid isKindOfClass:[NSString class]] || !sid.length) return orig;
-        NSArray *arr = [orig isKindOfClass:[NSArray class]] ? (NSArray *)orig : nil;
-        UIImage *first = arr.count ? arr.firstObject : nil;
-        UIImage *img = TBImageForBundle(sid);
-        if (![img isKindOfClass:[UIImage class]]) return orig;
-        UIImage *out = TBApplyIconShape(img, NO) ?: img;      // 对应 SB 的 maskedImage:
-        if ([first isKindOfClass:[UIImage class]] && first.size.width > 1) {
-            TBInfo info = { first.size, first.scale > 0.5 ? first.scale : 3.0, 0 };
-            UIImage *sized = TBFitCached(out, info, sid);      // 对应 SB 的 scaledToSize:
-            if (sized) out = sized;
+        UIImage *theme = TBImageForBundle(sid);
+        if (![theme isKindOfClass:[UIImage class]]) return orig;
+        UIImage *shaped = TBApplyIconShape(theme, NO) ?: theme;
+        NSMutableArray *out = [NSMutableArray arrayWithCapacity:arr.count];
+        for (UIImage *img in arr) {
+            if (![img isKindOfClass:[UIImage class]] || img.size.width < 1) { [out addObject:img]; continue; }
+            TBInfo info = { img.size, img.scale > 0.5 ? img.scale : 3.0, 0 };
+            UIImage *sized = TBFitCached(shaped, info, sid);
+            [out addObject:(sized ?: img)];
         }
-        TBLogOnce([@"ncicons|" stringByAppendingString:sid], @"NC 图标：%@ 已替换", sid);
-        return @[ out ];
-    } @catch (NSException *e) {}
+        TBLogOnce([@"ncicons|" stringByAppendingString:sid],
+                  @"NC 图标：%@ 替换 %lu 张（原 %lu 张）", sid,
+                  (unsigned long)out.count, (unsigned long)arr.count);
+        return out;
+    } @catch (NSException *e) {
+        TBLogOnce(@"ncicons.ex", @"NC 图标：异常 %@（原样返回）", e.reason ?: e.name);
+    }
     return orig;
 }
 
@@ -4195,8 +4200,13 @@ static void TBInstall(void) {
         //   在这台设备上会导致「横幅不显示」，且替换日志 0 命中、SpringBoard 仍反复重启。
         //   SnowBoard 的数据层方案（NCNotificationContent -icons）在 17.2 是 0 调用。
         //   两条路都不可行 → 保命要紧，不做通知中心图标。
-    // ★★ 通知中心图标：0.15.83 起【永久停用】。照 SnowBoard 的 -icons 实现后真机表现为
-    //   「屏幕一黑一亮反复闪」（SpringBoard 崩溃循环）。结论：本机 17.2.1 上不要碰 -icons。
+    // 通知中心图标：只 hook NCNotificationContent -icons（长度守恒替换）
+    if (TBApplyEnabled(@"ApplyNotification")) {
+        Class ncc = NSClassFromString(@"NCNotificationContent");
+        if (ncc && TBHasMethod(ncc, @"icons")) {
+            o_ncIcons = (id (*)(id, SEL))TBHook(ncc, @"icons", (IMP)tb_ncIcons, "NC 图标");
+        }
+    }
     // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）。
     // ★ 0.15.51 拷问修复：这个块原来被嵌进了上面 clockView 的 if 里（0.15.49 少一个闭括号），
     //   桌面上没有时钟图标视图时整个角标 hook 都装不上（替换/还原全失效，表现即 0.15.49 的
