@@ -1891,6 +1891,94 @@ static void tb_psSetSpec(id self, SEL _cmd, id spec) {
     @try { TBApplySettingsRowIcon(self, spec); } @catch (NSException *e) {}
 }
 
+// ---- 设置列表 App 行图标（0.16.1）----
+// 视频实锤：17.x 设置列表由 PSUIPrefsListController + UITableViewModel 驱动，
+//   旧接口 refreshCellContentsWithSpecifier: 不触发；行的图标是 cell 里那个 29×29 的
+//   UIImageView，而且 _imageLoader = nil（同步直接 setImage）。
+// 方案：在【设置进程】里 hook UIImageView -setImage:，用「行标题 = App 显示名」映射回
+//   bundleID（LSApplicationWorkspace 建一次表并缓存），命中主题就替换成主题图。
+static NSDictionary *gNameToBID;
+static BOOL sInIVHook = NO;
+
+static void TBBuildNameMap(void) {
+    if (gNameToBID) return;
+    NSMutableDictionary *m = [NSMutableDictionary dictionary];
+    @try {
+        Class ws = NSClassFromString(@"LSApplicationWorkspace");
+        id w = ws ? ((id (*)(id, SEL))objc_msgSend)(ws, NSSelectorFromString(@"defaultWorkspace")) : nil;
+        NSArray *apps = w ? ((id (*)(id, SEL))objc_msgSend)(w, NSSelectorFromString(@"allApplications")) : nil;
+        for (id app in apps) {
+            @try {
+                NSString *bid = ((id (*)(id, SEL))objc_msgSend)(app, NSSelectorFromString(@"bundleIdentifier"));
+                if (![bid isKindOfClass:[NSString class]] || !bid.length) continue;
+                for (NSString *sel in @[ @"localizedName", @"itemName", @"applicationIdentifier" ]) {
+                    if (![app respondsToSelector:NSSelectorFromString(sel)]) continue;
+                    NSString *nm = ((id (*)(id, SEL))objc_msgSend)(app, NSSelectorFromString(sel));
+                    if ([nm isKindOfClass:[NSString class]] && nm.length) m[nm] = bid;
+                }
+            } @catch (NSException *e) {}
+        }
+    } @catch (NSException *e) {}
+    gNameToBID = [m copy];
+    TBLog(@"设置页图标：显示名映射表 %lu 条", (unsigned long)m.count);
+}
+
+/// 取 cell 的标题文字（新架构里不一定用 textLabel，所以再兜底找第一个 UILabel）
+static NSString *TBCellTitleText(id cell) {
+    @try {
+        if ([cell respondsToSelector:@selector(textLabel)]) {
+            UILabel *l = ((UILabel * (*)(id, SEL))objc_msgSend)(cell, @selector(textLabel));
+            if ([l isKindOfClass:[UILabel class]] && l.text.length) return l.text;
+        }
+    } @catch (NSException *e) {}
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:cell];
+    NSInteger n = 0;
+    while (stack.count && n < 40) {
+        UIView *v = stack.firstObject; [stack removeObjectAtIndex:0]; n++;
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *l = (UILabel *)v;
+            if (l.text.length) return l.text;
+        }
+        [stack addObjectsFromArray:[v.subviews copy]];
+    }
+    return nil;
+}
+
+static void (*o_ivSetImage)(id, SEL, id);
+static void tb_ivSetImage(id self, SEL _cmd, id img) {
+    if (o_ivSetImage) o_ivSetImage(self, _cmd, img);
+    if (sInIVHook) return;
+    @try {
+        if (!TBEnabled() || TBSafeMode() || !TBUIKitIconEnabled()) return;
+        UIImageView *iv = (UIImageView *)self;
+        if (![iv isKindOfClass:[UIImageView class]]) return;
+        CGSize sz = iv.bounds.size;
+        if (sz.width < 8 || sz.width > 64 || fabs(sz.width - sz.height) > 4) return;   // 只看近方形小图
+        UITableViewCell *cell = nil;
+        UIView *pv = iv.superview;
+        for (int d = 0; pv && d < 6; d++, pv = pv.superview) {
+            if ([pv isKindOfClass:[UITableViewCell class]]) { cell = (UITableViewCell *)pv; break; }
+        }
+        if (!cell) return;
+        NSString *title = TBCellTitleText(cell);
+        if (!title.length) return;
+        TBBuildNameMap();
+        NSString *bid = gNameToBID[title];
+        if (!bid.length) return;
+        UIImage *theme = TBImageForBundle(bid);
+        if (![theme isKindOfClass:[UIImage class]]) return;
+        TBInfo info = { sz, [UIScreen mainScreen].scale, 0 };
+        UIImage *sized = TBFitCached(theme, info, bid) ?: theme;
+        if (iv.image == sized) return;
+        sInIVHook = YES;
+        iv.image = sized;
+        iv.contentMode = UIViewContentModeScaleAspectFit;
+        sInIVHook = NO;
+        TBLogOnce([@"ivrow|" stringByAppendingString:bid], @"设置页图标(UIImageView)：%@（行「%@」）已替换",
+                  bid, title);
+    } @catch (NSException *e) { sInIVHook = NO; }
+}
+
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
     Method m = class_getInstanceMethod(cls, NSSelectorFromString(selName));
@@ -4386,6 +4474,15 @@ static void TBInstall(void) {
                                                     (IMP)tb_setupIconWithBundle, "PSSpecifier 设置页图标");
         }
         // 设置列表 App 行：PSTableCell 内置 imageView（29×29）才是真正的图标出口
+        // 设置列表 App 行：只在设置进程里 hook UIImageView -setImage:（用行标题→bundleID 映射替换）
+        if ([[NSProcessInfo processInfo].processName isEqualToString:@"Preferences"]) {
+            Class ivCls = NSClassFromString(@"UIImageView");
+            if (ivCls && TBHasMethod(ivCls, @"setImage:")) {
+                o_ivSetImage = (void (*)(id, SEL, id))TBHook(ivCls, @"setImage:", (IMP)tb_ivSetImage,
+                                                            "设置页行图标 UIImageView");
+            }
+        }
+
         Class psCell = NSClassFromString(@"PSTableCell");
         if (psCell) {
             if (TBHasMethod(psCell, @"refreshCellContentsWithSpecifier:"))
