@@ -39,12 +39,17 @@ static NSString *TBJBRootThemeBoard(void) {
         NSFileManager *fm = [NSFileManager defaultManager];
         NSString *appDir = @"/var/containers/Bundle/Application";
         NSArray *kids = [fm contentsOfDirectoryAtPath:appDir error:NULL];
+        // ★ 0.15.72：不能再要求 Library/ThemeBoard 已存在（第一次跑时它还不存在 →
+        //   之前就因此一直"未找到 jbroot"，回退到容器 Documents 里去了）。
+        //   只要能找到一个 .jbroot-* 目录，就拼 <jbroot>/Library/ThemeBoard 返回。
         for (NSString *d in kids) {
             if (![d hasPrefix:@".jbroot-"]) continue;
-            NSString *p = [appDir stringByAppendingPathComponent:
-                           [d stringByAppendingPathComponent:@"Library/ThemeBoard"]];
+            NSString *jbroot = [appDir stringByAppendingPathComponent:d];
             BOOL isDir = NO;
-            if ([fm fileExistsAtPath:p isDirectory:&isDir] && isDir) { r = p; break; }
+            if (![fm fileExistsAtPath:jbroot isDirectory:&isDir] || !isDir) continue;
+            // Library 存在就用它；不存在也照样拼（后面 createDirectory withIntermediate 会建）
+            r = [jbroot stringByAppendingPathComponent:@"Library/ThemeBoard"];
+            break;
         }
     });
     return r;
@@ -74,8 +79,9 @@ NSString *TBThemeBoardRoot(void) {
             TBPathLog(@"根目录 = %@（jbroot）", root);
             return;
         }
-        // 找不到 jbroot（理论不会）：退 App 容器
-        root = TBAppContainerRoot() ?: @"/var/containers/Bundle/Application/Library/ThemeBoard";
+        // 找不到 .jbroot-*（理论不会）：用 /var/jb 这个标准 rootless 软链，
+        // 绝不再退回 App 容器（那会变成 <jbroot>/var/mobile/Documents/ThemeBoard，用户明确否掉）
+        root = @"/var/jb/Library/ThemeBoard";
         [fm createDirectoryAtPath:[root stringByAppendingPathComponent:@"Themes"]
            withIntermediateDirectories:YES attributes:nil error:NULL];
         [fm createDirectoryAtPath:[root stringByAppendingPathComponent:@"Assets"]
