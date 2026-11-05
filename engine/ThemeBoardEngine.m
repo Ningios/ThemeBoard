@@ -4652,6 +4652,24 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n,
 static void TBRunReload(NSUInteger mySeq, NSString *why) {
     NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
     TBLog(@"重活开始：%@", why);
+    // ★ 0.15.92：重活只在 SpringBoard（真正有桌面图标缓存的进程）里做。
+    //   日志实锤：App 进程/其它进程收到 changed 也会跑「重建索引 + 清缓存 + 通知重取」，
+    //   主线程被占住 1~2 秒 —— 表现就是「点了应用主题后，弹窗还在时点不动，等它消失才恢复」。
+    {
+        static int sHeavyHost = -1;
+        if (sHeavyHost < 0) {
+            NSString *pn = [NSProcessInfo processInfo].processName ?: @"";
+            sHeavyHost = [pn isEqualToString:@"SpringBoard"] ? 1 : 0;
+            TBLog(@"重活宿主=%@ → %@", pn, sHeavyHost ? @"执行" : @"只清本地索引（跳过清缓存/通知重取/heal/角标/时钟）");
+        }
+        if (!sHeavyHost) {
+            [gLock lock];
+            gIndex = nil; gBundleRes = nil; gBundleResTheme = nil;
+            [gLock unlock];
+            TBLog(@"重活跳过（非 SpringBoard）：%@", why);
+            return;
+        }
+    }
     [gLock lock];
     gIndex = nil;
     gBundleRes = nil;          // 强制重建资源表（含时钟/日历素材）
