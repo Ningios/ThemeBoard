@@ -3255,6 +3255,67 @@ static id tb_clockIconImage(id self, SEL _cmd, TBClockInfo info, BOOL mask) {
 typedef void (*SetupIconFn)(id, SEL, id);
 static SetupIconFn o_setupIconBundle, o_setupIconPath;
 
+/// 从 PSSpecifier 取 bundleID：identifier / bundleID / propertyForKey:
+static NSString *TBBidFromSpecifier(id spec) {
+    @try {
+        for (NSString *k in @[ @"identifier", @"bundleIdentifier" ]) {
+            if ([spec respondsToSelector:NSSelectorFromString(k)]) {
+                id v = ((id (*)(id, SEL))objc_msgSend)(spec, NSSelectorFromString(k));
+                if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) return v;
+            }
+        }
+        if ([spec respondsToSelector:NSSelectorFromString(@"propertyForKey:")]) {
+            id v = ((id (*)(id, SEL, id))objc_msgSend)(spec, NSSelectorFromString(@"propertyForKey:"), @"bundleID");
+            if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) return v;
+            v = ((id (*)(id, SEL, id))objc_msgSend)(spec, NSSelectorFromString(@"propertyForKey:"), @"applicationBundleIdentifier");
+            if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) return v;
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+/// 按原图尺寸返回主题图（0.15.93：设置主页 App 列表的图标是 specifier.icon 提供的，
+/// setupIconImageWithBundle: 在 17.2 上不触发，所以补 getter/setter 两条）
+static UIImage *TBThemedIconLike(UIImage *orig, NSString *bid) {
+    if (!bid.length) return nil;
+    if (!TBUIKitIconEnabled() || TBSafetyOff()) return nil;
+    UIImage *img = TBImageForBundle(bid);
+    if (![img isKindOfClass:[UIImage class]]) return nil;
+    UIImage *out = TBApplyIconEffects(TBApplyIconShape(img, NO)) ?: img;
+    if ([orig isKindOfClass:[UIImage class]] && orig.size.width > 1) {
+        TBInfo info = { orig.size, orig.scale > 0.5 ? orig.scale : 3.0, 0 };
+        UIImage *sized = TBFitCached(out, info, bid);
+        if (sized) out = sized;
+    }
+    return out;
+}
+
+static UIImage *(*o_specIcon)(id, SEL);
+static UIImage *tb_specIcon(id self, SEL _cmd) {
+    UIImage *orig = o_specIcon ? o_specIcon(self, _cmd) : nil;
+    @try {
+        NSString *bid = TBBidFromSpecifier(self);
+        UIImage *out = TBThemedIconLike(orig, bid);
+        if (out) {
+            TBLogOnce([@"specicon|" stringByAppendingString:bid], @"设置页图标(specifier.icon)：%@ 已替换", bid);
+            return out;
+        }
+    } @catch (NSException *e) {}
+    return orig;
+}
+
+static void (*o_specSetIcon)(id, SEL, id);
+static void tb_specSetIcon(id self, SEL _cmd, id icon) {
+    @try {
+        NSString *bid = TBBidFromSpecifier(self);
+        UIImage *out = TBThemedIconLike((UIImage *)icon, bid);
+        if (out) { if (o_specSetIcon) o_specSetIcon(self, _cmd, out); return; }
+    } @catch (NSException *e) {}
+    if (o_specSetIcon) o_specSetIcon(self, _cmd, icon);
+}
+
+static BOOL TBSafetyOff(void) { return !TBEnabled() || TBSafeMode(); }
+
 static void tb_setupIconWithBundle(id self, SEL _cmd, id bundle) {
     if (o_setupIconBundle) o_setupIconBundle(self, _cmd, bundle);
     if (!TBEnabled() || TBSafeMode() || !TBUIKitIconEnabled()) return;
@@ -4228,6 +4289,12 @@ static void TBInstall(void) {
         if (TBHasMethod(spec, @"setupIconImageWithBundle:")) {
             o_setupIconBundle = (SetupIconFn)TBHook(spec, @"setupIconImageWithBundle:",
                                                     (IMP)tb_setupIconWithBundle, "PSSpecifier 设置页图标");
+        }
+        if (TBHasMethod(spec, @"icon")) {
+            o_specIcon = (UIImage *(*)(id, SEL))TBHook(spec, @"icon", (IMP)tb_specIcon, "PSSpecifier.icon");
+        }
+        if (TBHasMethod(spec, @"setIcon:")) {
+            o_specSetIcon = (void (*)(id, SEL, id))TBHook(spec, @"setIcon:", (IMP)tb_specSetIcon, "PSSpecifier.setIcon");
         }
     }
 
