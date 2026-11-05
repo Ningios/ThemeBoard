@@ -2370,6 +2370,16 @@ static NSInteger TBHealOneView(UIView *v, NSMutableArray *iconsOut) {
 /// + 时钟特殊处理），应用主题回到桌面正好撞上这一大坨 → 掉帧卡顿。
 /// 现在：收集（一次快照）→ 每批 36 个视图 dispatch_async，批间让出主线程；不改任何单视图逻辑。
 static void TBHealAllIconViews(void) {
+    // ★ 0.15.90：heal 只在该进程真的有桌面图标时才做。
+    //   日志实锤：一次换主题时 Filza 600 视图 / Sileo 491 / RootHide 371 / Preferences 102
+    //   全都在各自窗口树里做全量 heal（纯浪费 CPU，还拖垮整机）。只有 SpringBoard 需要。
+    static int sHealHost = -1;
+    if (sHealHost < 0) {
+        NSString *pn = [NSProcessInfo processInfo].processName ?: @"";
+        sHealHost = [pn isEqualToString:@"SpringBoard"] ? 1 : 0;
+        TBLog(@"heal: 宿主=%@ → %@", pn, sHealHost ? @"执行" : @"跳过（无桌面图标）");
+    }
+    if (!sHealHost) return;
     if (gHealDepth > 0) return;
     gHealDepth++;
     TBLog(@"heal: 开始收集窗口树（分批异步重贴）");
@@ -2386,7 +2396,7 @@ static void TBHealAllIconViews(void) {
             [queue addObject:v];
             [stack addObjectsFromArray:[v.subviews copy]];
         }
-        TBLog(@"heal: 收集 %lu 个视图待处理（每批 36）", (unsigned long)queue.count);
+        TBLog(@"heal: 收集 %lu 个视图待处理（每批 24，批间 8ms）", (unsigned long)queue.count);
         if (queue.count == 0) { gHealDepth--; return; }
 
         // ② 分批异步重贴：每批 36 个视图一批批 dispatch_async，批间让出主线程
@@ -2404,7 +2414,7 @@ static void TBHealAllIconViews(void) {
                 return;
             }
             NSInteger start = cursor;
-            NSInteger end = MIN(start + 36, (NSInteger)queue.count);
+            NSInteger end = MIN(start + 24, (NSInteger)queue.count);
             for (NSInteger i = start; i < end; i++) {
                 UIView *v = queue[i];
                 if (!v.window && ![v isKindOfClass:[UIWindow class]]) continue;   // 已离屏
@@ -2415,7 +2425,8 @@ static void TBHealAllIconViews(void) {
             if (batch <= 3 || batch % 5 == 0) {
                 TBLog(@"heal: 批 %ld 完成（%ld/%lu）", (long)batch, (long)end, (unsigned long)queue.count);
             }
-            dispatch_async(dispatch_get_main_queue(), drain);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.008 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), drain);
         };
         dispatch_async(dispatch_get_main_queue(), drain);
     } @catch (NSException *e) {
@@ -4559,7 +4570,7 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n,
         sSaidNoPid = NO;
     });
 
-    const NSTimeInterval kCooldown = 0.8;   // 冷却窗口
+    const NSTimeInterval kCooldown = 3.0;   // 冷却窗口（0.15.90：0.8→3.0，17 次/秒的刷新风暴会压死 SpringBoard）
     const NSTimeInterval kWindow   = 10.0;  // 统计窗口
     const NSTimeInterval kBreaker  = 3.0;   // 熔断时长
     const NSUInteger   kWindowMax  = 8;     // 窗口内允许的最大执行次数
@@ -4639,6 +4650,8 @@ static void TBReload(CFNotificationCenterRef c, void *o, CFNotificationName n,
 }
 
 static void TBRunReload(NSUInteger mySeq, NSString *why) {
+    NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
+    TBLog(@"重活开始：%@", why);
     [gLock lock];
     gIndex = nil;
     gBundleRes = nil;          // 强制重建资源表（含时钟/日历素材）
