@@ -3319,10 +3319,10 @@ static void tb_setupIconWithBundle(id self, SEL _cmd, id bundle) {
     // 0.15.95：先无条件确认这个 hook 到底有没有被调用（17.2 头文件里 PSSpecifier 只有
     //   setupIconImageWithBundle: / setupIconImageWithPath: 两条图标方法，没有 icon/setIconImage:，
     //   所以之前"设置了但没生效"很可能是写入方式不对）
-    static int sCalls = 0;
-    if (sCalls < 3) {
-        sCalls++;
-        TBLog(@"设置页图标 setup 被调用：cls=%@ bundle=%@", NSStringFromClass([self class]), bundle);
+    {
+        NSString *tag = [@"spcall|" stringByAppendingString:[bundle description] ?: @"?"];
+        TBLogOnce(tag, @"设置页图标 setup 被调用：cls=%@ bundle=%@",
+                  NSStringFromClass([self class]), bundle);
     }
     if (!TBEnabled() || TBSafeMode() || !TBUIKitIconEnabled()) return;
     @try {
@@ -4759,7 +4759,27 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
             [gLock lock];
             gIndex = nil; gBundleRes = nil; gBundleResTheme = nil;
             [gLock unlock];
-            TBLog(@"重活跳过（非 SpringBoard）：%@", why);
+            TBLog(@"重活跳过（非 SpringBoard，只做轻量刷新）：%@", why);
+            // ★ 0.15.96：设置页那列 App 图标是【行自己缓存】的 —— 进程收到 changed 却什么都不做，
+            //   行就不会重新取图（表现：储存空间页有色，设置主页那列还是原图，因为它早就建好了）。
+            //   这里只做一件很轻的事：让可见的 UITableView 重新取一遍行内容。
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try {
+                    NSMutableArray<UIView *> *stack = [NSMutableArray array];
+                    for (UIView *w in [[UIApplication sharedApplication] windows]) [stack addObject:w];
+                    NSInteger n = 0;
+                    while (stack.count && n < 400) {
+                        UIView *v = stack.firstObject;
+                        [stack removeObjectAtIndex:0];
+                        n++;
+                        if ([v isKindOfClass:[UITableView class]]) {
+                            [(UITableView *)v reloadData];
+                            TBLog(@"轻量刷新：reloadData %@", NSStringFromClass([v class]));
+                        }
+                        [stack addObjectsFromArray:[v.subviews copy]];
+                    }
+                } @catch (NSException *e) { }
+            });
             return;
         }
     }
