@@ -71,13 +71,35 @@ NSString *TBThemeBoardRoot(void) {
         //   与 SpringBoard 的 /var/jb/Library/Themes 同属 jbroot 树，属主一致可写可删。
         NSString *jb = TBJBRootThemeBoard();
         if (jb) {
-            [fm createDirectoryAtPath:[jb stringByAppendingPathComponent:@"Themes"]
-               withIntermediateDirectories:YES attributes:nil error:NULL];
-            [fm createDirectoryAtPath:[jb stringByAppendingPathComponent:@"Assets"]
-               withIntermediateDirectories:YES attributes:nil error:NULL];
-            root = jb;
-            TBPathLog(@"根目录 = %@（jbroot）", root);
-            return;
+            NSError *e1 = nil, *e2 = nil;
+            BOOL okT = [fm createDirectoryAtPath:[jb stringByAppendingPathComponent:@"Themes"]
+                     withIntermediateDirectories:YES attributes:nil error:&e1];
+            BOOL okA = [fm createDirectoryAtPath:[jb stringByAppendingPathComponent:@"Assets"]
+                     withIntermediateDirectories:YES attributes:nil error:&e2];
+            TBPathLog(@"尝试根 %@ Themes=%d(%@) Assets=%d(%@)", jb, okT,
+                      e1.localizedDescription ?: @"ok", okA, e2.localizedDescription ?: @"ok");
+            BOOL canWrite = [fm isWritableFileAtPath:jb];
+            if (okT && okA && canWrite) {
+                root = jb;
+                TBPathLog(@"根目录 = %@（jbroot/Library）", root);
+                return;
+            }
+            // <jbroot>/Library 可能是 root:wheel 0755 → mobile 建不了子目录。
+            // 依次尝试：/var/jb/Library/ThemeBoard → 沙盒 Documents/ThemeBoard
+            for (NSString *c in @[ @"/var/jb/Library/ThemeBoard" ]) {
+                NSError *ec = nil;
+                BOOL c1 = [fm createDirectoryAtPath:[c stringByAppendingPathComponent:@"Themes"]
+                          withIntermediateDirectories:YES attributes:nil error:&ec];
+                BOOL c2 = [fm createDirectoryAtPath:[c stringByAppendingPathComponent:@"Assets"]
+                          withIntermediateDirectories:YES attributes:nil error:NULL];
+                TBPathLog(@"尝试备选根 %@ Themes=%d(%@) Assets=%d", c, c1, ec.localizedDescription ?: @"ok", c2);
+                if (c1 && c2 && [fm isWritableFileAtPath:c]) {
+                    root = c;
+                    TBPathLog(@"根目录 = %@（/var/jb）", root);
+                    return;
+                }
+            }
+            TBPathLog(@"⚠️ jbroot/Library 与 /var/jb 都不可写，退回沙盒");
         }
         // 找不到 .jbroot-*（理论不会）：用 /var/jb 这个标准 rootless 软链，
         // 绝不再退回 App 容器（那会变成 <jbroot>/var/mobile/Documents/ThemeBoard，用户明确否掉）
