@@ -890,22 +890,25 @@ trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
         // completionHandler 必须同步收尾（UIKit 当场结束这次 swipe 事务），模态放到下一拍。
         done(YES);
         dispatch_async(dispatch_get_main_queue(), ^{
-            UIAlertController *ac = [UIAlertController alertControllerWithTitle:
-                                     [NSString stringWithFormat:@"删除「%@」？", t.name]
-                message:@"主题文件夹会被直接删除，不可恢复" preferredStyle:UIAlertControllerStyleAlert];
-            [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-            [ac addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+            // ★ 0.15.68：确认弹窗换回自绘玻璃（TBPresentConfirm）。0.15.62 回退时误用了
+            //   系统 UIAlertController —— 从 swipe 事务里 present 系统 alert 正是会打断
+            //   UIKit 的场景之一，可能与"删除没法用"有关；玻璃版 0.15.47 之前一直稳定。
+            TBPresentConfirm(self, [NSString stringWithFormat:@"删除「%@」？", t.name],
+                             @"主题文件夹会被直接删除，不可恢复",
+                             @"取消", @"删除", YES, ^(BOOL ok) {
+                if (!ok) return;
                 NSError *err = nil;
-                BOOL ok = [TBThemeScanner deleteTheme:t error:&err];
-                if (ok) {
+                BOOL ok2 = [TBThemeScanner deleteTheme:t error:&err];
+                if (ok2) {
                     [self tb_clearPrefsPointingInto:t.path];
                     NSString *active = [TBPrefs stringForKey:TBKeyActiveTheme];
                     if ([active isEqualToString:t.name]) [TBPrefs setString:nil forKey:TBKeyActiveTheme];
                     [TBPrefs notifyChanged];
                     [self reload];
+                } else {
+                    TBLog2(@"[删除] 失败 err=%@", err.localizedDescription ?: @"-");
                 }
-            }]];
-            [self presentViewController:ac animated:YES completion:nil];
+            });
         });
     }];
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
