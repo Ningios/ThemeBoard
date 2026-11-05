@@ -1,3 +1,7 @@
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <stdlib.h>
 #import "TBThemeScanner.h"
 #import "TBZip.h"
 #import "TBPaths.h"
@@ -860,6 +864,38 @@ static BOOL TBIsThemeLikeDirectory(NSString *dir) {
     }
 }
 
+
+/// 0.15.69：把 root 拥有的旧主题交给 mobile —— Filza 拷进来的文件整棵树属主是 root，
+/// App(mobile) 连 chmod 都做不了（errno=1/513）。这里用 posix_spawn 调系统 chown。
+static int TBChownMobile(NSString *path) {
+    if (path.length == 0) return -1;
+    if (access("/usr/bin/chown", X_OK) != 0) {
+        NSString *jb = @"/var/jb/usr/bin/chown";
+        if (access(jb.fileSystemRepresentation, X_OK) != 0) return -2;
+        path = jb;
+    }
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    pid_t pid = -1;
+    char *argv[] = { (char*)"/usr/bin/chown", (char*)"mobile:mobile",
+                     (char*)path.fileSystemRepresentation, NULL };
+    int rc = posix_spawn(&pid, argv[0], NULL, &attr, argv, environ);
+    posix_spawnattr_destroy(&attr);
+    if (rc != 0) return rc;
+    int st = 0; waitpid(pid, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -3;
+}
+
+/// 递归 chown：先改目录本身，再遍历内容（目录大也够快，主题包几百个文件毫秒级）
+static void TBRecursiveChownMobile(NSString *path) {
+    TBChownMobile(path);
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *kids = [[fm subpathsAtPath:path] copy];
+    for (NSString *k in kids) {
+        TBChownMobile([path stringByAppendingPathComponent:k]);
+    }
+}
+
 + (BOOL)deleteTheme:(TBTheme *)theme error:(NSError **)error {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *path = theme.path;
@@ -913,7 +949,17 @@ static BOOL TBIsThemeLikeDirectory(NSString *dir) {
         still = [fm fileExistsAtPath:path];
     }
     if ((!ok || still)) {
-        TBLog2(@"[删除] 第 2 次失败（errno=%d，%@）→ 改为先删内容、再删目录：%@",
+        TBLog2(@"[删除] 第 2 次失败（errno=%d，%@）→ 递归 chown mobile 后重试：%@",
+               lastErrno, err.localizedDescription ?: @"无错误", path);
+        TBRecursiveChownMobile(path);          // root 拥有的旧主题 → 交给 mobile
+        TBRecursiveChmod(path, 0777);
+        err = nil;
+        ok = [fm removeItemAtPath:path error:&err];
+        if (!ok) lastErrno = (int)err.code;
+        still = [fm fileExistsAtPath:path];
+    }
+    if ((!ok || still)) {
+        TBLog2(@"[删除] 第 3 次失败（errno=%d，%@）→ 改为先删内容、再删目录：%@",
                lastErrno, err.localizedDescription ?: @"无错误", path);
         NSError *e3 = nil;
         int e3no = 0;

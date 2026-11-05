@@ -4641,18 +4641,28 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
                 // 交给下面的窗口遍历按需清理（只碰屏幕上的几十个图标）。
                 TBLog(@"拿不到图标列表：跳过全量清缓存，改由窗口遍历按需清理");
             } else {
+                // ★ 0.15.69：分批清缓存改成【异步链】。原来 while+usleep(20ms) 仍在主线程
+                //   同步占用（N 批 × 20ms），单独用遮罩/边框/阴影回桌面就是撞上这里。
+                //   现在每批 dispatch_async，批间让出主线程；总时长不变，但不再卡帧。
                 const NSUInteger chunk = 30;
-                NSUInteger i = 0;
-                NSInteger round = 0;
-                while (i < icons.count) {
+                __block NSUInteger i = 0;
+                __block NSInteger round = 0;
+                __block void (^drainPurge)(void) = nil;
+                drainPurge = ^{
+                    if (i >= icons.count) {
+                        TBLog(@"已分批清理 %lu 个图标的缓存（%ld 批，异步）",
+                              (unsigned long)icons.count, (long)round);
+                        drainPurge = nil;
+                        return;
+                    }
                     NSUInteger n = MIN(chunk, icons.count - i);
                     NSArray *part = [icons subarrayWithRange:NSMakeRange(i, n)];
                     for (NSValue *v in cacheList) { TBPurgeIcons(v, part); }
                     i += n;
                     round++;
-                    usleep(20000);   // 每批之间让出 20ms，避免主线程长时间被占用
-                }
-                TBLog(@"已分批清理 %lu 个图标的缓存（%ld 批）", (unsigned long)icons.count, (long)round);
+                    dispatch_async(dispatch_get_main_queue(), drainPurge);
+                };
+                dispatch_async(dispatch_get_main_queue(), drainPurge);
         }
 
         // 0.15.53：通知图标视图重取改为【分批异步】。原来是同步循环 O(图标数 × 缓存数)，
