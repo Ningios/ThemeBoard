@@ -1978,7 +1978,8 @@ static void tb_ivSetImage(id self, SEL _cmd, id img) {
             if ([pv isKindOfClass:[UITableViewCell class]]) { cell = (UITableViewCell *)pv; break; }
         }
         if (!cell) return;
-        if (objc_getAssociatedObject(cell, kTBDoneKey)) return;   // 只有"替换成功过"才打标记
+        // 不再用"已处理"早退：系统会在配置/布局后把原图写回，我们要允许自己再替换一次。
+        // 命中缓存的成本是一次字典查询，足够轻。
         NSString *title = TBCellTitleText(cell);
         if (!title.length) return;
         if (!gTitleImg) gTitleImg = [NSMutableDictionary dictionary];
@@ -2003,7 +2004,16 @@ static void tb_ivSetImage(id self, SEL _cmd, id img) {
         iv.image = sized;
         iv.contentMode = UIViewContentModeScaleAspectFit;
         sInIVHook = NO;
-        objc_setAssociatedObject(cell, kTBDoneKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // 0.16.5：系统常在配置后把原图写回 → 稍后再补一次（只补一次，避免高频循环）
+        __weak UIImageView *wiv = iv;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UIImageView *v = wiv;
+            if (v && v.image != sized) {
+                v.image = sized;
+                v.contentMode = UIViewContentModeScaleAspectFit;
+            }
+        });
     } @catch (NSException *e) { sInIVHook = NO; }
 }
 
