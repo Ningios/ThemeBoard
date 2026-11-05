@@ -1166,6 +1166,25 @@ static UIImage *TBRoundedCornerImage(UIImage *img, CGFloat radius) {
 static NSMapTable *gSquareFillCache;
 static UIImage *TBArtSquareFilled(UIImage *img) {
     if (!img || !img.CGImage) return img;
+    // ★ 0.15.71 性能：补方角只是"用边缘颜色填四角"，不需要原分辨率。
+    //   大图先降到 ~120px 再做逐像素填充（原来 180~540px 全分辨率跑两趟，
+    //   换主题/改遮罩后回桌面要给上百个图标各做一次 → 明显掉帧）。
+    {
+        size_t w0 = CGImageGetWidth(img.CGImage);
+        if (w0 > 120) {
+            CGFloat ratio = 120.0 / (CGFloat)w0;
+            CGSize small = CGSizeMake(round(img.size.width * ratio),
+                                      round(img.size.height * ratio));
+            UIGraphicsImageRendererFormat *f2 = [UIGraphicsImageRendererFormat defaultFormat];
+            f2.scale = img.scale > 0.5 ? img.scale : 3.0;
+            f2.opaque = NO;
+            UIGraphicsImageRenderer *rd2 = [[UIGraphicsImageRenderer alloc] initWithSize:small format:f2];
+            UIImage *sc = [rd2 imageWithActions:^(UIGraphicsImageRendererContext *c2) {
+                [img drawInRect:CGRectMake(0, 0, small.width, small.height)];
+            }];
+            if (sc.CGImage) img = sc;
+        }
+    }
     const size_t W = CGImageGetWidth(img.CGImage), H = CGImageGetHeight(img.CGImage);
     if (W < 8 || H < 8 || W > 1400 || H > 1400) return img;
     if (!gSquareFillCache) gSquareFillCache = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsObjectPointerPersonality

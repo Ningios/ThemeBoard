@@ -876,7 +876,24 @@ static int TBChownMobile(NSString *path) {
                           @"/var/jb/usr/bin/chown", @"/var/jb/bin/chown"]) {
         if (access(c.fileSystemRepresentation, X_OK) == 0) { bin = c; break; }
     }
+    if (!bin) {
+        // rootless：jbroot 每台设备随机（/var/containers/Bundle/Application/.jbroot-XXXX/…）
+        // 通过 environ 里的 JBRootPath/_MSSafeMode 等变量不可靠，直接 glob。
+        NSError *gerr = nil;
+        NSArray *cands = [[NSFileManager defaultManager]
+            contentsOfDirectoryAtPath:@"/var/containers/Bundle/Application" error:&gerr];
+        for (NSString *d in cands) {
+            if (![d hasPrefix:@".jbroot-"]) continue;
+            NSString *c = [@"/var/containers/Bundle/Application"
+                stringByAppendingPathComponent:[d stringByAppendingPathComponent:@"usr/bin/chown"]];
+            if (access(c.fileSystemRepresentation, X_OK) == 0) { bin = c; break; }
+            c = [@"/var/containers/Bundle/Application"
+                stringByAppendingPathComponent:[d stringByAppendingPathComponent:@"bin/chown"]];
+            if (access(c.fileSystemRepresentation, X_OK) == 0) { bin = c; break; }
+        }
+    }
     if (!bin) return -2;   // 没有 chown 可用
+    gChownBin = bin;
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     pid_t pid = -1;
@@ -890,9 +907,10 @@ static int TBChownMobile(NSString *path) {
 }
 
 /// 递归 chown：先改目录本身，再遍历内容（目录大也够快，主题包几百个文件毫秒级）
+static NSString *gChownBin;
 static void TBRecursiveChownMobile(NSString *path) {
     int rc = TBChownMobile(path);
-    TBLog2(@"[删除] chown -R mobile:mobile rc=%d %@", rc, path);
+    TBLog2(@"[删除] chown bin=%@ -R mobile:mobile rc=%d %@", gChownBin ?: @"(未找到)", rc, path);
     if (rc != 0) {
         // chown 不可用/失败时退回逐文件（老路径）
         NSFileManager *fm = [NSFileManager defaultManager];

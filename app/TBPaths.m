@@ -30,6 +30,26 @@ static void TBPathLog(NSString *fmt, ...) {
 /// 首选：真正的共享目录 /var/mobile/Documents/ThemeBoard（引擎也读这里）
 static NSString *const kTBCanonicalRoot = @"/var/mobile/Documents/ThemeBoard";
 
+/// rootless：jbroot 每台设备随机（/var/containers/Bundle/Application/.jbroot-XXXX），
+/// 但 <jbroot>/Library/ThemeBoard 这条路径形态固定 —— 用户指定的备选根。
+static NSString *TBJBRootThemeBoard(void) {
+    static NSString *r = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *appDir = @"/var/containers/Bundle/Application";
+        NSArray *kids = [fm contentsOfDirectoryAtPath:appDir error:NULL];
+        for (NSString *d in kids) {
+            if (![d hasPrefix:@".jbroot-"]) continue;
+            NSString *p = [appDir stringByAppendingPathComponent:
+                           [d stringByAppendingPathComponent:@"Library/ThemeBoard"]];
+            BOOL isDir = NO;
+            if ([fm fileExistsAtPath:p isDirectory:&isDir] && isDir) { r = p; break; }
+        }
+    });
+    return r;
+}
+
 static NSString *TBAppContainerRoot(void) {
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     if (!docs.length) return nil;
@@ -41,24 +61,26 @@ NSString *TBThemeBoardRoot(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSFileManager *fm = [NSFileManager defaultManager];
-        NSError *err = nil;
-        // 父目录 /var/mobile/Documents 由系统保证存在（越狱环境）
-        if (![fm fileExistsAtPath:kTBCanonicalRoot]) {
-            [fm createDirectoryAtPath:kTBCanonicalRoot withIntermediateDirectories:YES
-                           attributes:nil error:&err];
+        // ★ 0.15.71：**完全取消** /var/mobile/Documents/ThemeBoard。
+        //   唯一根 = <jbroot>/Library/ThemeBoard（jbroot 随机，但后面路径固定），
+        //   与 SpringBoard 的 /var/jb/Library/Themes 同属 jbroot 树，属主一致可写可删。
+        NSString *jb = TBJBRootThemeBoard();
+        if (jb) {
+            [fm createDirectoryAtPath:[jb stringByAppendingPathComponent:@"Themes"]
+               withIntermediateDirectories:YES attributes:nil error:NULL];
+            [fm createDirectoryAtPath:[jb stringByAppendingPathComponent:@"Assets"]
+               withIntermediateDirectories:YES attributes:nil error:NULL];
+            root = jb;
+            TBPathLog(@"根目录 = %@（jbroot）", root);
+            return;
         }
-        BOOL isDir = NO;
-        BOOL ok = [fm fileExistsAtPath:kTBCanonicalRoot isDirectory:&isDir] && isDir &&
-                  [fm isWritableFileAtPath:kTBCanonicalRoot];
-        if (ok) {
-            root = kTBCanonicalRoot;
-        } else {
-            root = TBAppContainerRoot() ?: kTBCanonicalRoot;
-            [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:NULL];
-            TBPathLog(@"⚠️ %@ 不可写（%@），回退到 %@", kTBCanonicalRoot,
-                      err.localizedDescription ?: @"不可写", root);
-        }
-        TBPathLog(@"根目录 = %@", root);
+        // 找不到 jbroot（理论不会）：退 App 容器
+        root = TBAppContainerRoot() ?: @"/var/containers/Bundle/Application/Library/ThemeBoard";
+        [fm createDirectoryAtPath:[root stringByAppendingPathComponent:@"Themes"]
+           withIntermediateDirectories:YES attributes:nil error:NULL];
+        [fm createDirectoryAtPath:[root stringByAppendingPathComponent:@"Assets"]
+           withIntermediateDirectories:YES attributes:nil error:NULL];
+        TBPathLog(@"⚠️ 未找到 jbroot，回退到 %@", root);
     });
     return root;
 }
@@ -95,6 +117,7 @@ NSArray<NSString *> *TBLegacyThemeRoots(void) {
     [out addObject:@"/var/jb/Library/Themes"];
     [out addObject:@"/var/jb/var/Library/Themes"];
     [out addObject:@"/Library/Themes"];
+    if (TBJBRootThemeBoard()) [out addObject:TBJBRootThemeBoard()];   // jbroot/Library/ThemeBoard
     return out;
 }
 
