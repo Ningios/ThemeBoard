@@ -138,7 +138,12 @@ for _ in range(nc):
     c,sz=struct.unpack('<II',bytes(d[off:off+8]))
     if c==0x80000034: chained=True
     off+=sz
-if sub==2:
+# ⚠️ 2026-11-07 结论：本机(Linux)无论怎么补，chained fixups 的 pointer_format 都是
+#    DYLD_CHAINED_PTR_64（= arm64 格式，不是 ARM64E 的 7/9/11），说明 theos 的 ld64
+#    并没有真正按 arm64e ABI 生成 fixups。硬把 cpusubtype 改成 0x80000002 只是"谎报",
+#    反而更危险（dyld 会按 arm64e ABI 解析 arm64 格式的链 → 崩/菊花）。
+#    → Linux 产物只能作参考，**不可真机安装**；引擎只能用 macOS(Xcode ld64) 构建。
+if False:
     d[8:12]=struct.pack("<I",0x80000002); open(p,'wb').write(d)
     print("已补 ptrauth ABI 位：cpusubtype 0x2 -> 0x80000002")
 else:
