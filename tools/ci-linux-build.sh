@@ -139,7 +139,7 @@ for _ in range(nc):
     if c==0x80000034: chained=True
     off+=sz
 if sub==2:
-    d[8:12]=struct.pack('<i',0x80000002); open(p,'wb').write(d)
+    d[8:12]=struct.pack("<I",0x80000002); open(p,'wb').write(d)
     print("已补 ptrauth ABI 位：cpusubtype 0x2 -> 0x80000002")
 else:
     print("未补（sub=%s chained=%s）" % (hex(sub & 0xffffffff), chained))
