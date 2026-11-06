@@ -37,7 +37,6 @@
            @{@"t": @"文件夹预览", @"k": TBKeyApplyFolder, @"v": @YES},
            @{@"t": @"App 切换器", @"k": TBKeyApplySwitcher, @"v": @YES},
            @{@"t": @"设置页图标", @"k": TBKeyApplySettings, @"v": @YES},
-           @{@"t": @"通知中心", @"k": TBKeyApplyNotification, @"v": @YES},
            @{@"t": @"分享面板", @"k": TBKeyApplyShare, @"v": @YES} ],
         @[ @{@"t": @"在文件管理器中打开主题目录", @"act": @"open"} ],
         @[ @{@"t": @"日历不叠加日期", @"k": @"NoCalendarDate", @"v": @NO,

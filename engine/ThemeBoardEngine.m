@@ -1801,32 +1801,6 @@ static NSString *TBBIDFromIcon(id icon) {
 
 #pragma mark - hook 工具
 
-// ---- 通知中心 / 横幅图标：照 SystemBox 1.5-8 的原始做法 ----
-// hook `NCBadgedIconView -_configureBadgedIconViewIfNecessary`：遍历入参数组，
-// 元素类型是 NCImageBrandingBadge 时替换它的图，然后调用原实现。
-static void (*o_ncConfigure)(id, SEL, id);
-
-static void tb_ncConfigure(id self, SEL _cmd, id arg) {
-    Class badgeCls = NSClassFromString(@"NCImageBrandingBadge");
-    if (badgeCls && TBApplyEnabled(@"ApplyNotification") && [arg isKindOfClass:[NSArray class]]) {
-        @try {
-            NSString *bid = nil;
-            @try { bid = [[self valueForKey:@"_badgedIconDescription"] valueForKey:@"_bundleIdentifier"]; } @catch (NSException *e) {}
-            UIImage *img = bid.length ? TBImageForBundle(bid) : nil;
-            if (img) {
-                for (id el in (NSArray *)arg) {
-                    if (![el isKindOfClass:badgeCls]) continue;
-                    SEL sSet = NSSelectorFromString(@"_setSubordinateIcon:");
-                    if ([el respondsToSelector:sSet]) {
-                        ((void (*)(id, SEL, id))objc_msgSend)(el, sSet, img);
-                    }
-                }
-                TBLogOnce([@"nc|" stringByAppendingString:bid], @"NC 图标：%@ 已替换", bid);
-            }
-        } @catch (NSException *e) {}
-    }
-    if (o_ncConfigure) o_ncConfigure(self, _cmd, arg);
-}
 
     // ★★★ 通知中心图标：0.15.89 起永久封存。
     //   照 SystemX 1.5-8 的 NCBadgedIconView 五连 hook（init×2/set×2/layout）实测：
@@ -2132,32 +2106,6 @@ static void tb_ivSetImage(id self, SEL _cmd, id img) {
 }
 
 
-// ---- 通知中心图标：严格按 SystemBox 的写法（只做它的那一步）----
-// SystemBox 的做法（逆向定论）：hook `NCBadgedIconView -_configureBadgedIconViewIfNecessary`，
-//   替换体里【遍历入参数组】，元素是 `NCImageBrandingBadge` 时用 `_setSubordinateIcon:` 换成
-//   主题图，**然后调用原实现**。它不做别的事（不在 layout 里改视图、不碰 cell）。
-static void (*o_ncCfg)(id, SEL, id);
-static void tb_ncCfg(id self, SEL _cmd, id arg) {
-    @try {
-        if (TBApplyEnabled(@"ApplyNotification") && [arg isKindOfClass:[NSArray class]]) {
-            Class badgeCls = NSClassFromString(@"NCImageBrandingBadge");
-            NSString *bid = nil;
-            @try { bid = [[self valueForKey:@"_badgedIconDescription"] valueForKey:@"_bundleIdentifier"]; } @catch (NSException *e) {}
-            UIImage *img = (bid.length && badgeCls) ? TBImageForBundle(bid) : nil;
-            if (img) {
-                for (id el in (NSArray *)arg) {
-                    if (![el isKindOfClass:badgeCls]) continue;
-                    SEL s1 = NSSelectorFromString(@"_setSubordinateIcon:");
-                    SEL s2 = NSSelectorFromString(@"setImage:");
-                    if ([el respondsToSelector:s1]) ((void (*)(id, SEL, id))objc_msgSend)(el, s1, img);
-                    else if ([el respondsToSelector:s2]) ((void (*)(id, SEL, id))objc_msgSend)(el, s2, img);
-                }
-                TBLogOnce([@"ncx|" stringByAppendingString:bid], @"NC 图标(SystemBox 写法)：%@ 已替换", bid);
-            }
-        }
-    } @catch (NSException *e) {}
-    if (o_ncCfg) o_ncCfg(self, _cmd, arg);      // 最后调原实现（与 SystemBox 顺序一致）
-}
 
 // ---- 时钟供图（0.18.1）：在真正的时钟视图类上返回主题表盘 ----
 // 真正的类是 `SBHClockApplicationIconImageView : SBLiveIconImageView`；
@@ -3322,7 +3270,7 @@ static NSString *TBBIDFromIcon(id icon);
 
 /// 设置页图标 / 通知中心 共用 UIKit 应用图标入口
 static BOOL TBUIKitIconEnabled(void) {
-    return TBApplyEnabled(@"ApplySettings") || TBApplyEnabled(@"ApplyNotification");
+    return TBApplyEnabled(@"ApplySettings");
 }
 
 /// UIKit 私有 format 参数里能识别的「请求尺寸」。只用于系统原实现没给图时的兜底，
@@ -4646,17 +4594,6 @@ static void TBInstall(void) {
     //   无任何效果 + 闪屏 + 自动注销。与 0.15.73/82/84/86 四次失败一致。
     //   结论（最终）：本机 17.2.1 上 NC 图标替换不可行，任何 NC* 类 hook 都会破坏通知系统。
     //   除非未来做真机运行时 dump 并找到安全插入点，否则不再尝试。
-
-    // 通知中心图标：只挂 SystemBox 用的那一个方法（_configureBadgedIconViewIfNecessary）
-    if (TBApplyEnabled(@"ApplyNotification")) {
-        Class ncb = NSClassFromString(@"NCBadgedIconView");
-        if (ncb && TBHasMethod(ncb, @"_configureBadgedIconViewIfNecessary")) {
-            o_ncCfg = (void (*)(id, SEL, id))TBHook(ncb, @"_configureBadgedIconViewIfNecessary",
-                                                    (IMP)tb_ncCfg, "NC 图标(SystemBox)");
-        } else {
-            TBLog(@"NC 图标：NCBadgedIconView/_configureBadgedIconViewIfNecessary 不存在");
-        }
-    }
 
     // 时钟供图：真正的时钟视图类上返回主题表盘（4 个独立 orig 槽）
     {
