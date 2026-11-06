@@ -2177,6 +2177,8 @@ static void TBRemember(id cache) {
 typedef id (*FnIcon)(id, SEL, id);
 typedef id (*FnIconOpt)(id, SEL, id, unsigned long long);
 typedef id (*FnImageForIcon)(id, SEL, id, id);
+typedef id (*FnIconAppOpt)(id, SEL, id, id, unsigned long long);        // imageForIcon:imageAppearance:options:
+typedef id (*FnImageForIconAppOpt)(id, SEL, id, id, id, unsigned long long); // cacheImage:forIcon:imageAppearance:options:
 typedef id (*FnGen)(id, SEL, TBImageInfo);
 typedef id (*FnGenSize)(id, SEL, CGSize, double, BOOL, id);
 typedef id (*FnISGeneration)(id, SEL, id *);
@@ -2184,6 +2186,8 @@ typedef id (*FnISGeneration)(id, SEL, id *);
 static FnIcon o_imageForIcon, o_cachedForIcon, o_unmaskedForIcon;
 static FnIconOpt o_imageForIconOpt, o_realForIconOpt, o_unmaskedForIconOpt;
 static FnImageForIcon o_cacheImageForIcon;
+static FnIconAppOpt o_imageForIconApp;                 // 0.18.4：带 imageAppearance 的新签名
+static FnImageForIconAppOpt o_cacheImageForIconApp;    // 0.18.4：同上（写端）
 static FnGen o_generateIconImageWithInfo, o_genericIconImage;
 static FnGenSize o_iconImageOfSize;
 static FnISGeneration o_isGeneration;
@@ -2246,6 +2250,35 @@ static id tb_cacheImageForIcon(id self, SEL _cmd, id image, id icon) {
         }
     } @catch (NSException *e) { }
     return o_cacheImageForIcon ? o_cacheImageForIcon(self, _cmd, image, icon) : nil;
+}
+
+/// 0.18.4：iOS 17 过渡动画（点进 App / 退出回桌面）走的是带 imageAppearance 的新签名缓存，
+/// 老签名 imageForIcon:options: 接不到 → 动画期露出原图。这里同样在**缓存写入端**接管。
+static id tb_imageForIconApp(id self, SEL _cmd, id icon, id appearance, unsigned long long opt) {
+    TBRemember(self);
+    id r = o_imageForIconApp ? o_imageForIconApp(self, _cmd, icon, appearance, opt) : nil;
+    if (!gSystemMaskTemplate && [r isKindOfClass:[UIImage class]]) TBLearnSystemMask(r);
+    return r;
+}
+
+static id tb_cacheImageForIconApp(id self, SEL _cmd, id image, id icon, id appearance, unsigned long long opt) {
+    TBRemember(self);
+    @try {
+        NSString *bid = TBBIDFromIcon(icon);
+        if (bid.length && TBApplyIconForDesktop() && !TBSafeMode()) {
+            UIImage *mine = TBFitCached(TBImageForBundle(bid), TBInfoOfCache(self), bid) ?: TBImageForBundle(bid);
+            if (mine) {
+                TBLogOnce([@"cachewriteA|" stringByAppendingString:bid], @"cachewrite(appearance) %@", bid);
+                return o_cacheImageForIconApp ? o_cacheImageForIconApp(self, _cmd, mine, icon, appearance, opt) : nil;
+            }
+            UIImage *g = TBGlobalEffectImage(image, bid);
+            if (g && g != image) {
+                TBLogOnce([@"cachewriteAG|" stringByAppendingString:bid], @"cachewrite(appearance,全局) %@", bid);
+                return o_cacheImageForIconApp ? o_cacheImageForIconApp(self, _cmd, g, icon, appearance, opt) : nil;
+            }
+        }
+    } @catch (NSException *e) { }
+    return o_cacheImageForIconApp ? o_cacheImageForIconApp(self, _cmd, image, icon, appearance, opt) : nil;
 }
 
 /// 全局效果（默认开）：主题没覆盖的 App，拿系统自己的图标图，套上同一套
@@ -4742,6 +4775,16 @@ static void TBInstall(void) {
         // cacheImage:forIcon: 所有版本都存在
         if (TBHasMethod(cache, @"cacheImage:forIcon:")) {
             o_cacheImageForIcon = (FnImageForIcon)TBHook(cache, @"cacheImage:forIcon:", (IMP)tb_cacheImageForIcon, "cacheImage:forIcon");
+        }
+
+        // 0.18.4：带 imageAppearance 的新签名（iOS 17 过渡动画用的就是它）
+        if (TBHasMethod(cache, @"imageForIcon:imageAppearance:options:")) {
+            o_imageForIconApp = (FnIconAppOpt)TBHook(cache, @"imageForIcon:imageAppearance:options:",
+                                                     (IMP)tb_imageForIconApp, "imageForIcon:appearance:options");
+        }
+        if (TBHasMethod(cache, @"cacheImage:forIcon:imageAppearance:options:")) {
+            o_cacheImageForIconApp = (FnImageForIconAppOpt)TBHook(cache, @"cacheImage:forIcon:imageAppearance:options:",
+                                                                 (IMP)tb_cacheImageForIconApp, "cacheImage:forIcon:appearance:options");
         }
     }
 
