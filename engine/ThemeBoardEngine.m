@@ -2035,7 +2035,19 @@ static void TBRefreshSettingsIconsBatch(NSString *why) {
             if (kw) [stack addObject:kw];
             else for (UIView *w in [[UIApplication sharedApplication] windows]) [stack addObject:w];
             NSInteger n = 0, rows = 0;
-            while (stack.count && n < 120) {
+            // 0.16.10：滚动中不扫（用户实测设置滑动时不时卡 —— 就是这个定时扫描正好落在滚动里）
+            BOOL scrolling = NO;
+            for (UIView *w in [UIApplication sharedApplication].windows) {
+                if ([w isKindOfClass:[UIScrollView class]] &&
+                    (((UIScrollView *)w).isDragging || ((UIScrollView *)w).isDecelerating)) { scrolling = YES; break; }
+                for (UIView *sub in w.subviews) {
+                    if ([sub isKindOfClass:[UIScrollView class]] &&
+                        (((UIScrollView *)sub).isDragging || ((UIScrollView *)sub).isDecelerating)) { scrolling = YES; break; }
+                }
+                if (scrolling) break;
+            }
+            if (scrolling) return;
+            while (stack.count && n < 80) {
                 UIView *v = stack.firstObject; [stack removeObjectAtIndex:0]; n++;
                 if ([v isKindOfClass:[UITableView class]]) {
                     UITableView *tv = (UITableView *)v;
@@ -4679,7 +4691,7 @@ static void TBInstall(void) {
         //   这里加一个很轻的定时补刷：每 1.2 秒只扫【可见行】并做一次字典比对，命中已正确就跳过。
         static NSTimer *sTimer = nil;
         if (!sTimer) {
-            sTimer = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) {
+            sTimer = [NSTimer timerWithTimeInterval:3.0 repeats:YES block:^(NSTimer *t) {
                 TBRefreshSettingsIconsBatch(@"定时");
             }];
             sTimer.tolerance = 0.3;
@@ -4687,7 +4699,7 @@ static void TBInstall(void) {
             [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
                                                               object:nil queue:[NSOperationQueue mainQueue]
                                                           usingBlock:^(NSNotification *n) { [sTimer invalidate]; }];
-            TBLog(@"设置页图标：已启动定时补刷（2.0s，只扫 keyWindow 可见行）");
+            TBLog(@"设置页图标：已启动定时补刷（3.0s，滚动中跳过，只扫 keyWindow 可见行）");
         }
     }
 

@@ -97,18 +97,32 @@ static NSInteger _gToastGen = 0;
     static BOOL done = NO;
     if (done) return;
     done = YES;
+    // 0.16.10：退到后台时【只隐藏不改视图树】—— 在手势过渡期间 removeFromSuperview 会造成那一帧抖动。
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *n) {
-        [TBToast dismissNow];          // 退到后台/开始上滑时立刻摘掉，不残留
+        for (UIView *w in [UIApplication sharedApplication].windows) {
+            for (UIView *sub in w.subviews) {
+                if ([sub isKindOfClass:[TBToastView class]]) sub.hidden = YES;
+            }
+        }
+        for (UIView *w in [UIApplication sharedApplication].windows) {
+            for (UIView *sub in w.subviews) {
+                for (UIView *d in sub.subviews) {
+                    if ([d isKindOfClass:[TBToastView class]]) d.hidden = YES;
+                }
+            }
+        }
     }];
 }
 
 + (void)show:(NSString *)text icon:(NSString *)systemImageName in:(UIViewController *)host {
     [self tb_installLifecycleObserver];
     if (!text.length) return;
-    UIView *root = host.view.window ?: host.view;
+    // 0.16.10：改挂到 host.view（App 自己的层级），不再挂 window ——
+    // 挂 window 时它是"最上层视图"，上滑返回/退出时第一下手势会被它吃掉（用户实测要滑两次）。
+    UIView *root = host.view;
     if (!root) return;
 
     // 同一时间只留一个：旧的直接摘掉（不做退场动画，避免两个叠在一起）
