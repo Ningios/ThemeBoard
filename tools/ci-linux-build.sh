@@ -37,6 +37,25 @@ if [ -d "$TCBIN" ]; then
     [ -x "$c" ] && LD_FOUND="$c" && break
   done
 fi
+# 0.18.4：sbingner 工具链里的 clang 是 10，解析不了 iPhoneOS16.5 SDK 的新头文件
+# （NS_FORMAT_ARGUMENT / NS_SWIFT_SENDABLE / _Nullable_result 都要 clang>=11）。
+# 编译改用系统 clang(>=13)，链接仍用 theos 的 ld64 —— 只有它写得出 arm64e。
+SYS_CLANG=""
+for c in /usr/lib/llvm-16/bin/clang /usr/lib/llvm-15/bin/clang /usr/lib/llvm-14/bin/clang /usr/bin/clang; do
+  [ -x "$c" ] || continue
+  maj=$("$c" --version 2>/dev/null | head -1 | sed -E 's/.*version ([0-9]+).*/\1/')
+  if [ -n "$maj" ] && [ "$maj" -ge 13 ]; then SYS_CLANG="$c"; break; fi
+done
+if [ -z "$SYS_CLANG" ]; then
+  sudo apt-get install -y clang >/dev/null 2>&1 || true
+  for c in /usr/lib/llvm-*/bin/clang /usr/bin/clang; do
+    [ -x "$c" ] || continue
+    maj=$("$c" --version 2>/dev/null | head -1 | sed -E 's/.*version ([0-9]+).*/\1/')
+    if [ -n "$maj" ] && [ "$maj" -ge 13 ]; then SYS_CLANG="$c"; break; fi
+  done
+fi
+if [ -n "$SYS_CLANG" ]; then CLANG_FOUND="$SYS_CLANG"; echo "改用系统 clang: $CLANG_FOUND"; fi
+
 echo "TCBIN: $TCBIN"
 ls -l "$TCBIN" 2>/dev/null | head -20
 echo "clang: $CLANG_FOUND"
