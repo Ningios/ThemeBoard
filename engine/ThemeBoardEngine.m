@@ -1651,6 +1651,18 @@ static UIImage *TBImageForBundle(NSString *bid) {
     [gLock lock];
     TBLoadIndex();
     NSString *path = gIndex[bid];
+    // 0.18.1：分享面板/分享扩展常带后缀（com.tencent.xin.sharetimeline）→ 逐级截断前缀再试
+    if (!path) {
+        NSString *trim = bid;
+        for (int i = 0; i < 3; i++) {
+            NSRange r = [trim rangeOfString:@"." options:NSBackwardsSearch];
+            if (r.location == NSNotFound || r.location == 0) break;
+            trim = [trim substringToIndex:r.location];
+            NSString *p2 = gIndex[trim];
+            if (p2) { path = p2; TBLogOnce([@"prefix|" stringByAppendingString:bid],
+                                           @"图标前缀归并：%@ → %@", bid, trim); break; }
+        }
+    }
     [gLock unlock];
     BOOL cameFromMaterial = NO;
     if (!path) {
@@ -2145,6 +2157,43 @@ static void tb_ncCfg(id self, SEL _cmd, id arg) {
         }
     } @catch (NSException *e) {}
     if (o_ncCfg) o_ncCfg(self, _cmd, arg);      // 最后调原实现（与 SystemBox 顺序一致）
+}
+
+// ---- 时钟供图（0.18.1）：在真正的时钟视图类上返回主题表盘 ----
+// 真正的类是 `SBHClockApplicationIconImageView : SBLiveIconImageView`；
+// 过去我们挂在父类 SBIconImageView 上，时钟不经过它 → 所以"抄了却无效"。
+static id (*o_liveContents)(id, SEL);
+static id (*o_liveSquare)(id, SEL);
+static id (*o_clkContents)(id, SEL);
+static id (*o_clkSquare)(id, SEL);
+static UIImage *TBClockFaceForView(id view) {
+    if (!TBEnabled() || TBSafeMode()) return nil;
+    NSString *bid = nil;
+    @try { bid = TBBIDFromIcon([view valueForKey:@"icon"]); } @catch (NSException *e) {}
+    if (![bid isEqualToString:@"com.apple.mobiletimer"]) return nil;
+    NSString *path = TBDynamicResourcePath(@"com.apple.mobiletimer");
+    if (!path.length) return nil;
+    return [[UIImage alloc] initWithContentsOfFile:path];
+}
+static id tb_liveContents(id self, SEL _cmd) {
+    UIImage *f = TBClockFaceForView(self);
+    if (f) return f;
+    return o_liveContents ? o_liveContents(self, _cmd) : nil;
+}
+static id tb_liveSquare(id self, SEL _cmd) {
+    UIImage *f = TBClockFaceForView(self);
+    if (f) return f;
+    return o_liveSquare ? o_liveSquare(self, _cmd) : nil;
+}
+static id tb_clkContents(id self, SEL _cmd) {
+    UIImage *f = TBClockFaceForView(self);
+    if (f) return f;
+    return o_clkContents ? o_clkContents(self, _cmd) : nil;
+}
+static id tb_clkSquare(id self, SEL _cmd) {
+    UIImage *f = TBClockFaceForView(self);
+    if (f) return f;
+    return o_clkSquare ? o_clkSquare(self, _cmd) : nil;
 }
 
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
@@ -4606,6 +4655,24 @@ static void TBInstall(void) {
                                                     (IMP)tb_ncCfg, "NC 图标(SystemBox)");
         } else {
             TBLog(@"NC 图标：NCBadgedIconView/_configureBadgedIconViewIfNecessary 不存在");
+        }
+    }
+
+    // 时钟供图：真正的时钟视图类上返回主题表盘（4 个独立 orig 槽）
+    {
+        Class live = NSClassFromString(@"SBLiveIconImageView");
+        if (live) {
+            if (TBHasMethod(live, @"contentsImage"))
+                o_liveContents = (id (*)(id, SEL))TBHook(live, @"contentsImage", (IMP)tb_liveContents, "时钟供图 live.contents");
+            if (TBHasMethod(live, @"squareContentsImage"))
+                o_liveSquare = (id (*)(id, SEL))TBHook(live, @"squareContentsImage", (IMP)tb_liveSquare, "时钟供图 live.square");
+        }
+        Class clk = NSClassFromString(@"SBHClockApplicationIconImageView");
+        if (clk) {
+            if (TBHasMethod(clk, @"contentsImage"))
+                o_clkContents = (id (*)(id, SEL))TBHook(clk, @"contentsImage", (IMP)tb_clkContents, "时钟供图 clk.contents");
+            if (TBHasMethod(clk, @"squareContentsImage"))
+                o_clkSquare = (id (*)(id, SEL))TBHook(clk, @"squareContentsImage", (IMP)tb_clkSquare, "时钟供图 clk.square");
         }
     }
 
