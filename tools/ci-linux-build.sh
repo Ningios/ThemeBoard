@@ -99,9 +99,13 @@ for f in engine/*.m; do
     -Iengine -Wno-deprecated-declarations -o "$OUT/obj/$(basename "$f" .m).o" "$f"
 done
 
-"$LD_FOUND" -dylib -arch arm64e -platform_version ios 15.0 16.5 \
-    -syslibroot "$SDK" -undefined dynamic_lookup \
-    -o "$OUT/ThemeBoardEngine.dylib" "$OUT/obj"/*.o
+# 0.18.4：优先要「经典 dyld_info 绑定」而不是 chained fixups —— 真机可用的 macOS 产物就是这种。
+LINK_ARGS=(-dylib -arch arm64e -platform_version ios 15.0 16.5 -syslibroot "$SDK" -undefined dynamic_lookup)
+if ! "$LD_FOUND" "${LINK_ARGS[@]}" -no_fixup_chains -o "$OUT/ThemeBoardEngine.dylib" "$OUT"/obj/*.o 2>/tmp/ld1.err; then
+  echo "ld64 不支持 -no_fixup_chains，回退默认"
+  head -3 /tmp/ld1.err
+  "$LD_FOUND" "${LINK_ARGS[@]}" -o "$OUT/ThemeBoardEngine.dylib" "$OUT"/obj/*.o
+fi
 
 echo "===== 5. 检查产物 ====="
 python3 - <<'PY'
@@ -120,6 +124,25 @@ except Exception as e:
     print("检查失败", e)
 PY
 
+# 0.18.4：ld64 只写 cpusubtype=2（缺 0x80000000 的 ptrauth ABI 位）。签名前把它补上，
+# 否则 dyld 在 arm64e 进程里可能拒绝加载。只在「非 chained」时才补。
+python3 - <<'PYPATCH'
+import struct
+p='out/ThemeBoardEngine.dylib'
+d=bytearray(open(p,'rb').read())
+cpu,sub=struct.unpack('<ii',bytes(d[4:12]))
+nc=struct.unpack('<I',bytes(d[16:20]))[0]
+off=32; chained=False
+for _ in range(nc):
+    c,sz=struct.unpack('<II',bytes(d[off:off+8]))
+    if c==0x80000034: chained=True
+    off+=sz
+if sub==2 and not chained:
+    d[8:12]=struct.pack('<i',0x80000002); open(p,'wb').write(d)
+    print("已补 ptrauth ABI 位：cpusubtype 0x2 -> 0x80000002")
+else:
+    print("未补（sub=%s chained=%s）" % (hex(sub & 0xffffffff), chained))
+PYPATCH
 ldid -S "$OUT/ThemeBoardEngine.dylib" 2>/dev/null || echo "签名跳过"
 
 echo "===== 6. 打包 deb ====="
