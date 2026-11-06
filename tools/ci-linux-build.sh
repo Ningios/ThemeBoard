@@ -102,7 +102,8 @@ done
 # 0.18.4：优先要「经典 dyld_info 绑定」而不是 chained fixups —— 真机可用的 macOS 产物就是这种。
 LINK_ARGS=(-dylib -arch arm64e -platform_version ios 15.0 16.5 -syslibroot "$SDK" -undefined dynamic_lookup)
 if ! "$LD_FOUND" "${LINK_ARGS[@]}" -no_fixup_chains -o "$OUT/ThemeBoardEngine.dylib" "$OUT"/obj/*.o 2>/tmp/ld1.err; then
-  echo "ld64 不支持 -no_fixup_chains，回退默认"
+  echo "ld64 不支持 -no_fixup_chains，回退默认；该 ld64 的 fixup 相关选项："
+  "$LD_FOUND" -help 2>&1 | grep -i -E "fixup|chained" | head -10
   head -3 /tmp/ld1.err
   "$LD_FOUND" "${LINK_ARGS[@]}" -o "$OUT/ThemeBoardEngine.dylib" "$OUT"/obj/*.o
 fi
@@ -137,7 +138,7 @@ for _ in range(nc):
     c,sz=struct.unpack('<II',bytes(d[off:off+8]))
     if c==0x80000034: chained=True
     off+=sz
-if sub==2 and not chained:
+if sub==2:
     d[8:12]=struct.pack('<i',0x80000002); open(p,'wb').write(d)
     print("已补 ptrauth ABI 位：cpusubtype 0x2 -> 0x80000002")
 else:
