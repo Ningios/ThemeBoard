@@ -4962,8 +4962,8 @@ static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons) {
 /// 只清「主题覆盖到的」那几十个图标的缓存，小批 + 间隔，避免把 SpringBoard 拖死。
 static void TBPurgeThemedIcons(void) {
     if (TBSafeMode()) { TBLog(@"安全模式：跳过清缓存"); return; }
-    id v = TBPref(@"PurgeCache");
-    if (v && ![v boolValue]) { TBLog(@"已跳过清缓存（设置里关掉了）"); return; }
+    id v = TBPref(@"PurgeCache");                       // 0.18.3：默认关，必须显式打开才清缓存
+    if (!v || ![v boolValue]) { TBLog(@"已跳过清缓存（默认关 / 设置里关掉了）"); return; }
 
     [gLock lock];
     NSArray *caches = gCaches.allObjects;
@@ -5191,7 +5191,7 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
 
     // 注意：缓存写入端被我们接管后，换主题必须通知图标视图重取，
     // 这一步不能受「清缓存」开关控制（之前那版会被它一票否决 → 只能重启才刷新）
-    BOOL allowPurge = YES;
+    BOOL allowPurge = NO;                              // 0.18.3：默认关（与设置页一致）
     id pv = TBPref(@"PurgeCache");
     if (pv) allowPurge = [pv boolValue];
     if (!allowPurge) TBLog(@"清缓存开关关闭：跳过逐个清缓存，仍执行图标重取");
@@ -5384,6 +5384,23 @@ static void TBMain(void) {
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, TBReload,
                                     (__bridge CFStringRef)kNotify, NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    // ★ 0.18.3：首启补刷 —— 修「重启桌面 / 重启用户空间后图标是原图，要再注销一次才好」。
+    //   原因：SpringBoard 刚起来时系统先按原图把桌面画了一遍（我们的索引/掩码缓存还没就绪），
+    //   之后没人再去请求，就停在那儿。这里在就绪后主动补一次 —— 效果等价于用户手动再注销。
+    //   只在 SpringBoard 主进程、有主题、非安全模式时执行；9 秒内做完，不常驻。
+    if (gIsPrimary) {
+        NSArray *secs = @[ @3.0, @8.0 ];
+        for (NSNumber *sec in secs) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(sec.doubleValue * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (!TBEnabled() || TBSafeMode() || !TBActiveTheme().length) return;
+                TBLog(@"首启补刷（%.0fs）：重贴图标 + 刷新桌面", sec.doubleValue);
+                TBHealAllIconViews();
+                TBRefreshSpringBoard(@"首启补刷");
+            });
+        }
+    }
 
     } @catch (NSException *e) {
         TBTouchMarker("crash");
