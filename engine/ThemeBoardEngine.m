@@ -5263,6 +5263,14 @@ static void TBStartupHeal(NSString *why) {
                    dispatch_get_main_queue(), ^{ TBRefreshSpringBoard(@"启动自愈补刀"); });
 }
 
+/// ★ 0.18.16（方案 A）：轻量应用 —— 换主题时【不做】批量通知/重贴/刷新桌面。
+/// 读端接管已经能保证"任何一次取图都是主题图"，所以不需要逼桌面重画；
+/// 那三步正是"闪"的来源。可用 LightApply=NO 回到旧行为。
+static BOOL TBLightApply(void) {
+    id v = TBPref(@"LightApply");
+    return (!v || [v boolValue]);
+}
+
 static NSUInteger gReloadRunSeq = 0;
 
 static void TBRunReload(NSUInteger mySeq, NSString *why);
@@ -5518,6 +5526,7 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
                 __block NSUInteger idx = 0;
                 __block void (^drainNotify)(void) = nil;
                 drainNotify = ^{
+                    if (TBLightApply()) { drainNotify = nil; return; }   // 0.18.16 方案A：不逼视图重取
                     if (idx >= icons.count) {
                         TBLog(@"已通知图标视图重取 %ld 次（分批异步）", (long)sent);
                         drainNotify = nil;
@@ -5550,11 +5559,13 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (mySeq != gReloadRunSeq) return;   // 期间又刷了一次，交给最新那次处理
+            if (TBLightApply()) return;           // 0.18.16 方案A：不重贴
             TBHealAllIconViews();
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (mySeq != gReloadRunSeq) return;   // 同上：过期的那次不要再补一刀
+            if (TBLightApply()) return;           // 0.18.16 方案A：不刷新桌面
             TBRefreshSpringBoard(why);
         });
         // 还原之后把屏幕上的角标重新布局一次：新主题（有素材）立刻补上，
@@ -5562,7 +5573,10 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (mySeq != gReloadRunSeq) return;
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];   // 0.18.16：角标重排也瞬间完成
             TBBadgeRelayoutVisible();
+            [CATransaction commit];
         });
     });
 }
