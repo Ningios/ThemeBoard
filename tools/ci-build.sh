@@ -100,7 +100,7 @@ rm -f "$DEB"
 ( cd "$STAGE" && tar --no-mac-metadata -czf "$OUT/data.tar.gz" ./var )
 ( cd "$STAGE/DEBIAN" && tar --no-mac-metadata -czf "$OUT/control.tar.gz" ./control ./postinst ./postrm )
 echo "2.0" > "$OUT/debian-binary"
-( cd "$OUT" && ar rc "$ROOT/$DEB" debian-binary control.tar.gz data.tar.gz )
+python3 "$ROOT/tools/mkdeb.py" "$ROOT/$DEB" "$OUT"
 
 if [ "$ENGINE_BUILT" = "1" ]; then
   EV=$(awk '/^Version:/{print $2}' control.engine)
@@ -110,7 +110,7 @@ if [ "$ENGINE_BUILT" = "1" ]; then
   ( cd "$ESTAGE" && tar --no-mac-metadata -czf "$EWORK/data.tar.gz" ./var )
   ( cd "$ESTAGE/DEBIAN" && tar --no-mac-metadata -czf "$EWORK/control.tar.gz" ./control ./postinst )
   echo "2.0" > "$EWORK/debian-binary"
-  ( cd "$EWORK" && ar rc "$ROOT/$EDEB" debian-binary control.tar.gz data.tar.gz )
+  python3 "$ROOT/tools/mkdeb.py" "$ROOT/$EDEB" "$EWORK"
   ls -l "$EDEB"
 fi
 
