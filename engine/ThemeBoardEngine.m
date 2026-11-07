@@ -134,6 +134,7 @@ static void TBTrimLog(const char *path) {
 
 static void TBLog(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
+static void TBStartupHeal(NSString *why);   // 0.18.13：启动自愈
     NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
     NSString *msg = [NSString stringWithFormat:@"[%@] %@", TBProcName(), body];
@@ -585,6 +586,8 @@ static void TBLoadIndex(void) {
     gIndexTheme = theme;
     if (first) {
         TBLog(@"索引 %@ → %lu 个图标 (%@)", theme, (unsigned long)map.count, dir);
+        // ★ 0.18.13：索引就绪 = 我们终于能给出主题图了 → 触发一次启动自愈（无需用户再进 App 点应用）
+        if (gIsPrimary) TBStartupHeal(@"索引就绪");
         if (map.count == 0) {
             TBLog(@"⚠️ 主题目录里没有 PNG：dir=%@", dir ?: @"(未找到目录)");
             TBLog(@"   候选根目录：%@", [TBRoots() componentsJoinedByString:@" | "]);
@@ -2492,12 +2495,12 @@ static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
                 @try {
                     id shp = [self valueForKey:@"shadowPath"];
                     id sho = [self valueForKey:@"shadowOpacity"];
-                    if (shp && shp != [NSNull null]) isShadowLayer = YES;
-                    if ([sho respondsToSelector:@selector(floatValue)] && [sho floatValue] > 0.01) isShadowLayer = YES;
+                    /* 0.18.13：停用 —— 这句把真正的图像层也误判成阴影层，等于没替换 */
+                    /* 0.18.13：停用（同上） */
                 } @catch (NSException *e) { }
                 if (!gLayerReplacedOwners) gLayerReplacedOwners = [NSMutableSet set];
                 NSValue *ownerKey = [NSValue valueWithPointer:(__bridge const void *)owner];
-                BOOL already = [gLayerReplacedOwners containsObject:ownerKey];
+                BOOL already = NO;   // 0.18.13：不再限制「每 owner 只换一次」，恢复 0.18.11 行为
                 NSString *fb = (!isShadowLayer && !already) ? TBProbeBID(owner) : nil;
                 UIImage *fm = fb.length ? TBImageForBundle(fb) : nil;
                 if (fm && contents) {
@@ -5146,10 +5149,12 @@ static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons) {
 }
 
 /// 只清「主题覆盖到的」那几十个图标的缓存，小批 + 间隔，避免把 SpringBoard 拖死。
+static BOOL gForcePurge = NO;   // 0.18.13：启动自愈期间临时置 YES，绕过 PurgeCache 开关
+
 static void TBPurgeThemedIcons(void) {
     if (TBSafeMode()) { TBLog(@"安全模式：跳过清缓存"); return; }
     id v = TBPref(@"PurgeCache");                       // 0.18.3：默认关，必须显式打开才清缓存
-    if (!v || ![v boolValue]) { TBLog(@"已跳过清缓存（默认关 / 设置里关掉了）"); return; }
+    if (!gForcePurge && (!v || ![v boolValue])) { TBLog(@"已跳过清缓存（默认关 / 设置里关掉了）"); return; }
 
     [gLock lock];
     NSArray *caches = gCaches.allObjects;
@@ -5202,6 +5207,34 @@ static void TBPurgeThemedIcons(void) {
 ///   这里不再保留独立函数 —— 通知逻辑只有这一处使用方。）
 
 /// 正在执行的那次刷新序号（延迟任务用它判断自己是不是过期了）
+
+/// ★ 0.18.13 启动自愈：修「重新越狱 / 重启后图标是原图，必须进 App 再点一次『应用』」。
+/// 原因：SpringBoard 启动时直接读【磁盘图标缓存】把桌面画出来，绕过我们的取图 hook；
+///       点「应用」= 清缓存 + 让系统重取，所以点一次就好。这里在索引就绪后自动做同样的事。
+static BOOL gDoneStartupHeal = NO;
+
+static void TBStartupHeal(NSString *why) {
+    if (gDoneStartupHeal || !gIsPrimary) return;
+    gDoneStartupHeal = YES;
+    if (TBSafeMode()) { TBLog(@"启动自愈：安全模式，跳过"); return; }
+    if (!TBEnabled()) { TBLog(@"启动自愈：总开关关，跳过"); return; }
+    id en = TBPref(@"StartupHeal");                    // 缺失 = 开（可用 StartupHeal=NO 关掉）
+    if (en && ![en boolValue]) { TBLog(@"启动自愈：已被 StartupHeal=NO 关掉"); return; }
+    if (!TBActiveTheme().length) { TBLog(@"启动自愈：没有主题，跳过"); return; }
+
+    TBLog(@"启动自愈(%@)：清主题图标缓存 → 重贴 → 刷新桌面", why ?: @"?");
+    gForcePurge = YES;
+    TBPurgeThemedIcons();
+    gForcePurge = NO;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ TBHealAllIconViews(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ TBRefreshSpringBoard(@"启动自愈"); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ TBRefreshSpringBoard(@"启动自愈补刀"); });
+}
+
 static NSUInteger gReloadRunSeq = 0;
 
 static void TBRunReload(NSUInteger mySeq, NSString *why);
