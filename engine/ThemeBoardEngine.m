@@ -2530,7 +2530,12 @@ static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
                     if (!isOurs) {
                         [gLayerReplacedOwners addObject:ownerKey];
                         sInLayerReplace = YES;
+                        // ★ 0.18.15：contents 是 CALayer 的【可动画】属性 —— 直接赋值会触发隐式淡入淡出，
+                        //   连续替换就是肉眼看到的"闪"。这里关掉事务动作，瞬间替换、不产生动画。
+                        [CATransaction begin];
+                        [CATransaction setDisableActions:YES];
                         if (o_probeLayerContents) o_probeLayerContents(self, _cmd, (__bridge id)fm.CGImage);
+                        [CATransaction commit];
                         sInLayerReplace = NO;
                         TBLogOnce([@"layerfix|" stringByAppendingString:fb], @"图层兜底 %@", fb);
                         return;
