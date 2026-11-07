@@ -2459,6 +2459,7 @@ static void tb_lastMileSetImage(id self, SEL _cmd, id image) {
 // 性能：先用「已判定非图标类」的黑名单快查（每个类只做一次类名判断），热路径上只有一次集合查表。
 static void (*o_probeLayerContents)(id, SEL, id);
 static NSMutableSet *gProbeNonIconLayerOwners = nil;
+static BOOL sInLayerReplace = NO;
 
 static BOOL TBProbeLayerOwnerIsIcon(id owner) {
     if (!owner) return NO;
@@ -2479,6 +2480,26 @@ static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
         NSString *lcn = NSStringFromClass([self class]);
         if (TBProbeLayerOwnerIsIcon(owner) || [lcn rangeOfString:@"Icon"].location != NSNotFound) {
             NSString *ocn = owner ? NSStringFromClass([owner class]) : @"-";
+            // ★ 0.18.11：探针已证实「SBIconImageView 还会被塞一张 192x192 原图(是否主题图=0)」，
+            //   进/退 App 的动画用的就是它 → 这里把非主题的原图直接换成主题图（时钟不碰）。
+            if (owner && !sInLayerReplace && !TBSafeMode() &&
+                [ocn rangeOfString:@"Clock"].location == NSNotFound) {
+                NSString *fb = TBProbeBID(owner);
+                UIImage *fm = fb.length ? TBImageForBundle(fb) : nil;
+                if (fm && contents) {
+                    BOOL isOurs = NO;
+                    if ([contents isKindOfClass:[UIImage class]]) isOurs = (contents == fm);
+                    else if (CFGetTypeID((__bridge CFTypeRef)contents) == CGImageGetTypeID())
+                        isOurs = (contents == (__bridge id)fm.CGImage);
+                    if (!isOurs) {
+                        sInLayerReplace = YES;
+                        if (o_probeLayerContents) o_probeLayerContents(self, _cmd, (__bridge id)fm.CGImage);
+                        sInLayerReplace = NO;
+                        TBLogOnce([@"layerfix|" stringByAppendingString:fb], @"图层兜底 %@", fb);
+                        return;
+                    }
+                }
+            }
             NSString *bid = owner ? TBProbeBID(owner) : nil;
             CGSize sz = CGSizeZero;
             if (contents && CFGetTypeID((__bridge CFTypeRef)contents) == CGImageGetTypeID()) {
