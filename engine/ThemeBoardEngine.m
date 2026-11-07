@@ -2,6 +2,7 @@
 // 依据：headers/17.2/{SBHIconImageCache,SBIcon,SBLeafIcon,SBApplicationIcon,SBHIconManager}.h
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>   // 0.18.15：CATransaction
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <unistd.h>
