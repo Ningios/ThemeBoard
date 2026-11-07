@@ -2460,6 +2460,7 @@ static void tb_lastMileSetImage(id self, SEL _cmd, id image) {
 static void (*o_probeLayerContents)(id, SEL, id);
 static NSMutableSet *gProbeNonIconLayerOwners = nil;
 static BOOL sInLayerReplace = NO;
+static NSMutableSet *gLayerReplacedOwners = nil;   // 0.18.12：每个图标视图只替换一次
 
 static BOOL TBProbeLayerOwnerIsIcon(id owner) {
     if (!owner) return NO;
@@ -2482,9 +2483,22 @@ static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
             NSString *ocn = owner ? NSStringFromClass([owner class]) : @"-";
             // ★ 0.18.11：探针已证实「SBIconImageView 还会被塞一张 192x192 原图(是否主题图=0)」，
             //   进/退 App 的动画用的就是它 → 这里把非主题的原图直接换成主题图（时钟不碰）。
+            // ★ 0.18.12：同一个图标视图里有多层（图像层 / 阴影层 / 高光层）都在承载图像。
+            //   0.18.11 把它们全换了 → 动画缩放时叠成「重影/印子」（日志：每 App 4 次）。
+            //   现在：每个 owner 只换第一次命中的那层，并且跳过阴影层（shadowPath/shadowOpacity）。
             if (owner && !sInLayerReplace && !TBSafeMode() &&
                 [ocn rangeOfString:@"Clock"].location == NSNotFound) {
-                NSString *fb = TBProbeBID(owner);
+                BOOL isShadowLayer = NO;
+                @try {
+                    id shp = [self valueForKey:@"shadowPath"];
+                    id sho = [self valueForKey:@"shadowOpacity"];
+                    if (shp && shp != [NSNull null]) isShadowLayer = YES;
+                    if ([sho respondsToSelector:@selector(floatValue)] && [sho floatValue] > 0.01) isShadowLayer = YES;
+                } @catch (NSException *e) { }
+                if (!gLayerReplacedOwners) gLayerReplacedOwners = [NSMutableSet set];
+                NSValue *ownerKey = [NSValue valueWithPointer:(__bridge const void *)owner];
+                BOOL already = [gLayerReplacedOwners containsObject:ownerKey];
+                NSString *fb = (!isShadowLayer && !already) ? TBProbeBID(owner) : nil;
                 UIImage *fm = fb.length ? TBImageForBundle(fb) : nil;
                 if (fm && contents) {
                     BOOL isOurs = NO;
@@ -2492,6 +2506,7 @@ static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
                     else if (CFGetTypeID((__bridge CFTypeRef)contents) == CGImageGetTypeID())
                         isOurs = (contents == (__bridge id)fm.CGImage);
                     if (!isOurs) {
+                        [gLayerReplacedOwners addObject:ownerKey];
                         sInLayerReplace = YES;
                         if (o_probeLayerContents) o_probeLayerContents(self, _cmd, (__bridge id)fm.CGImage);
                         sInLayerReplace = NO;
