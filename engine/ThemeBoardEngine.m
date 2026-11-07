@@ -5428,22 +5428,9 @@ static void TBMain(void) {
                                     (__bridge CFStringRef)kNotify, NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
 
-    // ★ 0.18.3：首启补刷 —— 修「重启桌面 / 重启用户空间后图标是原图，要再注销一次才好」。
-    //   原因：SpringBoard 刚起来时系统先按原图把桌面画了一遍（我们的索引/掩码缓存还没就绪），
-    //   之后没人再去请求，就停在那儿。这里在就绪后主动补一次 —— 效果等价于用户手动再注销。
-    //   只在 SpringBoard 主进程、有主题、非安全模式时执行；9 秒内做完，不常驻。
-    if (gIsPrimary) {
-        NSArray *secs = @[ @3.0, @8.0 ];
-        for (NSNumber *sec in secs) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(sec.doubleValue * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                if (!TBEnabled() || TBSafeMode() || !TBActiveTheme().length) return;
-                TBLog(@"首启补刷（%.0fs）：重贴图标 + 刷新桌面", sec.doubleValue);
-                TBHealAllIconViews();
-                TBRefreshSpringBoard(@"首启补刷");
-            });
-        }
-    }
+    // ★ 0.18.5：0.18.3/0.18.4 的「首启补刷」（启动后 3s/8s 各做一次 heal + 刷新桌面）
+    //   疑似导致 SpringBoard 反复重启（闪屏，一黑一亮），已整块移除。
+    //   等稳定后再考虑更轻的替代方案（先确认不再闪屏）。
 
     } @catch (NSException *e) {
         TBTouchMarker("crash");
