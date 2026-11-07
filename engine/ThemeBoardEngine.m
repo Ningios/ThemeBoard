@@ -25,6 +25,7 @@ typedef struct {
 
 static NSString *gLogPath;
 static BOOL gIsPrimary = NO;      // 只有 SpringBoard 类进程写日志文件，避免多进程互相咬行
+static void TBStartupHeal(NSString *why);   // 0.18.13：启动自愈（文件作用域声明）
 static dispatch_queue_t gLogQueue;
 static NSMutableDictionary<NSString *, NSString *> *gIndex;
 static NSString *gIndexTheme;
@@ -134,7 +135,6 @@ static void TBTrimLog(const char *path) {
 
 static void TBLog(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
-static void TBStartupHeal(NSString *why);   // 0.18.13：启动自愈
     NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
     NSString *msg = [NSString stringWithFormat:@"[%@] %@", TBProcName(), body];
