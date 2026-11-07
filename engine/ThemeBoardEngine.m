@@ -2172,9 +2172,11 @@ static UIImage *TBServeThemedForIconCache(id cache, id icon) {
         if (!bid.length) return nil;
         UIImage *base = TBImageForBundle(bid);
         if (!base) return nil;
-        UIImage *fit = TBFitCached(base, TBInfoOfCache(cache), bid) ?: base;
-        if (fit) TBLogOnce([@"serveRead|" stringByAppendingString:bid], @"读端接管 %@", bid);
-        return fit;
+        // ★ 0.18.17：不缩放 —— 直接把主题原图交给系统，由 GPU 采样缩放。
+        //   省掉每张图每个尺寸的 Core Graphics 绘制（回桌面卡一下的根源），CPU 开销≈0。
+        //   代价：小尺寸（设置页 29pt / 角标）可能略软。
+        TBLogOnce([@"serveRead|" stringByAppendingString:bid], @"读端接管(原图) %@", bid);
+        return base;
     } @catch (NSException *e) { return nil; }
 }
 
@@ -5267,6 +5269,9 @@ static void TBStartupHeal(NSString *why) {
 /// 读端接管已经能保证"任何一次取图都是主题图"，所以不需要逼桌面重画；
 /// 那三步正是"闪"的来源。可用 LightApply=NO 回到旧行为。
 static BOOL TBLightApply(void) {
+    // ★ 0.18.17：没有主题 / 总开关关闭 = 正在「恢复默认」→ 必须走完整流程
+    //   （不这么做，桌面会一直抱着旧主题图，系统缓存里也留着主题图，看起来"没恢复"）
+    if (!TBEnabled() || !TBActiveTheme().length) return NO;
     id v = TBPref(@"LightApply");
     return (!v || [v boolValue]);
 }
@@ -5405,6 +5410,14 @@ static void TBRefreshVisibleTablesLight(NSString *why) {
 static void TBRunReload(NSUInteger mySeq, NSString *why) {
     NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
     TBLog(@"重活开始：%@", why);
+    // ★ 0.18.17：「恢复默认」（没有主题 / 总开关关闭）→ 强制清一次主题图标缓存。
+    //   方向是"回到系统默认"，本来就该重画一次；不清的话系统缓存里还是主题图。
+    if (!TBEnabled() || !TBActiveTheme().length) {
+        TBLog(@"恢复默认：强制清理主题图标缓存");
+        gForcePurge = YES;
+        TBPurgeThemedIcons();
+        gForcePurge = NO;
+    }
     // ★ 0.15.92：重活只在 SpringBoard（真正有桌面图标缓存的进程）里做。
     //   日志实锤：App 进程/其它进程收到 changed 也会跑「重建索引 + 清缓存 + 通知重取」，
     //   主线程被占住 1~2 秒 —— 表现就是「点了应用主题后，弹窗还在时点不动，等它消失才恢复」。
