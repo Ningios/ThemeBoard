@@ -2426,7 +2426,7 @@ static UIImage *TBScaledToSize(UIImage *img, CGSize size) {
     return out ?: img;
 }
 
-static void tb_ivSetImage(id self, SEL _cmd, id image) {
+static void tb_lastMileSetImage(id self, SEL _cmd, id image) {
     if (!sInIVHook && image && TBEnabled() && !TBSafeMode()) {
         @try {
             id icon = nil;
@@ -4812,7 +4812,7 @@ static void TBInstall(void) {
         gDoneIVSetImage = YES;
         Class ivCls = NSClassFromString(@"UIImageView");
         if (ivCls && TBHasMethod(ivCls, @"setImage:")) {
-            o_ivSetImage = (SetImgFn)TBHook(ivCls, @"setImage:", (IMP)tb_ivSetImage, "UIImageView 最后一公里");
+            o_ivSetImage = (SetImgFn)TBHook(ivCls, @"setImage:", (IMP)tb_lastMileSetImage, "UIImageView 最后一公里");
         }
     }
 
