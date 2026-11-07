@@ -4629,7 +4629,12 @@ static void TBInstall(void) {
     //   除非未来做真机运行时 dump 并找到安全插入点，否则不再尝试。
 
     // 时钟供图：真正的时钟视图类上返回主题表盘（4 个独立 orig 槽）
-    {
+    // ★ 0.18.6 关键修复：TBInstall() 启动后每秒重试共 11 次，而 TBHook 是「无条件替换 IMP」。
+    //   没有这个保护时，第 2 次安装会把 o_* 槽覆盖成我们自己的函数 → 一渲染时钟就无限自我递归
+    //   → 栈溢出 → SpringBoard 崩溃重启（表现为闪屏，一黑一亮）。必须只装一次。
+    static BOOL gDoneClockImgHooks = NO;
+    if (!gDoneClockImgHooks) {
+        gDoneClockImgHooks = YES;
         Class live = NSClassFromString(@"SBLiveIconImageView");
         if (live) {
             if (TBHasMethod(live, @"contentsImage"))
@@ -4778,6 +4783,10 @@ static void TBInstall(void) {
         }
 
         // 0.18.4：带 imageAppearance 的新签名（iOS 17 过渡动画用的就是它）
+        // ★ 0.18.6：同样只装一次（否则 orig 槽会被我们自己的实现覆盖 → 自我递归）
+        static BOOL gDoneAppearanceHooks = NO;
+        if (!gDoneAppearanceHooks) {
+            gDoneAppearanceHooks = YES;
         if (TBHasMethod(cache, @"imageForIcon:imageAppearance:options:")) {
             o_imageForIconApp = (FnIconAppOpt)TBHook(cache, @"imageForIcon:imageAppearance:options:",
                                                      (IMP)tb_imageForIconApp, "imageForIcon:appearance:options");
@@ -4785,6 +4794,7 @@ static void TBInstall(void) {
         if (TBHasMethod(cache, @"cacheImage:forIcon:imageAppearance:options:")) {
             o_cacheImageForIconApp = (FnImageForIconAppOpt)TBHook(cache, @"cacheImage:forIcon:imageAppearance:options:",
                                                                  (IMP)tb_cacheImageForIconApp, "cacheImage:forIcon:appearance:options");
+        }
         }
     }
 
