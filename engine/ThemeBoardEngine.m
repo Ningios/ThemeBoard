@@ -2455,6 +2455,53 @@ static void tb_lastMileSetImage(id self, SEL _cmd, id image) {
     if (o_ivSetImage) o_ivSetImage(self, _cmd, image);
 }
 
+// ---- 0.18.10 探针：CALayer -setContents:（图标很可能是直接写图层内容上屏的）----
+// 性能：先用「已判定非图标类」的黑名单快查（每个类只做一次类名判断），热路径上只有一次集合查表。
+static void (*o_probeLayerContents)(id, SEL, id);
+static NSMutableSet *gProbeNonIconLayerOwners = nil;
+
+static BOOL TBProbeLayerOwnerIsIcon(id owner) {
+    if (!owner) return NO;
+    Class c = object_getClass(owner);
+    if (!gProbeNonIconLayerOwners) gProbeNonIconLayerOwners = [NSMutableSet set];
+    NSValue *k = [NSValue valueWithPointer:(__bridge const void *)c];
+    if ([gProbeNonIconLayerOwners containsObject:k]) return NO;
+    NSString *cn = NSStringFromClass(c);
+    BOOL hit = ([cn rangeOfString:@"Icon"].location != NSNotFound ||
+                [cn rangeOfString:@"Badge"].location != NSNotFound);
+    if (!hit) [gProbeNonIconLayerOwners addObject:k];
+    return hit;
+}
+
+static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
+    @try {
+        id owner = ([self respondsToSelector:NSSelectorFromString(@"delegate")] ? [self valueForKey:@"delegate"] : nil);
+        NSString *lcn = NSStringFromClass([self class]);
+        if (TBProbeLayerOwnerIsIcon(owner) || [lcn rangeOfString:@"Icon"].location != NSNotFound) {
+            NSString *ocn = owner ? NSStringFromClass([owner class]) : @"-";
+            NSString *bid = owner ? TBProbeBID(owner) : nil;
+            CGSize sz = CGSizeZero;
+            if (contents && CFGetTypeID((__bridge CFTypeRef)contents) == CGImageGetTypeID()) {
+                sz = CGSizeMake(CGImageGetWidth((__bridge CGImageRef)contents), CGImageGetHeight((__bridge CGImageRef)contents));
+            } else if ([contents isKindOfClass:[UIImage class]]) {
+                sz = ((UIImage *)contents).size;
+            }
+            BOOL ours = NO;
+            if (bid.length) {
+                UIImage *mine = TBImageForBundle(bid);
+                if (mine && contents) {
+                    if ([contents isKindOfClass:[UIImage class]]) ours = (contents == mine);
+                    else if (CFGetTypeID((__bridge CFTypeRef)contents) == CGImageGetTypeID()) ours = (contents == (__bridge id)mine.CGImage);
+                }
+            }
+            TBLogOnce([NSString stringWithFormat:@"layer|%@|%@|%@|%.0fx%.0f|%d", lcn, ocn, bid ?: @"-", sz.width, sz.height, ours ? 1 : 0],
+                      @"探针 图层 layer=%@ owner=%@ bid=%@ 内容=%.0fx%.0f 是否主题图=%d",
+                      lcn, ocn, bid.length ? bid : @"-", sz.width, sz.height, ours ? 1 : 0);
+        }
+    } @catch (NSException *e) {}
+    if (o_probeLayerContents) o_probeLayerContents(self, _cmd, contents);
+}
+
 // 快照路径探针：动画很可能是"抓视图画面"而不是"贴图"
 static void (*o_probeSnapA)(id, SEL, BOOL);
 static id (*o_probeSnapB)(id, SEL);
@@ -4850,6 +4897,10 @@ static void TBInstall(void) {
                 o_probeSnapA = (void (*)(id, SEL, BOOL))TBHook(uiView, @"snapshotViewAfterScreenUpdates:", (IMP)tb_probeSnapA, "探针 快照A");
             if (TBHasMethod(uiView, @"snapshotView"))
                 o_probeSnapB = (id (*)(id, SEL))TBHook(uiView, @"snapshotView", (IMP)tb_probeSnapB, "探针 快照B");
+        }
+        Class layerCls = NSClassFromString(@"CALayer");
+        if (layerCls && TBHasMethod(layerCls, @"setContents:")) {
+            o_probeLayerContents = (void (*)(id, SEL, id))TBHook(layerCls, @"setContents:", (IMP)tb_probeLayerContents, "探针 图层 contents");
         }
         Class cacheCls = NSClassFromString(@"SBHIconImageCache");
         BOOL a1 = cacheCls && TBHasMethod(cacheCls, @"imageForIcon:imageAppearance:options:");
