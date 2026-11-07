@@ -2,7 +2,7 @@
 // 依据：headers/17.2/{SBHIconImageCache,SBIcon,SBLeafIcon,SBApplicationIcon,SBHIconManager}.h
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <QuartzCore/QuartzCore.h>   // 0.18.15：CATransaction
+#import <QuartzCore/QuartzCore.h>   // 0.18.18：CATransaction
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <unistd.h>
@@ -26,7 +26,6 @@ typedef struct {
 
 static NSString *gLogPath;
 static BOOL gIsPrimary = NO;      // 只有 SpringBoard 类进程写日志文件，避免多进程互相咬行
-static void TBStartupHeal(NSString *why);   // 0.18.13：启动自愈（文件作用域声明）
 static dispatch_queue_t gLogQueue;
 static NSMutableDictionary<NSString *, NSString *> *gIndex;
 static NSString *gIndexTheme;
@@ -587,8 +586,6 @@ static void TBLoadIndex(void) {
     gIndexTheme = theme;
     if (first) {
         TBLog(@"索引 %@ → %lu 个图标 (%@)", theme, (unsigned long)map.count, dir);
-        // ★ 0.18.13：索引就绪 = 我们终于能给出主题图了 → 触发一次启动自愈（无需用户再进 App 点应用）
-        if (gIsPrimary) TBStartupHeal(@"索引就绪");
         if (map.count == 0) {
             TBLog(@"⚠️ 主题目录里没有 PNG：dir=%@", dir ?: @"(未找到目录)");
             TBLog(@"   候选根目录：%@", [TBRoots() componentsJoinedByString:@" | "]);
@@ -2163,28 +2160,10 @@ static FnISGeneration o_isGeneration;
 typedef id (*FnISGenerateImage)(id, SEL);
 static FnISGenerateImage o_isGenerateImage;
 
-/// ★ 0.18.14 读端接管：缓存【读】的时候直接返回主题图。
-/// 这样第一次画就是主题图，不需要"清缓存 → 重贴 → 刷新"三步（那三步会让桌面重绘一下，就是看得见的"闪"）。
-static UIImage *TBServeThemedForIconCache(id cache, id icon) {
-    if (!TBEnabled() || TBSafeMode() || !TBApplyIconForDesktop()) return nil;
-    @try {
-        NSString *bid = TBBIDFromIcon(icon);
-        if (!bid.length) return nil;
-        UIImage *base = TBImageForBundle(bid);
-        if (!base) return nil;
-        // ★ 0.18.17：不缩放 —— 直接把主题原图交给系统，由 GPU 采样缩放。
-        //   省掉每张图每个尺寸的 Core Graphics 绘制（回桌面卡一下的根源），CPU 开销≈0。
-        //   代价：小尺寸（设置页 29pt / 角标）可能略软。
-        TBLogOnce([@"serveRead|" stringByAppendingString:bid], @"读端接管(原图) %@", bid);
-        return base;
-    } @catch (NSException *e) { return nil; }
-}
-
 static id tb_imageForIcon(id self, SEL _cmd, id icon) {
-    // ★ 0.18.14：先给主题图（读端接管）；没素材再直通系统。
-    //   直通时顺手从系统那张已遮罩图里学一次"系统遮罩形状"，供我们裁剪素材时使用。
+    // 直通：图像的"成品"由系统自己合成（素材由 SBIcon 那层给），我们不再在这里返回成品图。
+    // 顺手从系统那张已遮罩图里学一次"系统遮罩形状"，供我们裁剪素材时使用。
     TBRemember(self);
-    { UIImage *mine = TBServeThemedForIconCache(self, icon); if (mine) return mine; }
     id r = o_imageForIcon ? o_imageForIcon(self, _cmd, icon) : nil;
     if (!gSystemMaskTemplate && [r isKindOfClass:[UIImage class]]) TBLearnSystemMask(r);
     return r;
@@ -2192,19 +2171,16 @@ static id tb_imageForIcon(id self, SEL _cmd, id icon) {
 
 static id tb_imageForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
-    { UIImage *mine = TBServeThemedForIconCache(self, icon); if (mine) return mine; }
     return o_imageForIconOpt ? o_imageForIconOpt(self, _cmd, icon, opt) : nil;
 }
 
 static id tb_cachedForIcon(id self, SEL _cmd, id icon) {
     TBRemember(self);
-    { UIImage *mine = TBServeThemedForIconCache(self, icon); if (mine) return mine; }
     return o_cachedForIcon ? o_cachedForIcon(self, _cmd, icon) : nil;
 }
 
 static id tb_realForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
-    { UIImage *mine = TBServeThemedForIconCache(self, icon); if (mine) return mine; }
     return o_realForIconOpt ? o_realForIconOpt(self, _cmd, icon, opt) : nil;
 }
 
@@ -2485,7 +2461,6 @@ static void tb_lastMileSetImage(id self, SEL _cmd, id image) {
 static void (*o_probeLayerContents)(id, SEL, id);
 static NSMutableSet *gProbeNonIconLayerOwners = nil;
 static BOOL sInLayerReplace = NO;
-static NSMutableSet *gLayerReplacedOwners = nil;   // 0.18.12：每个图标视图只替换一次
 
 static BOOL TBProbeLayerOwnerIsIcon(id owner) {
     if (!owner) return NO;
@@ -2508,22 +2483,9 @@ static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
             NSString *ocn = owner ? NSStringFromClass([owner class]) : @"-";
             // ★ 0.18.11：探针已证实「SBIconImageView 还会被塞一张 192x192 原图(是否主题图=0)」，
             //   进/退 App 的动画用的就是它 → 这里把非主题的原图直接换成主题图（时钟不碰）。
-            // ★ 0.18.12：同一个图标视图里有多层（图像层 / 阴影层 / 高光层）都在承载图像。
-            //   0.18.11 把它们全换了 → 动画缩放时叠成「重影/印子」（日志：每 App 4 次）。
-            //   现在：每个 owner 只换第一次命中的那层，并且跳过阴影层（shadowPath/shadowOpacity）。
             if (owner && !sInLayerReplace && !TBSafeMode() &&
                 [ocn rangeOfString:@"Clock"].location == NSNotFound) {
-                BOOL isShadowLayer = NO;
-                @try {
-                    id shp = [self valueForKey:@"shadowPath"];
-                    id sho = [self valueForKey:@"shadowOpacity"];
-                    /* 0.18.13：停用 —— 这句把真正的图像层也误判成阴影层，等于没替换 */
-                    /* 0.18.13：停用（同上） */
-                } @catch (NSException *e) { }
-                if (!gLayerReplacedOwners) gLayerReplacedOwners = [NSMutableSet set];
-                NSValue *ownerKey = [NSValue valueWithPointer:(__bridge const void *)owner];
-                BOOL already = NO;   // 0.18.13：不再限制「每 owner 只换一次」，恢复 0.18.11 行为
-                NSString *fb = (!isShadowLayer && !already) ? TBProbeBID(owner) : nil;
+                NSString *fb = TBProbeBID(owner);
                 UIImage *fm = fb.length ? TBImageForBundle(fb) : nil;
                 if (fm && contents) {
                     BOOL isOurs = NO;
@@ -2531,14 +2493,8 @@ static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
                     else if (CFGetTypeID((__bridge CFTypeRef)contents) == CGImageGetTypeID())
                         isOurs = (contents == (__bridge id)fm.CGImage);
                     if (!isOurs) {
-                        [gLayerReplacedOwners addObject:ownerKey];
                         sInLayerReplace = YES;
-                        // ★ 0.18.15：contents 是 CALayer 的【可动画】属性 —— 直接赋值会触发隐式淡入淡出，
-                        //   连续替换就是肉眼看到的"闪"。这里关掉事务动作，瞬间替换、不产生动画。
-                        [CATransaction begin];
-                        [CATransaction setDisableActions:YES];
                         if (o_probeLayerContents) o_probeLayerContents(self, _cmd, (__bridge id)fm.CGImage);
-                        [CATransaction commit];
                         sInLayerReplace = NO;
                         TBLogOnce([@"layerfix|" stringByAppendingString:fb], @"图层兜底 %@", fb);
                         return;
@@ -5176,12 +5132,10 @@ static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons) {
 }
 
 /// 只清「主题覆盖到的」那几十个图标的缓存，小批 + 间隔，避免把 SpringBoard 拖死。
-static BOOL gForcePurge = NO;   // 0.18.13：启动自愈期间临时置 YES，绕过 PurgeCache 开关
-
 static void TBPurgeThemedIcons(void) {
     if (TBSafeMode()) { TBLog(@"安全模式：跳过清缓存"); return; }
     id v = TBPref(@"PurgeCache");                       // 0.18.3：默认关，必须显式打开才清缓存
-    if (!gForcePurge && (!v || ![v boolValue])) { TBLog(@"已跳过清缓存（默认关 / 设置里关掉了）"); return; }
+    if (!v || ![v boolValue]) { TBLog(@"已跳过清缓存（默认关 / 设置里关掉了）"); return; }
 
     [gLock lock];
     NSArray *caches = gCaches.allObjects;
@@ -5234,48 +5188,6 @@ static void TBPurgeThemedIcons(void) {
 ///   这里不再保留独立函数 —— 通知逻辑只有这一处使用方。）
 
 /// 正在执行的那次刷新序号（延迟任务用它判断自己是不是过期了）
-
-/// ★ 0.18.13 启动自愈：修「重新越狱 / 重启后图标是原图，必须进 App 再点一次『应用』」。
-/// 原因：SpringBoard 启动时直接读【磁盘图标缓存】把桌面画出来，绕过我们的取图 hook；
-///       点「应用」= 清缓存 + 让系统重取，所以点一次就好。这里在索引就绪后自动做同样的事。
-static BOOL gDoneStartupHeal = NO;
-
-static void TBStartupHeal(NSString *why) {
-    if (gDoneStartupHeal || !gIsPrimary) return;
-    gDoneStartupHeal = YES;
-    if (TBSafeMode()) { TBLog(@"启动自愈：安全模式，跳过"); return; }
-    if (!TBEnabled()) { TBLog(@"启动自愈：总开关关，跳过"); return; }
-    // ★ 0.18.14：读端接管上线后，启动自愈默认【关】——它本来就是为了补"启动时给不出图"，
-    //   现在读缓存就能拿到主题图，不需要再清缓存/重贴/刷新（那三步正是"闪"的来源）。
-    //   需要时可 StartupHeal=YES 打开。
-    id en = TBPref(@"StartupHeal");
-    if (!en || ![en boolValue]) { TBLog(@"启动自愈：默认关（StartupHeal 未开）"); return; }
-    if (!TBActiveTheme().length) { TBLog(@"启动自愈：没有主题，跳过"); return; }
-
-    TBLog(@"启动自愈(%@)：清主题图标缓存 → 重贴 → 刷新桌面", why ?: @"?");
-    gForcePurge = YES;
-    TBPurgeThemedIcons();
-    gForcePurge = NO;
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ TBHealAllIconViews(); });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ TBRefreshSpringBoard(@"启动自愈"); });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ TBRefreshSpringBoard(@"启动自愈补刀"); });
-}
-
-/// ★ 0.18.16（方案 A）：轻量应用 —— 换主题时【不做】批量通知/重贴/刷新桌面。
-/// 读端接管已经能保证"任何一次取图都是主题图"，所以不需要逼桌面重画；
-/// 那三步正是"闪"的来源。可用 LightApply=NO 回到旧行为。
-static BOOL TBLightApply(void) {
-    // ★ 0.18.17：没有主题 / 总开关关闭 = 正在「恢复默认」→ 必须走完整流程
-    //   （不这么做，桌面会一直抱着旧主题图，系统缓存里也留着主题图，看起来"没恢复"）
-    if (!TBEnabled() || !TBActiveTheme().length) return NO;
-    id v = TBPref(@"LightApply");
-    return (!v || [v boolValue]);
-}
-
 static NSUInteger gReloadRunSeq = 0;
 
 static void TBRunReload(NSUInteger mySeq, NSString *why);
@@ -5410,14 +5322,6 @@ static void TBRefreshVisibleTablesLight(NSString *why) {
 static void TBRunReload(NSUInteger mySeq, NSString *why) {
     NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
     TBLog(@"重活开始：%@", why);
-    // ★ 0.18.17：「恢复默认」（没有主题 / 总开关关闭）→ 强制清一次主题图标缓存。
-    //   方向是"回到系统默认"，本来就该重画一次；不清的话系统缓存里还是主题图。
-    if (!TBEnabled() || !TBActiveTheme().length) {
-        TBLog(@"恢复默认：强制清理主题图标缓存");
-        gForcePurge = YES;
-        TBPurgeThemedIcons();
-        gForcePurge = NO;
-    }
     // ★ 0.15.92：重活只在 SpringBoard（真正有桌面图标缓存的进程）里做。
     //   日志实锤：App 进程/其它进程收到 changed 也会跑「重建索引 + 清缓存 + 通知重取」，
     //   主线程被占住 1~2 秒 —— 表现就是「点了应用主题后，弹窗还在时点不动，等它消失才恢复」。
@@ -5539,7 +5443,6 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
                 __block NSUInteger idx = 0;
                 __block void (^drainNotify)(void) = nil;
                 drainNotify = ^{
-                    if (TBLightApply()) { drainNotify = nil; return; }   // 0.18.16 方案A：不逼视图重取
                     if (idx >= icons.count) {
                         TBLog(@"已通知图标视图重取 %ld 次（分批异步）", (long)sent);
                         drainNotify = nil;
@@ -5569,25 +5472,18 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
         } else {
             TBLog(@"图标数 %lu 超过通知上限，跳过逐个通知，改用窗口遍历刷新", (unsigned long)icons.count);
         }
+        // ★ 0.18.18（方案 B）：把「重贴 + 刷新桌面 + 角标重排」合并成【一次】，
+        //   并关掉 Core Animation 的隐式动画。
+        //   以前是 0.2s / 0.35s / 0.45s 三波重画，肉眼就是那道"闪/印子"；
+        //   现在只发生一次瞬间切换，没有渐变过程可看。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            if (mySeq != gReloadRunSeq) return;   // 期间又刷了一次，交给最新那次处理
-            if (TBLightApply()) return;           // 0.18.16 方案A：不重贴
-            TBHealAllIconViews();
-        });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (mySeq != gReloadRunSeq) return;   // 同上：过期的那次不要再补一刀
-            if (TBLightApply()) return;           // 0.18.16 方案A：不刷新桌面
-            TBRefreshSpringBoard(why);
-        });
-        // 还原之后把屏幕上的角标重新布局一次：新主题（有素材）立刻补上，
-        // 没素材的主题就保持系统红底 —— 用户要的"换回没素材的主题，角标立刻变回来"
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
             if (mySeq != gReloadRunSeq) return;
+            TBLog(@"应用完成：一次性重贴 + 刷新（无动画）");
             [CATransaction begin];
-            [CATransaction setDisableActions:YES];   // 0.18.16：角标重排也瞬间完成
+            [CATransaction setDisableActions:YES];
+            TBHealAllIconViews();
+            TBRefreshSpringBoard(why);
             TBBadgeRelayoutVisible();
             [CATransaction commit];
         });
