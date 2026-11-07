@@ -2162,10 +2162,26 @@ static FnISGeneration o_isGeneration;
 typedef id (*FnISGenerateImage)(id, SEL);
 static FnISGenerateImage o_isGenerateImage;
 
+/// ★ 0.18.14 读端接管：缓存【读】的时候直接返回主题图。
+/// 这样第一次画就是主题图，不需要"清缓存 → 重贴 → 刷新"三步（那三步会让桌面重绘一下，就是看得见的"闪"）。
+static UIImage *TBServeThemedForIconCache(id cache, id icon) {
+    if (!TBEnabled() || TBSafeMode() || !TBApplyIconForDesktop()) return nil;
+    @try {
+        NSString *bid = TBBIDFromIcon(icon);
+        if (!bid.length) return nil;
+        UIImage *base = TBImageForBundle(bid);
+        if (!base) return nil;
+        UIImage *fit = TBFitCached(base, TBInfoOfCache(cache), bid) ?: base;
+        if (fit) TBLogOnce([@"serveRead|" stringByAppendingString:bid], @"读端接管 %@", bid);
+        return fit;
+    } @catch (NSException *e) { return nil; }
+}
+
 static id tb_imageForIcon(id self, SEL _cmd, id icon) {
-    // 直通：图像的"成品"由系统自己合成（素材由 SBIcon 那层给），我们不再在这里返回成品图。
-    // 顺手从系统那张已遮罩图里学一次"系统遮罩形状"，供我们裁剪素材时使用。
+    // ★ 0.18.14：先给主题图（读端接管）；没素材再直通系统。
+    //   直通时顺手从系统那张已遮罩图里学一次"系统遮罩形状"，供我们裁剪素材时使用。
     TBRemember(self);
+    { UIImage *mine = TBServeThemedForIconCache(self, icon); if (mine) return mine; }
     id r = o_imageForIcon ? o_imageForIcon(self, _cmd, icon) : nil;
     if (!gSystemMaskTemplate && [r isKindOfClass:[UIImage class]]) TBLearnSystemMask(r);
     return r;
@@ -2173,16 +2189,19 @@ static id tb_imageForIcon(id self, SEL _cmd, id icon) {
 
 static id tb_imageForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
+    { UIImage *mine = TBServeThemedForIconCache(self, icon); if (mine) return mine; }
     return o_imageForIconOpt ? o_imageForIconOpt(self, _cmd, icon, opt) : nil;
 }
 
 static id tb_cachedForIcon(id self, SEL _cmd, id icon) {
     TBRemember(self);
+    { UIImage *mine = TBServeThemedForIconCache(self, icon); if (mine) return mine; }
     return o_cachedForIcon ? o_cachedForIcon(self, _cmd, icon) : nil;
 }
 
 static id tb_realForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
+    { UIImage *mine = TBServeThemedForIconCache(self, icon); if (mine) return mine; }
     return o_realForIconOpt ? o_realForIconOpt(self, _cmd, icon, opt) : nil;
 }
 
@@ -5218,8 +5237,11 @@ static void TBStartupHeal(NSString *why) {
     gDoneStartupHeal = YES;
     if (TBSafeMode()) { TBLog(@"启动自愈：安全模式，跳过"); return; }
     if (!TBEnabled()) { TBLog(@"启动自愈：总开关关，跳过"); return; }
-    id en = TBPref(@"StartupHeal");                    // 缺失 = 开（可用 StartupHeal=NO 关掉）
-    if (en && ![en boolValue]) { TBLog(@"启动自愈：已被 StartupHeal=NO 关掉"); return; }
+    // ★ 0.18.14：读端接管上线后，启动自愈默认【关】——它本来就是为了补"启动时给不出图"，
+    //   现在读缓存就能拿到主题图，不需要再清缓存/重贴/刷新（那三步正是"闪"的来源）。
+    //   需要时可 StartupHeal=YES 打开。
+    id en = TBPref(@"StartupHeal");
+    if (!en || ![en boolValue]) { TBLog(@"启动自愈：默认关（StartupHeal 未开）"); return; }
     if (!TBActiveTheme().length) { TBLog(@"启动自愈：没有主题，跳过"); return; }
 
     TBLog(@"启动自愈(%@)：清主题图标缓存 → 重贴 → 刷新桌面", why ?: @"?");
