@@ -2408,7 +2408,7 @@ static void tb_resetImageOnIconView(id self, SEL _cmd, id icon) {
     }
 }
 
-// ---- 0.18.8：最后一公里兜底 —— UIImageView -setImage:（只在 SpringBoard 里装）----
+// ---- 0.18.9 探针：UIImageView -setImage: / 快照（只在 SpringBoard 里装，只记录不改图）----
 // 进/退 App 的过渡不走桌面那条取图链（unmasked / 其它尺寸 / 快照），所以动画里露原图。
 // 这里不猜是哪个入口给的图，只在「系统把一张图塞进图标视图」的那一下截住：
 //   · 只装在 SpringBoard 进程（设置页/其它 App 完全不受影响，不会重演 0.16.6 的卡顿）
@@ -2426,35 +2426,65 @@ static UIImage *TBScaledToSize(UIImage *img, CGSize size) {
     return out ?: img;
 }
 
+// ★ 0.18.9 探针：这里【只打日志、绝不改图】
+static NSString *TBProbeBID(id view) {
+    UIView *v = [view isKindOfClass:[UIView class]] ? (UIView *)view : nil;
+    for (int k = 0; k < 3 && v; k++, v = v.superview) {
+        if ([v respondsToSelector:NSSelectorFromString(@"icon")]) {
+            id ic = nil;
+            @try { ic = [v valueForKey:@"icon"]; } @catch (NSException *e) {}
+            if (ic) { NSString *b = TBBIDFromIcon(ic); if (b.length) return b; }
+        }
+    }
+    return nil;
+}
+
 static void tb_lastMileSetImage(id self, SEL _cmd, id image) {
-    if (!sInIVHook && image && TBEnabled() && !TBSafeMode()) {
+    if (image && gIsPrimary) {
         @try {
-            id icon = nil;
-            UIView *v = [self isKindOfClass:[UIView class]] ? (UIView *)self : nil;
-            for (int i = 0; i < 2 && v; i++, v = v.superview) {
-                if ([v respondsToSelector:NSSelectorFromString(@"icon")]) {
-                    icon = [v valueForKey:@"icon"];
-                    break;
-                }
-            }
-            NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
-            if (bid.length) {
-                UIImage *mine = TBImageForBundle(bid);
-                if (mine && [image isKindOfClass:[UIImage class]]) {
-                    UIImage *fit = TBScaledToSize(mine, ((UIImage *)image).size);
-                    if (fit) {
-                        sInIVHook = YES;
-                        if (o_ivSetImage) o_ivSetImage(self, _cmd, fit);
-                        sInIVHook = NO;
-                        gServe++;
-                        TBLogOnce([@"ivlast|" stringByAppendingString:bid], @"最后一公里(视图层) %@", bid);
-                        return;
-                    }
-                }
-            }
-        } @catch (NSException *e) { sInIVHook = NO; }
+            NSString *cn = NSStringFromClass([self class]);
+            NSString *bid = TBProbeBID(self);
+            CGSize sz = [image isKindOfClass:[UIImage class]] ? ((UIImage *)image).size : CGSizeZero;
+            UIImage *mine = bid.length ? TBImageForBundle(bid) : nil;
+            BOOL ours = (mine && image == mine);
+            TBLogOnce([NSString stringWithFormat:@"setImg|%@|%@|%.0fx%.0f|%d", cn, bid ?: @"-", sz.width, sz.height, ours ? 1 : 0],
+                      @"探针 setImage cls=%@ bid=%@ size=%.0fx%.0f 是否主题图=%d",
+                      cn, bid.length ? bid : @"-", sz.width, sz.height, ours ? 1 : 0);
+        } @catch (NSException *e) {}
     }
     if (o_ivSetImage) o_ivSetImage(self, _cmd, image);
+}
+
+// 快照路径探针：动画很可能是"抓视图画面"而不是"贴图"
+static void (*o_probeSnapA)(id, SEL, BOOL);
+static id (*o_probeSnapB)(id, SEL);
+
+static void tb_probeSnapA(id self, SEL _cmd, BOOL after) {
+    @try {
+        if ([self isKindOfClass:[UIView class]]) {
+            NSString *cn = NSStringFromClass([self class]);
+            NSString *bid = TBProbeBID(self);
+            if (bid.length || [cn rangeOfString:@"Icon"].location != NSNotFound) {
+                TBLogOnce([NSString stringWithFormat:@"snapA|%@|%@|%.0f", cn, bid ?: @"-", ((UIView *)self).bounds.size.width],
+                          @"探针 快照A cls=%@ bid=%@ bounds=%@", cn, bid.length ? bid : @"-", NSStringFromCGRect(((UIView *)self).bounds));
+            }
+        }
+    } @catch (NSException *e) {}
+    if (o_probeSnapA) o_probeSnapA(self, _cmd, after);
+}
+
+static id tb_probeSnapB(id self, SEL _cmd) {
+    @try {
+        if ([self isKindOfClass:[UIView class]]) {
+            NSString *cn = NSStringFromClass([self class]);
+            NSString *bid = TBProbeBID(self);
+            if (bid.length || [cn rangeOfString:@"Icon"].location != NSNotFound) {
+                TBLogOnce([NSString stringWithFormat:@"snapB|%@|%@|%.0f", cn, bid ?: @"-", ((UIView *)self).bounds.size.width],
+                          @"探针 快照B cls=%@ bid=%@ bounds=%@", cn, bid.length ? bid : @"-", NSStringFromCGRect(((UIView *)self).bounds));
+            }
+        }
+    } @catch (NSException *e) {}
+    return o_probeSnapB ? o_probeSnapB(self, _cmd) : nil;
 }
 
 // ---- 自愈式校验：布局时只做指针比对，图不对才贴一次（收敛后不再触发）----
@@ -4807,13 +4837,24 @@ static void TBInstall(void) {
         }
     }
 
-    // ★ 0.18.8：最后一公里兜底 —— 只在 SpringBoard 里挂 UIImageView -setImage:
+    // ★ 0.18.9 探针（只打日志、绝不改图）：SpringBoard 内的 setImage / 快照路径
     if (gIsPrimary && !gDoneIVSetImage) {
         gDoneIVSetImage = YES;
         Class ivCls = NSClassFromString(@"UIImageView");
         if (ivCls && TBHasMethod(ivCls, @"setImage:")) {
-            o_ivSetImage = (SetImgFn)TBHook(ivCls, @"setImage:", (IMP)tb_lastMileSetImage, "UIImageView 最后一公里");
+            o_ivSetImage = (SetImgFn)TBHook(ivCls, @"setImage:", (IMP)tb_lastMileSetImage, "探针 UIKit.setImage");
         }
+        Class uiView = NSClassFromString(@"UIView");
+        if (uiView) {
+            if (TBHasMethod(uiView, @"snapshotViewAfterScreenUpdates:"))
+                o_probeSnapA = (void (*)(id, SEL, BOOL))TBHook(uiView, @"snapshotViewAfterScreenUpdates:", (IMP)tb_probeSnapA, "探针 快照A");
+            if (TBHasMethod(uiView, @"snapshotView"))
+                o_probeSnapB = (id (*)(id, SEL))TBHook(uiView, @"snapshotView", (IMP)tb_probeSnapB, "探针 快照B");
+        }
+        Class cacheCls = NSClassFromString(@"SBHIconImageCache");
+        BOOL a1 = cacheCls && TBHasMethod(cacheCls, @"imageForIcon:imageAppearance:options:");
+        BOOL a2 = cacheCls && TBHasMethod(cacheCls, @"cacheImage:forIcon:imageAppearance:options:");
+        TBLog(@"探针：appearance 版签名 读=%d 写=%d（0=本系统不存在）", a1, a2);
     }
 
     // SBIconView -layoutSubviews（自愈校验：图不对才贴，收敛后不再触发）
