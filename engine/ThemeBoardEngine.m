@@ -2408,6 +2408,55 @@ static void tb_resetImageOnIconView(id self, SEL _cmd, id icon) {
     }
 }
 
+// ---- 0.18.8：最后一公里兜底 —— UIImageView -setImage:（只在 SpringBoard 里装）----
+// 进/退 App 的过渡不走桌面那条取图链（unmasked / 其它尺寸 / 快照），所以动画里露原图。
+// 这里不猜是哪个入口给的图，只在「系统把一张图塞进图标视图」的那一下截住：
+//   · 只装在 SpringBoard 进程（设置页/其它 App 完全不受影响，不会重演 0.16.6 的卡顿）
+//   · 先做极便宜的前置判断（父链上两层的 icon 属性），不是图标视图就直接直通
+static BOOL gDoneIVSetImage = NO;
+static void (*o_ivSetImage)(id, SEL, id);
+
+static UIImage *TBScaledToSize(UIImage *img, CGSize size) {
+    if (!img || size.width < 1 || size.height < 1) return img;
+    if (fabs(img.size.width - size.width) < 0.5 && fabs(img.size.height - size.height) < 0.5) return img;
+    UIGraphicsBeginImageContextWithOptions(size, NO, 0);
+    [img drawInRect:CGRectMake(0, 0, size.width, size.height)];
+    UIImage *out = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return out ?: img;
+}
+
+static void tb_ivSetImage(id self, SEL _cmd, id image) {
+    if (!sInIVHook && image && TBEnabled() && !TBSafeMode()) {
+        @try {
+            id icon = nil;
+            UIView *v = [self isKindOfClass:[UIView class]] ? (UIView *)self : nil;
+            for (int i = 0; i < 2 && v; i++, v = v.superview) {
+                if ([v respondsToSelector:NSSelectorFromString(@"icon")]) {
+                    icon = [v valueForKey:@"icon"];
+                    break;
+                }
+            }
+            NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
+            if (bid.length) {
+                UIImage *mine = TBImageForBundle(bid);
+                if (mine && [image isKindOfClass:[UIImage class]]) {
+                    UIImage *fit = TBScaledToSize(mine, ((UIImage *)image).size);
+                    if (fit) {
+                        sInIVHook = YES;
+                        if (o_ivSetImage) o_ivSetImage(self, _cmd, fit);
+                        sInIVHook = NO;
+                        gServe++;
+                        TBLogOnce([@"ivlast|" stringByAppendingString:bid], @"最后一公里(视图层) %@", bid);
+                        return;
+                    }
+                }
+            }
+        } @catch (NSException *e) { sInIVHook = NO; }
+    }
+    if (o_ivSetImage) o_ivSetImage(self, _cmd, image);
+}
+
 // ---- 自愈式校验：布局时只做指针比对，图不对才贴一次（收敛后不再触发）----
 typedef void (*LayoutFn)(id, SEL);
 static LayoutFn o_iconViewLayout;
@@ -4755,6 +4804,15 @@ static void TBInstall(void) {
         // SBIconImageView.resetImageWithAppIcon:（拖拽放置/状态重建通道）
         if (TBHasMethod(iconImageViewCls, @"resetImageWithAppIcon:")) {
             o_resetImageOnIconView = (ResetImgFn)TBHook(iconImageViewCls, @"resetImageWithAppIcon:", (IMP)tb_resetImageOnIconView, "SBIconImageView.reset");
+        }
+    }
+
+    // ★ 0.18.8：最后一公里兜底 —— 只在 SpringBoard 里挂 UIImageView -setImage:
+    if (gIsPrimary && !gDoneIVSetImage) {
+        gDoneIVSetImage = YES;
+        Class ivCls = NSClassFromString(@"UIImageView");
+        if (ivCls && TBHasMethod(ivCls, @"setImage:")) {
+            o_ivSetImage = (SetImgFn)TBHook(ivCls, @"setImage:", (IMP)tb_ivSetImage, "UIImageView 最后一公里");
         }
     }
 
