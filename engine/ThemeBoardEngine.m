@@ -2107,42 +2107,7 @@ static void tb_ivSetImage(id self, SEL _cmd, id img) {
 
 
 
-// ---- 时钟供图（0.18.1）：在真正的时钟视图类上返回主题表盘 ----
-// 真正的类是 `SBHClockApplicationIconImageView : SBLiveIconImageView`；
-// 过去我们挂在父类 SBIconImageView 上，时钟不经过它 → 所以"抄了却无效"。
-static id (*o_liveContents)(id, SEL);
-static id (*o_liveSquare)(id, SEL);
-static id (*o_clkContents)(id, SEL);
-static id (*o_clkSquare)(id, SEL);
-static UIImage *TBClockFaceForView(id view) {
-    if (!TBEnabled() || TBSafeMode()) return nil;
-    NSString *bid = nil;
-    @try { bid = TBBIDFromIcon([view valueForKey:@"icon"]); } @catch (NSException *e) {}
-    if (![bid isEqualToString:@"com.apple.mobiletimer"]) return nil;
-    NSString *path = TBDynamicResourcePath(@"com.apple.mobiletimer");
-    if (!path.length) return nil;
-    return [[UIImage alloc] initWithContentsOfFile:path];
-}
-static id tb_liveContents(id self, SEL _cmd) {
-    UIImage *f = TBClockFaceForView(self);
-    if (f) return f;
-    return o_liveContents ? o_liveContents(self, _cmd) : nil;
-}
-static id tb_liveSquare(id self, SEL _cmd) {
-    UIImage *f = TBClockFaceForView(self);
-    if (f) return f;
-    return o_liveSquare ? o_liveSquare(self, _cmd) : nil;
-}
-static id tb_clkContents(id self, SEL _cmd) {
-    UIImage *f = TBClockFaceForView(self);
-    if (f) return f;
-    return o_clkContents ? o_clkContents(self, _cmd) : nil;
-}
-static id tb_clkSquare(id self, SEL _cmd) {
-    UIImage *f = TBClockFaceForView(self);
-    if (f) return f;
-    return o_clkSquare ? o_clkSquare(self, _cmd) : nil;
-}
+// ---- 时钟供图（0.18.1 的四 hook 版）已整体移除：见 0.18.7 说明 ----
 
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
@@ -4628,28 +4593,10 @@ static void TBInstall(void) {
     //   结论（最终）：本机 17.2.1 上 NC 图标替换不可行，任何 NC* 类 hook 都会破坏通知系统。
     //   除非未来做真机运行时 dump 并找到安全插入点，否则不再尝试。
 
-    // 时钟供图：真正的时钟视图类上返回主题表盘（4 个独立 orig 槽）
-    // ★ 0.18.6 关键修复：TBInstall() 启动后每秒重试共 11 次，而 TBHook 是「无条件替换 IMP」。
-    //   没有这个保护时，第 2 次安装会把 o_* 槽覆盖成我们自己的函数 → 一渲染时钟就无限自我递归
-    //   → 栈溢出 → SpringBoard 崩溃重启（表现为闪屏，一黑一亮）。必须只装一次。
-    static BOOL gDoneClockImgHooks = NO;
-    if (!gDoneClockImgHooks) {
-        gDoneClockImgHooks = YES;
-        Class live = NSClassFromString(@"SBLiveIconImageView");
-        if (live) {
-            if (TBHasMethod(live, @"contentsImage"))
-                o_liveContents = (id (*)(id, SEL))TBHook(live, @"contentsImage", (IMP)tb_liveContents, "时钟供图 live.contents");
-            if (TBHasMethod(live, @"squareContentsImage"))
-                o_liveSquare = (id (*)(id, SEL))TBHook(live, @"squareContentsImage", (IMP)tb_liveSquare, "时钟供图 live.square");
-        }
-        Class clk = NSClassFromString(@"SBHClockApplicationIconImageView");
-        if (clk) {
-            if (TBHasMethod(clk, @"contentsImage"))
-                o_clkContents = (id (*)(id, SEL))TBHook(clk, @"contentsImage", (IMP)tb_clkContents, "时钟供图 clk.contents");
-            if (TBHasMethod(clk, @"squareContentsImage"))
-                o_clkSquare = (id (*)(id, SEL))TBHook(clk, @"squareContentsImage", (IMP)tb_clkSquare, "时钟供图 clk.square");
-        }
-    }
+    // ★ 0.18.7：0.18.1 的「时钟供图」（SBLiveIconImageView / SBHClockApplicationIconImageView 上
+    //   重挂 contentsImage / squareContentsImage，4 个 orig 槽）已整体移除。
+    //   它和 0.16.9 里那套 TBInstallClockContentsHooks（带 gDoneClock 保护、走 TBClassDeclaring）重复，
+    //   而且是无保护重挂 → 会造成 orig 槽自我覆盖 / 自我递归。现在只保留 0.16.9 原有那套（时钟行为回到 0.16.9）。
 
     // 角标底板替换：从视图层换图（SBIconBadgeView / _SBIconBadgeView）。
     // ★ 0.15.51 拷问修复：这个块原来被嵌进了上面 clockView 的 if 里（0.15.49 少一个闭括号），
