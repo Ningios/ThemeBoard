@@ -26,6 +26,8 @@ typedef struct {
 
 static NSString *gLogPath;
 static BOOL gIsPrimary = NO;      // 只有 SpringBoard 类进程写日志文件，避免多进程互相咬行
+static NSHashTable *gSeenIconViews = nil;          // 0.18.20：登记见过的 SBIconView（弱引用）
+static UIImage *TBThemedForIconObject(id icon);    // 0.18.20：前置声明（定义在后面）
 static dispatch_queue_t gLogQueue;
 static NSMutableDictionary<NSString *, NSString *> *gIndex;
 static NSString *gIndexTheme;
@@ -2969,8 +2971,6 @@ static void tb_iconViewLayoutSubviews(id self, SEL _cmd) {
 // ★ 0.18.20（换路）：iOS 17 起图标是走这些【带 traitCollection/context/options】的现代选择子生成的
 //   （我们以前只挂了老的单参数 iconImageWithInfo: → 生成那一刻没被接管 → 首帧是原图）。
 //   这里补挂它们；方法不存在就跳过（TBHasMethod 守护）。
-static NSHashTable *gSeenIconViews = nil;   // 0.18.20：弱引用，供轻量刷新用
-
 typedef id (*FnImgTCO)(id, SEL, TBImageInfo, id, id, unsigned long long);
 typedef id (*FnImgTO)(id, SEL, TBImageInfo, id, unsigned long long);
 typedef id (*FnImgTCOMake)(id, SEL, TBImageInfo, id, id, unsigned long long);
