@@ -665,7 +665,6 @@ static UIImage *TBMaskWithThemeMask(UIImage *art, UIImage *mask);      // 用主
 static UIImage *TBApplyIconShape(UIImage *img, BOOL skipIfRounded);    // 三种模式的统一入口
 
 typedef id (*ContentsImgFn)(id, SEL);
-static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
 
 typedef struct { double w, h, scale, ratio; } TBClockInfo;   // SBIconImageInfo 的等价布局
 typedef TBClockInfo (*TBInfoGetFn)(id, SEL);
@@ -1944,6 +1943,35 @@ static void TBRefreshSettingsIconsBatch(NSString *why) {
 }
 
 // ---- 时钟供图（0.18.1 的四 hook 版）已整体移除：见 0.18.7 说明 ----
+
+// ★ 1.1（P1）：文件夹专用图标缓存（SnowBoard 同款；缺它文件夹预览会退回系统默认图）
+static id (*o_folderCached)(id, SEL, id);
+static id (*o_folderImage)(id, SEL, id);
+
+static id tb_folderCached(id self, SEL _cmd, id icon) {
+    UIImage *m = TBServeReadSide(self, icon);
+    if (m) return m;
+    return o_folderCached ? o_folderCached(self, _cmd, icon) : nil;
+}
+static id tb_folderImage(id self, SEL _cmd, id icon) {
+    UIImage *m = TBServeReadSide(self, icon);
+    if (m) return m;
+    return o_folderImage ? o_folderImage(self, _cmd, icon) : nil;
+}
+
+// ★ 1.1（P2）：文件夹背景素材 ANEMFolderIconBG（Anemone 规范）
+static void (*o_folderBgLayout)(id, SEL);
+static void tb_folderBgLayout(id self, SEL _cmd) {
+    if (o_folderBgLayout) o_folderBgLayout(self, _cmd);
+    if (!TBEnabled() || TBSafeMode()) return;
+    @try {
+        UIImage *bg = TBResourceImage(@"ANEMFolderIconBG");
+        if (!bg) return;
+        if ([self isKindOfClass:[UIImageView class]]) ((UIImageView *)self).image = bg;
+        else if ([self respondsToSelector:NSSelectorFromString(@"setImage:")])
+            ((void (*)(id, SEL, id))objc_msgSend)(self, NSSelectorFromString(@"setImage:"), bg);
+    } @catch (NSException *e) { }
+}
 
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
@@ -4399,13 +4427,7 @@ typedef UIColor *(*HandColorFn)(id, SEL);
 typedef BOOL (*HandBoolFn)(id, SEL);
 static HandColorFn o_hmHandColor, o_secHandColor;
 
-static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
 static BOOL sInClockContents = NO;   // 防自调用（hook 装错层会无限递归）
-
-static BOOL TBIsClockView(id v) {
-    NSString *cls = NSStringFromClass([v class]);
-    return [cls rangeOfString:@"Clock"].location != NSNotFound;
-}
 
 /// 按视图当前尺寸把主题表盘做成对应像素尺寸的图
 /// 表盘必须带圆角遮罩：系统给出的图标是遮罩过的（超椭圆），我们直接写
@@ -4447,36 +4469,6 @@ static UIImage *TBClockMaterialFace(UIView *v) {
     return TBClockRoundedFace(TBFitImage(face, info));
 }
 
-static id tb_clockContentsImage(id self, SEL _cmd) {
-    if (!sInClockContents && TBIsClockView(self)) {
-        UIImage *face = TBClockMaterialFace((UIView *)self);
-        if (face) {
-            TBLogOnce(@"clockface|contents", @"时钟表盘：contentsImage 返回主题表盘 %.0fx%.0f",
-                      face.size.width, face.size.height);
-            return face;
-        }
-    }
-    if (sInClockContents) return nil;                 // 逃出递归
-    if (!o_contentsImageLive) return nil;
-    sInClockContents = YES;
-    id r = o_contentsImageLive(self, _cmd);
-    sInClockContents = NO;
-    return r;
-}
-
-static id tb_clockSquareContentsImage(id self, SEL _cmd) {
-    if (!sInClockContents && TBIsClockView(self)) {
-        UIImage *face = TBClockMaterialFace((UIView *)self);
-        if (face) return face;
-    }
-    if (sInClockContents) return nil;
-    if (!o_squareContentsImageLive) return nil;
-    sInClockContents = YES;
-    id r = o_squareContentsImageLive(self, _cmd);
-    sInClockContents = NO;
-    return r;
-}
-
 /// 找真正「自己声明」了这个方法的类（不能挂到只有继承实现的类上，否则原实现
 /// 指针会指向我们自己的 hook → 自调用递归）
 static Class TBClassDeclaring(Class cls, SEL sel) {
@@ -4501,12 +4493,8 @@ static void TBInstallClockContentsHooks(void) {
     if (!live) live = NSClassFromString(@"SBIconImageView");
     if (!live) { TBLog(@"contentsImage：找不到图标图片视图类"); return; }
     // contentsImage / squareContentsImage 都是实例方法（用 TBHook，不是 TBHookClass）
-    Class c1 = TBClassDeclaring(live, NSSelectorFromString(@"contentsImage"));
-    if (c1) o_contentsImageLive = (ContentsImgFn)TBHook(c1, @"contentsImage",
-                                                        (IMP)tb_clockContentsImage, "时钟contents");
-    Class c2 = TBClassDeclaring(live, NSSelectorFromString(@"squareContentsImage"));
-    if (c2) o_squareContentsImageLive = (ContentsImgFn)TBHook(c2, @"squareContentsImage",
-                                                              (IMP)tb_clockSquareContentsImage, "时钟squareContents");
+    // ★ 1.1（P3）：**不再**用静态表盘覆盖 contentsImage —— 那样整张静图会把指针动画盖掉。
+    //   表盘改由资源重定向提供（主题 Bundles/ClockIconBackgroundSquare），指针继续走系统动画。
     // 指针：SnowBoard 同款 makeImageSetForMetrics: 注入（主题有的才替换）
     Class clock = NSClassFromString(@"SBHClockApplicationIconImageView");
     if (clock) {
@@ -4779,6 +4767,24 @@ static void TBInstall(void) {
         BOOL a1 = cacheCls && TBHasMethod(cacheCls, @"imageForIcon:imageAppearance:options:");
         BOOL a2 = cacheCls && TBHasMethod(cacheCls, @"cacheImage:forIcon:imageAppearance:options:");
         TBLog(@"探针：appearance 版签名 读=%d 写=%d（0=本系统不存在）", a1, a2);
+    }
+
+    // ★ 1.1（P1/P2）：文件夹图标缓存 + 文件夹背景
+    {
+        static BOOL gDoneFolder1 = NO;
+        if (!gDoneFolder1) {
+            gDoneFolder1 = YES;
+            Class fc = NSClassFromString(@"SBFolderIconImageCache");
+            if (fc) {
+                if (TBHasMethod(fc, @"cachedImageForIcon:"))
+                    o_folderCached = (id (*)(id, SEL, id))TBHook(fc, @"cachedImageForIcon:", (IMP)tb_folderCached, "文件夹缓存");
+                if (TBHasMethod(fc, @"imageForIcon:"))
+                    o_folderImage = (id (*)(id, SEL, id))TBHook(fc, @"imageForIcon:", (IMP)tb_folderImage, "文件夹缓存图");
+            }
+            Class bgc = NSClassFromString(@"SBFolderIconBackgroundView");
+            if (bgc && TBHasMethod(bgc, @"layoutSubviews"))
+                o_folderBgLayout = (void (*)(id, SEL))TBHook(bgc, @"layoutSubviews", (IMP)tb_folderBgLayout, "文件夹背景");
+        }
     }
 
     // ★ 0.18.20：图标模型层的现代取图选择子（存在才挂）
