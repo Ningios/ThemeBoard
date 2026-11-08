@@ -2104,6 +2104,7 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
           (unsigned long)views.count, (long)extra);
     if (!views.count) { TBHealAllIconViews(); TBRefreshSpringBoard(why); return; }
 
+    TBResetClockFaceCache();   // 1.12：换主题/恢复默认时表盘必须重算
     __block NSUInteger idx = 0;
     __block void (^step)(void);
     step = ^{
@@ -2111,14 +2112,33 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
         for (NSUInteger i = idx; i < end; i++) {
             UIView *v = views[i];
             @try {
+                NSString *cn = NSStringFromClass([v class]);
                 id icon = [v valueForKey:@"icon"];
                 if (icon && [icon respondsToSelector:NSSelectorFromString(@"purgeCachedImages")])
                     ((void (*)(id, SEL))objc_msgSend)(icon, NSSelectorFromString(@"purgeCachedImages"));
                 NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
-                // 文件夹：优先用 sb 的选择子重建（存在才调）
+                // 文件夹：rebuildImagesForFolderIcon: 在 SBFolderIconImageView 上（sb 的目标类），
+                //   外层视图没有就退到 _iconImageView 上再试一次
                 SEL sRebuild = NSSelectorFromString(@"rebuildImagesForFolderIcon:");
-                if (icon && [v respondsToSelector:sRebuild])
-                    ((void (*)(id, SEL, id))objc_msgSend)(v, sRebuild, icon);
+                if ([cn containsString:@"Folder"]) {
+                    if (icon && [v respondsToSelector:sRebuild])
+                        ((void (*)(id, SEL, id))objc_msgSend)(v, sRebuild, icon);
+                    else {
+                        id iv0 = [v valueForKey:@"_iconImageView"];
+                        if (icon && iv0 && [iv0 respondsToSelector:sRebuild])
+                            ((void (*)(id, SEL, id))objc_msgSend)(iv0, sRebuild, icon);
+                    }
+                }
+                // 资源库 / 角标：它们不走 _iconImageView，让它们自己重排一次
+                if ([cn containsString:@"Library"] || [cn containsString:@"Badge"]) {
+                    [v setNeedsLayout];
+                    [v layoutIfNeeded];
+                }
+                // 时钟：内部缓存了 image set，必须强制重建
+                if ([cn containsString:@"Clock"]) {
+                    SEL sSetNeeds = NSSelectorFromString(@"setNeedsLayout");
+                    if ([v respondsToSelector:sSetNeeds]) ((void (*)(id, SEL))objc_msgSend)(v, sSetNeeds);
+                }
                 id iv = [v valueForKey:@"_iconImageView"];
                 if (iv && [iv respondsToSelector:NSSelectorFromString(@"_updateIconImageViewAnimated:")])
                     ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, NSSelectorFromString(@"_updateIconImageViewAnimated:"), NO);
@@ -2241,12 +2261,14 @@ static id tb_realForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) 
 
 static id tb_unmaskedForIcon(id self, SEL _cmd, id icon) {
     TBRemember(self);
+    { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }   // 1.12：Dock 走 unmasked
     { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }   // ★ 0.18.19：Dock 也接管
     return o_unmaskedForIcon ? o_unmaskedForIcon(self, _cmd, icon) : nil;
 }
 
 static id tb_unmaskedForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
+    { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }   // 1.12：Dock 走 unmasked
     { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }   // ★ 0.18.19：Dock 也接管
     return o_unmaskedForIconOpt ? o_unmaskedForIconOpt(self, _cmd, icon, opt) : nil;
 }
@@ -4595,6 +4617,7 @@ static UIImage *TBClockRoundedFace(UIImage *img) {
 /// 每次都重渲染一张 192x192 的小图虽然开销很小，但没必要）
 static UIImage *gFaceCacheImage;
 static NSString *gFaceCacheKey;
+static void TBResetClockFaceCache(void) { gFaceCacheImage = nil; gFaceCacheKey = nil; }   // 1.12
 static UIImage *TBClockMaterialFaceCached(UIView *v) {
     NSString *key = [NSString stringWithFormat:@"%@|%.0fx%.0f", TBActiveTheme() ?: @"",
                      v.bounds.size.width, v.bounds.size.height];
