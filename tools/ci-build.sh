@@ -9,7 +9,9 @@ cd "$ROOT"
 SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
 VER="$(awk '/^Version:/{print $2}' control)"
 ARCH="$(awk '/^Architecture:/{print $2}' control)"
-VERY="$(awk '/^Version:/{print $2}' control | cut -d. -f1).0"
+# ★ 最低 iOS 版本 = App 的 MinimumOSVersion（写死），不要从包版本号推！
+#   以前是 `cut -d. -f1` + ".0"：0.18.x → 0.0（侥幸）、1.0 → 1.0（== iOS 1.0，__weak 直接编不过）
+VERY="15.0"
 
 OUT="$ROOT/build/ci"
 APP="$OUT/ThemeBoard.app"
