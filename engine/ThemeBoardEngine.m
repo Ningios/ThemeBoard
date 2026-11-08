@@ -1945,6 +1945,32 @@ static void TBRefreshSettingsIconsBatch(NSString *why) {
 
 // ---- 时钟供图（0.18.1 的四 hook 版）已整体移除：见 0.18.7 说明 ----
 
+// ★ 1.2（第 6 条，照 SnowBoard）：通知中心走【数据层】——
+//   hook NCNotificationContent -icons，把返回数组里的图标换成主题图。
+//   （sb 的二进制里只有 NCNotificationContent / NCNotificationRequest 两个类名，
+//     没有任何 NCBadgedIconView 之类的视图层类，所以数据层才是正解。）
+static id (*o_ncIcons)(id, SEL);
+
+static id tb_ncIcons(id self, SEL _cmd) {
+    id r = o_ncIcons ? o_ncIcons(self, _cmd) : nil;
+    if (![r isKindOfClass:[NSArray class]] || ((NSArray *)r).count == 0) return r;
+    @try {
+        NSString *bid = nil;
+        for (NSString *k in @[ @"_applicationIdentifier", @"sectionIdentifier", @"bundleIdentifier" ]) {
+            id v = nil;
+            @try { v = [self valueForKey:k]; } @catch (NSException *e) { }
+            if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) { bid = v; break; }
+        }
+        if (!bid.length) return r;
+        UIImage *mine = TBImageForBundle(bid);
+        if (!mine) return r;
+        NSMutableArray *out = [NSMutableArray arrayWithCapacity:((NSArray *)r).count];
+        for (NSUInteger i = 0; i < ((NSArray *)r).count; i++) [out addObject:mine];
+        TBLogOnce([@"nc|" stringByAppendingString:bid], @"NC 数据层替换 %@", bid);
+        return out;
+    } @catch (NSException *e) { return r; }
+}
+
 // ★ 1.1（P1）：文件夹专用图标缓存（SnowBoard 同款；缺它文件夹预览会退回系统默认图）
 static id (*o_folderCached)(id, SEL, id);
 static id (*o_folderImage)(id, SEL, id);
@@ -1966,12 +1992,80 @@ static void tb_folderBgLayout(id self, SEL _cmd) {
     if (o_folderBgLayout) o_folderBgLayout(self, _cmd);
     if (!TBEnabled() || TBSafeMode()) return;
     @try {
-        UIImage *bg = TBResourceImage(@"ANEMFolderIconBG");
+        UIImage *bg = TBThemeAsset(@"ANEMFolderIconBG");
+        if (!bg) bg = TBThemeAsset(@"ANEMFolderBackground");
+        if (!bg) bg = TBThemeAsset(@"MaskFolderMaximisedBG");
         if (!bg) return;
-        if ([self isKindOfClass:[UIImageView class]]) ((UIImageView *)self).image = bg;
+        if ([self isKindOfClass:[UIImageView class]]) {
+            if (((UIImageView *)self).image != bg) ((UIImageView *)self).image = bg;
+        }
         else if ([self respondsToSelector:NSSelectorFromString(@"setImage:")])
             ((void (*)(id, SEL, id))objc_msgSend)(self, NSSelectorFromString(@"setImage:"), bg);
     } @catch (NSException *e) { }
+}
+
+// ★ 1.2（照 SnowBoard）：定点更新「正在显示的」图标视图，不做全树遍历。
+//   sb 用 enumerateDisplayedIconViewsUsingBlock: + _updateIconImageViewAnimated:，
+//   这里用我们登记的弱表 + 同样的选择子，效果等同、且不会卡主线程。
+static NSInteger TBUpdateDisplayedIconViews(void) {
+    NSArray *views = gSeenIconViews ? gSeenIconViews.allObjects : @[];
+    NSInteger n = 0;
+    for (UIView *v in views) {
+        @try {
+            id iv = [v valueForKey:@"_iconImageView"];
+            if (!iv) continue;
+            SEL sUpd = NSSelectorFromString(@"_updateIconImageViewAnimated:");
+            SEL sRel = NSSelectorFromString(@"reloadIconImage");
+            if ([iv respondsToSelector:sUpd]) ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, sUpd, NO);
+            else if ([iv respondsToSelector:sRel]) ((void (*)(id, SEL))objc_msgSend)(iv, sRel);
+            // 时钟：换主题后立刻重载（sb 是重建 image set，我们至少让它马上重画）
+            id icon = [v valueForKey:@"icon"];
+            NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
+            if ([bid isEqualToString:@"com.apple.mobiletimer"] && icon &&
+                [icon respondsToSelector:sRel]) ((void (*)(id, SEL))objc_msgSend)(icon, sRel);
+            n++;
+        } @catch (NSException *e) { }
+    }
+    TBLog(@"定点刷新：%ld 个图标视图（不重贴、不刷桌面）", (long)n);
+    return n;
+}
+
+/// ★ 1.2：按路径找主题素材（ANEMFolderIconBG 之类文件名带 @3x，TBResourceImage 的名字规则对不上）
+static UIImage *TBThemeAsset(NSString *prefix) {
+    if (!prefix.length) return nil;
+    // ★ 1.2：按「主题+名字」缓存，否则每次 layoutSubviews 都全目录枚举 → 会卡
+    static NSMutableDictionary *sCache = nil;
+    static NSString *sCacheTheme = nil;
+    NSString *curTheme = TBActiveTheme() ?: @"";
+    if (!sCacheTheme || ![sCacheTheme isEqualToString:curTheme]) { sCache = [NSMutableDictionary dictionary]; sCacheTheme = curTheme; }
+    id cached = sCache[prefix];
+    if (cached) return (cached == [NSNull null]) ? nil : (UIImage *)cached;
+    NSString *dir = TBThemeDir(TBActiveTheme());
+    if (!dir.length) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDirectoryEnumerator *en = [fm enumeratorAtPath:dir];
+    UIImage *v3 = nil, *v2 = nil, *v1 = nil;
+    for (NSString *rel in en) {
+        NSString *name = rel.lastPathComponent;
+        if (![name hasPrefix:prefix] || ![name hasSuffix:@".png"]) continue;
+        NSString *fp = [dir stringByAppendingPathComponent:rel];
+        if (!v3 && [name containsString:@"@3x"]) { v3 = [UIImage imageWithContentsOfFile:fp]; if (v3) break; }
+        else if (!v2 && [name containsString:@"@2x"]) v2 = [UIImage imageWithContentsOfFile:fp];
+        else if (!v1) v1 = [UIImage imageWithContentsOfFile:fp];
+    }
+    UIImage *res = v3 ?: v2 ?: v1;
+    sCache[prefix] = res ?: [NSNull null];
+    return res;
+}
+
+/// ★ 1.2（第 8 条）：未覆盖的 App 也要套遮罩/全局效果 —— 以前读端直通，效果就丢了
+static UIImage *TBGlobalForIcon(id icon, id image) {
+    if (!image || ![image isKindOfClass:[UIImage class]]) return nil;
+    @try {
+        NSString *bid = TBBIDFromIcon(icon);
+        UIImage *g = TBGlobalEffectImage((UIImage *)image, bid);
+        return (g && g != image) ? g : nil;
+    } @catch (NSException *e) { return nil; }
 }
 
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
@@ -2050,13 +2144,16 @@ static id tb_imageForIcon(id self, SEL _cmd, id icon) {
     { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }
     id r = o_imageForIcon ? o_imageForIcon(self, _cmd, icon) : nil;
     if (!gSystemMaskTemplate && [r isKindOfClass:[UIImage class]]) TBLearnSystemMask(r);
+    { UIImage *g = TBGlobalForIcon(icon, r); if (g) return g; }   // ★ 1.2：未覆盖 App 补遮罩
     return r;
 }
 
 static id tb_imageForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
     { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }
-    return o_imageForIconOpt ? o_imageForIconOpt(self, _cmd, icon, opt) : nil;
+    id r = o_imageForIconOpt ? o_imageForIconOpt(self, _cmd, icon, opt) : nil;
+    { UIImage *g = TBGlobalForIcon(icon, r); if (g) return g; }   // ★ 1.2：未覆盖 App 补遮罩
+    return r;
 }
 
 static id tb_cachedForIcon(id self, SEL _cmd, id icon) {
@@ -4770,6 +4867,17 @@ static void TBInstall(void) {
         TBLog(@"探针：appearance 版签名 读=%d 写=%d（0=本系统不存在）", a1, a2);
     }
 
+    // ★ 1.2（第 6 条）：通知中心数据层（类不存在就跳过）
+    {
+        static BOOL gDoneNC = NO;
+        if (!gDoneNC) {
+            gDoneNC = YES;
+            Class ncc = NSClassFromString(@"NCNotificationContent");
+            if (ncc && TBHasMethod(ncc, @"icons"))
+                o_ncIcons = (id (*)(id, SEL))TBHook(ncc, @"icons", (IMP)tb_ncIcons, "NC 图标(数据层)");
+        }
+    }
+
     // ★ 1.1（P1/P2）：文件夹图标缓存 + 文件夹背景
     {
         static BOOL gDoneFolder1 = NO;
@@ -5302,6 +5410,8 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
                               [NSClassFromString(@"SBIconView") instancesRespondToSelector:NSSelectorFromString(@"setOverrideImage:")];
             if (overrideOK && TBReapplyIconsLight() > 0) {
                 TBLog(@"应用完成：走 override 轻量刷新（不再批量重贴/刷桌面）");
+            } else if (TBUpdateDisplayedIconViews() > 0) {
+                TBLog(@"应用完成：定点更新显示的图标视图（不重贴、不刷桌面）");
             } else {
                 TBLog(@"应用完成：回退一次性重贴 + 刷新（无动画）");
                 TBHealAllIconViews();
