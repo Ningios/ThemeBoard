@@ -321,6 +321,7 @@ static UIImage *TBResourceImage(NSString *name);
 static BOOL TBImageIsMostlyOpaque(CGImageRef cg);
 static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys);
 static UIImage *TBImageForBundle(NSString *bid);      // 前置：时钟判定要用
+static UIImage *TBServeReadSide(id cache, id icon);   // 1.1：读端接管（定义在后）
 static UIImage *TBClockRoundedFace(UIImage *img);
 static UIImage *TBClockMaterialFace(UIView *v);
 static UIImage *TBClockMaterialFaceCached(UIView *v);
