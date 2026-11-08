@@ -2933,7 +2933,94 @@ static __weak UIView *gLastClockView;   // 最近一次看到的时钟视图
 static void tb_iconViewLayoutSubviews(id self, SEL _cmd) {
     if (o_iconViewLayout) o_iconViewLayout(self, _cmd);
     if (!TBApplyIconForDesktop() || TBSafeMode() || !TBEnabled()) return;
+
+    // ★ 0.18.20（换路·第一步）：优先用系统自带的「覆盖图」入口 —— 装上就生效、优先级最高，
+    //   不再靠事后改 CALayer.contents。方法不存在时退回原来的做法。
+    @try {
+        if (!gSeenIconViews) gSeenIconViews = [NSHashTable weakObjectsHashTable];
+        [gSeenIconViews addObject:self];
+        id icon = [self valueForKey:@"icon"];
+        UIImage *img = TBThemedForIconObject(icon);
+        SEL sSet = NSSelectorFromString(@"setOverrideImage:");
+        if (img && icon && [self respondsToSelector:sSet]) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            ((void (*)(id, SEL, id))objc_msgSend)(self, sSet, img);
+            SEL sApp = NSSelectorFromString(@"setOverrideIconImageAppearance:");
+            if ([self respondsToSelector:sApp]) {
+                id light = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"SBHIconImageAppearance"),
+                                                           NSSelectorFromString(@"lightAppearance"));
+                if (light) ((void (*)(id, SEL, id))objc_msgSend)(self, sApp, light);
+            }
+            [CATransaction commit];
+            // 主动把主题图写进图标缓存（17.2 上是 cacheImage:forIcon:）——缓存里一开始就是主题图
+            id iv = [self valueForKey:@"_iconImageView"];
+            id cache = (iv && [iv respondsToSelector:NSSelectorFromString(@"iconImageCache")])
+                     ? [iv valueForKey:@"iconImageCache"] : nil;
+            if (cache && [cache respondsToSelector:NSSelectorFromString(@"cacheImage:forIcon:")])
+                ((void (*)(id, SEL, id, id))objc_msgSend)(cache, NSSelectorFromString(@"cacheImage:forIcon:"), img, icon);
+            TBLogOnce([@"ovr|" stringByAppendingString:TBBIDFromIcon(icon) ?: @"?"], @"overrideImage 已设");
+            return;
+        }
+    } @catch (NSException *e) { }
     TBApplyThemeToIconView(self);
+}
+
+// ★ 0.18.20（换路）：iOS 17 起图标是走这些【带 traitCollection/context/options】的现代选择子生成的
+//   （我们以前只挂了老的单参数 iconImageWithInfo: → 生成那一刻没被接管 → 首帧是原图）。
+//   这里补挂它们；方法不存在就跳过（TBHasMethod 守护）。
+static NSHashTable *gSeenIconViews = nil;   // 0.18.20：弱引用，供轻量刷新用
+
+typedef id (*FnImgTCO)(id, SEL, TBImageInfo, id, id, unsigned long long);
+typedef id (*FnImgTO)(id, SEL, TBImageInfo, id, unsigned long long);
+typedef id (*FnImgTCOMake)(id, SEL, TBImageInfo, id, id, unsigned long long);
+static FnImgTCO o_imgTCO = NULL, o_imgTCOMake = NULL;
+static FnImgTO  o_imgTO = NULL;
+
+static id TBThemedForIconObject(id icon) {
+    if (!TBEnabled() || TBSafeMode() || !TBApplyIconForDesktop()) return nil;
+    @try {
+        NSString *bid = TBBIDFromIcon(icon);
+        if (!bid.length) return nil;
+        return TBImageForBundle(bid);
+    } @catch (NSException *e) { return nil; }
+}
+
+static id tb_imgTCO(id self, SEL _cmd, TBImageInfo info, id tc, id ctx, unsigned long long opt) {
+    UIImage *m = TBThemedForIconObject(self);
+    if (m) { TBLogOnce(@"modern|tco", @"现代取图 tco 已接管"); return m; }
+    return o_imgTCO ? o_imgTCO(self, _cmd, info, tc, ctx, opt) : nil;
+}
+static id tb_imgTO(id self, SEL _cmd, TBImageInfo info, id tc, unsigned long long opt) {
+    UIImage *m = TBThemedForIconObject(self);
+    if (m) { TBLogOnce(@"modern|to", @"现代取图 to 已接管"); return m; }
+    return o_imgTO ? o_imgTO(self, _cmd, info, tc, opt) : nil;
+}
+
+/// ★ 0.18.20（换路·第四步）：刷新不再"批量重贴 + 刷桌面"，而是
+///   ① 对登记过的图标视图重设 overrideImage；② 对图标调系统自带的失效接口。
+///   这样只动"主题覆盖的那几十个图"，不触发整屏重画（那正是卡与闪的来源）。
+static NSInteger TBReapplyIconsLight(void) {
+    NSArray *views = gSeenIconViews ? gSeenIconViews.allObjects : @[];
+    NSInteger n = 0;
+    for (UIView *v in views) {
+        @try {
+            id icon = [v valueForKey:@"icon"];
+            UIImage *img = TBThemedForIconObject(icon);
+            if (!img) continue;
+            if ([v respondsToSelector:NSSelectorFromString(@"setOverrideImage:")])
+                ((void (*)(id, SEL, id))objc_msgSend)(v, NSSelectorFromString(@"setOverrideImage:"), img);
+            static const char *inv[] = { "purgeCachedImages", "invalidateIconImageCache", "_invalidateIconImageCache", "reloadIconImage", "_reloadIconImage" };
+            for (size_t i = 0; i < sizeof(inv)/sizeof(inv[0]); i++) {
+                SEL sel = NSSelectorFromString(@(inv[i]));
+                if (icon && [icon respondsToSelector:sel])
+                    ((void (*)(id, SEL))objc_msgSend)(icon, sel);
+            }
+            n++;
+        } @catch (NSException *e) { }
+    }
+    TBLog(@"轻量刷新：重设 override %ld 个图标视图（不重贴、不刷桌面）", (long)n);
+    return n;
 }
 
 // ---- 换图标后重贴（拖拽放置/资源库→桌面 时系统直接贴原始图，读端 hook 管不到）----
@@ -4955,6 +5042,17 @@ static void TBInstall(void) {
         TBLog(@"探针：appearance 版签名 读=%d 写=%d（0=本系统不存在）", a1, a2);
     }
 
+    // ★ 0.18.20：图标模型层的现代取图选择子（存在才挂）
+    {
+        Class ic = NSClassFromString(@"SBIcon");
+        if (ic) {
+            if (TBHasMethod(ic, @"iconImageWithInfo:traitCollection:context:options:"))
+                o_imgTCO = (FnImgTCO)TBHook(ic, @"iconImageWithInfo:traitCollection:context:options:", (IMP)tb_imgTCO, "现代取图 tco");
+            if (TBHasMethod(ic, @"iconImageWithInfo:traitCollection:options:"))
+                o_imgTO = (FnImgTO)TBHook(ic, @"iconImageWithInfo:traitCollection:options:", (IMP)tb_imgTO, "现代取图 to");
+        }
+    }
+
     // SBIconView -layoutSubviews（自愈校验：图不对才贴，收敛后不再触发）
     Class iconViewCls2 = NSClassFromString(@"SBIconView");
     if (iconViewCls2 && !gDoneLayout && TBHasMethod(iconViewCls2, @"layoutSubviews")) {
@@ -5504,11 +5602,17 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (mySeq != gReloadRunSeq) return;
-            TBLog(@"应用完成：一次性重贴 + 刷新（无动画）");
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
-            TBHealAllIconViews();
-            TBRefreshSpringBoard(why);
+            BOOL overrideOK = NSClassFromString(@"SBIconView") &&
+                              [NSClassFromString(@"SBIconView") instancesRespondToSelector:NSSelectorFromString(@"setOverrideImage:")];
+            if (overrideOK && TBReapplyIconsLight() > 0) {
+                TBLog(@"应用完成：走 override 轻量刷新（不再批量重贴/刷桌面）");
+            } else {
+                TBLog(@"应用完成：回退一次性重贴 + 刷新（无动画）");
+                TBHealAllIconViews();
+                TBRefreshSpringBoard(why);
+            }
             TBBadgeRelayoutVisible();
             [CATransaction commit];
         });
