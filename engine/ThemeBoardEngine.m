@@ -2036,23 +2036,11 @@ static void TBEnumerateDisplayedIconViews(void (^blk)(UIView *v)) {
 ///   ① refreshAllHomescreenIconsClearingCaches —— 清缓存 + 全桌面刷新一体
 ///   ② enumerateDisplayedIconViewsUsingBlock: + _updateIconImageViewAnimated:NO
 static NSInteger TBUpdateDisplayedIconViews(void) {
-    SEL sAll = NSSelectorFromString(@"refreshAllHomescreenIconsClearingCaches");
+    // ★ 1.6：**不再调用** refreshAllHomescreenIconsClearingCaches ——
+    //   实测（1.5）：每调一次 SpringBoard 就崩一次（日志 14 次重启 / 5 次调用），用户看到"一操作就注销"。
+    //   那个接口在 17.2 上显然不能这样裸调。改为只清缓存 + 定点更新。
     BOOL didAll = NO;
-    @try {
-        id ctrl = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"SBIconController"),
-                                                  NSSelectorFromString(@"sharedInstance"));
-        if (ctrl && [ctrl respondsToSelector:sAll]) { ((void (*)(id, SEL))objc_msgSend)(ctrl, sAll); didAll = YES; }
-        if (!didAll && ctrl) {
-            static const char *props[] = { "iconManager", "homeScreenIconManager", "homeScreenViewController" };
-            for (int k = 0; k < 3 && !didAll; k++) {
-                SEL p = NSSelectorFromString(@(props[k]));
-                if (![ctrl respondsToSelector:p]) continue;
-                id t = ((id (*)(id, SEL))objc_msgSend)(ctrl, p);
-                if (t && [t respondsToSelector:sAll]) { ((void (*)(id, SEL))objc_msgSend)(t, sAll); didAll = YES; }
-            }
-        }
-    } @catch (NSException *e) { }
-    TBLog(@"系统全量刷新接口：%@", didAll ? @"已调用" : @"不存在，走缓存清理");
+    TBLog(@"系统全量刷新接口：已停用（1.5 实测会导致注销），改走缓存清理");
     if (!didAll) {
         [gLock lock]; NSArray *caches = gCaches ? gCaches.allObjects : @[]; [gLock unlock];
         for (NSValue *vv in caches) {
@@ -2097,7 +2085,11 @@ static void TBPreWarmThemedIcons(void (^done)(void)) {
     NSArray *bids = gIndex ? gIndex.allKeys : @[];
     NSArray *caches = gCaches ? gCaches.allObjects : @[];
     [gLock unlock];
-    if (!bids.count || !caches.count) { if (done) done(); return; }
+    if (!bids.count || !caches.count) {
+        TBLog(@"预热跳过：图标 %lu / 缓存 %lu（索引可能还没建好）", (unsigned long)bids.count, (unsigned long)caches.count);
+        if (done) done();
+        return;
+    }
     NSMutableArray *infos = [NSMutableArray array];
     for (NSValue *v in caches) {
         id c = v.nonretainedObjectValue;
