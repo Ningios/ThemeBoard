@@ -2041,22 +2041,18 @@ static NSInteger TBUpdateDisplayedIconViews(void) {
     //   那个接口在 17.2 上显然不能这样裸调。改为只清缓存 + 定点更新。
     BOOL didAll = NO;
     TBLog(@"系统全量刷新接口：已停用（1.5 实测会导致注销），改走缓存清理");
-    if (!didAll) {
-        [gLock lock]; NSArray *caches = gCaches ? gCaches.allObjects : @[]; [gLock unlock];
-        for (NSValue *vv in caches) {
-            id cache = vv.nonretainedObjectValue;
-            if (!cache) continue;
-            @try {
-                SEL s1 = NSSelectorFromString(@"_clearCachedImages");
-                SEL s2 = NSSelectorFromString(@"clearCachedImages");
-                if ([cache respondsToSelector:s1]) ((void (*)(id, SEL))objc_msgSend)(cache, s1);
-                else if ([cache respondsToSelector:s2]) ((void (*)(id, SEL))objc_msgSend)(cache, s2);
-            } @catch (NSException *e) { }
-        }
-    }
+    // ★ 1.7：不再遍历 gCaches 清缓存 —— 那里存的是 nonretainedObjectValue，
+    //   对象释放后再 respondsToSelector 会 objc_retain 野指针 → SIGBUS（实测崩溃栈就在这里）。
+    //   改成对【活着的图标对象】调 purgeCachedImages / reloadIconImage（同为 sb 的选择子）。
+    (void)didAll;
     __block NSInteger n = 0;
     TBEnumerateDisplayedIconViews(^(UIView *v) {
         @try {
+            id icon0 = [v valueForKey:@"icon"];
+            if (icon0) {
+                SEL sPurge = NSSelectorFromString(@"purgeCachedImages");
+                if ([icon0 respondsToSelector:sPurge]) ((void (*)(id, SEL))objc_msgSend)(icon0, sPurge);
+            }
             id iv = [v valueForKey:@"_iconImageView"];
             if (iv) {
                 SEL sUpd = NSSelectorFromString(@"_updateIconImageViewAnimated:");
