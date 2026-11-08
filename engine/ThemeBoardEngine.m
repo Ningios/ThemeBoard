@@ -219,20 +219,6 @@ static BOOL TBApplyIconForDesktop(void) {
     return TBApplyEnabled(@"ApplyDock") || TBApplyEnabled(@"ApplyFolder") || TBApplyEnabled(@"ApplySwitcher");
 }
 
-static BOOL TBApplyIconForDock(void) {
-    // Dock 独立开关
-    return TBApplyEnabled(@"ApplyDock");
-}
-
-static BOOL TBApplyIconForFolder(void) {
-    // 文件夹预览独立开关
-    return TBApplyEnabled(@"ApplyFolder");
-}
-
-static BOOL TBApplyIconForSwitcher(void) {
-    // App 切换器独立开关
-    return TBApplyEnabled(@"ApplySwitcher");
-}
 static NSString *TBActiveTheme(void) {
     id v = TBPref(kActiveTheme);
     return [v isKindOfClass:[NSString class]] ? v : nil;
@@ -422,41 +408,8 @@ static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys) {
 
 /// 玻璃素材缓存（主体高度透明 = 玻璃层）
 static NSMutableSet *gGlassNames;
-static BOOL TBIsGlassResource(NSString *name) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ gGlassNames = [NSMutableSet set]; });
-    NSString *key = name.lowercaseString;
-    if ([gGlassNames containsObject:key]) return YES;
-    UIImage *img = TBResourceImage(name);
-    if (!img || !img.CGImage) return NO;
-    BOOL glass = !TBImageIsMostlyOpaque(img.CGImage);
-    if (glass) [gGlassNames addObject:key];
-    return glass;
-}
-
 /// 把半透明玻璃层垫上白色底盘，输出一张「完整表盘」用于真替换。
 /// 不能直接拿玻璃当底图（透明处会露出时钟视图的深色底盘 → 变黑）。
-static UIImage *TBFlattenOverWhite(UIImage *overlay) {
-    if (!overlay) return nil;
-    CGSize size = overlay.size;
-    if (size.width < 1) return overlay;
-    if (TBImageIsMostlyOpaque(overlay.CGImage)) return overlay;
-    UIImage *base = [UIImage imageWithCGImage:overlay.CGImage
-                                        scale:overlay.scale
-                                  orientation:UIImageOrientationUp];
-    CGFloat scale = overlay.scale > 0 ? overlay.scale : 3.0;
-    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-    fmt.scale = scale;
-    fmt.opaque = NO;
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size format:fmt];
-    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        CGContextRef gc = ctx.CGContext;
-        CGContextSetRGBFillColor(gc, 1, 1, 1, 1);
-        CGContextFillRect(gc, CGRectMake(0, 0, size.width, size.height));
-        [base drawInRect:CGRectMake(0, 0, size.width, size.height)];
-    }];
-}
-
 /// 判断素材是否「主体不透明」（只有圆角透明）还是「半透明玻璃层」。
 /// 玻璃类素材绝不能填白，否则玻璃感会被抹成白板。
 static BOOL TBImageIsMostlyOpaque(CGImageRef cg) {
@@ -477,41 +430,6 @@ static BOOL TBImageIsMostlyOpaque(CGImageRef cg) {
     for (int i = 0; i < N * N; i++) sum += buf[i * 4 + 3];
     double mean = (double)sum / (double)(N * N) / 255.0;
     return mean > 0.70;   // 主体基本不透明才算「不透明素材」
-}
-
-static UIImage *TBMakeOpaqueOnBodyColor(UIImage *img) {
-    if (!img || !img.CGImage) return img;
-    CGImageRef cg = img.CGImage;
-    if (!TBImageIsMostlyOpaque(cg)) {
-        TBLogOnce(@"clockglass", @"时钟底图是半透明玻璃层：保持透明，不做填白");
-        return img;
-    }
-    size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
-    if (w < 2 || h < 2) return img;
-
-    // 取中心附近像素作为底色（表盘主体色）
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    static unsigned char px[4]; px[0]=255; px[1]=255; px[2]=255; px[3]=255;
-    CGContextRef probe = CGBitmapContextCreate(px, 1, 1, 8, 4, cs, kCGImageAlphaPremultipliedLast);
-    if (probe) {
-        CGContextDrawImage(probe, CGRectMake(-(CGFloat)w * 0.5, -(CGFloat)h * 0.5, (CGFloat)w, (CGFloat)h), cg);
-        CGContextRelease(probe);
-    }
-
-    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-    fmt.scale = 1.0;
-    fmt.opaque = YES;
-    UIColor *body = [UIColor colorWithRed:px[0] / 255.0 green:px[1] / 255.0 blue:px[2] / 255.0 alpha:1.0];
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(w, h) format:fmt];
-    // 注意：必须用 UIKit 的绘制 API。在 UIKit 上下文里直接 CGContextDrawImage
-    // 是 y 轴向上的语义，会把图上下翻转（表盘歪/镜像的元凶）。
-    UIImage *out = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        [body setFill];
-        UIRectFill(CGRectMake(0, 0, w, h));
-        [img drawInRect:CGRectMake(0, 0, w, h)];
-    }];
-    CGColorSpaceRelease(cs);
-    return out ?: img;
 }
 
 /// 主题里是否有同名资源（表盘/指针/文件夹底等）
@@ -628,21 +546,6 @@ static TBInfo TBInfoOfCache(id cache) {
     return info;
 }
 
-static CGFloat TBAverageLuma(UIImage *img) {
-    if (!img.CGImage) return 0.5;
-    unsigned char px[16 * 4];
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(px, 4, 4, 8, 16, cs, kCGImageAlphaPremultipliedLast);
-    if (!ctx) { CGColorSpaceRelease(cs); return 0.5; }
-    CGContextDrawImage(ctx, CGRectMake(0, 0, 4, 4), img.CGImage);
-    CGFloat sum = 0;
-    for (int i = 0; i < 16; i++)
-        sum += 0.299 * px[i*4] + 0.587 * px[i*4+1] + 0.114 * px[i*4+2];
-    CGContextRelease(ctx);
-    CGColorSpaceRelease(cs);
-    return sum / 16.0 / 255.0;
-}
-
 /// 日历 / 时钟这类动态图标：在主题底图上重绘实时内容
 static UIImage *TBDynamicIcon(UIImage *base, NSString *bid) {
     // 主题图仅作为背景底图，日期/指针由系统动态绘制
@@ -692,10 +595,6 @@ static BOOL TBImageDateAreaMetrics(UIImage *img, CGFloat *ink, CGFloat *op) {
     // 半透明（玻璃）底图不算"已画日期"：它没有日期可看，必须自己写上去
     if (opPct < 80) return NO;
     return inkPct > 3;
-}
-
-static BOOL TBImageHasContentInDateArea(UIImage *img) {
-    return TBImageDateAreaMetrics(img, NULL, NULL);
 }
 
 /// 主题只给了 IconBundles 静态图标（Bundles 里没有整套动态素材）→
@@ -933,10 +832,6 @@ static TBMaskStats TBMaskAlphaStats(UIImage *mask) {
 }
 
 /// 「很淡」= 整体 alpha 偏低（p90 < 0.45）或几乎没有实心区（实心占比 < 0.5）
-static BOOL TBMaskStatsLookFaint(TBMaskStats st) {
-    return (st.p90 < 0.45) || (st.solid < 0.5);
-}
-
 /// 「淡玻璃 / 渐变玻璃层」——**不是形状遮罩**，应该当叠加层用。
 /// 比 faint 更严一点，避免把"形状只占画布一小块"的真形状遮罩误判：
 ///   p90 < 0.45，或者（几乎没有实心区 且 p90 也不高）
@@ -1596,10 +1491,6 @@ static void TBApplyIconLayerShadow(id iconView, UIView *imgView) {
 static UIImage *gSystemClockFace;   // 系统自己的时钟表盘（主题取消后还原用）
 
 /// 无主题 / 主题没有表盘素材时，把系统原来的表盘还回去
-static UIImage *TBSystemClockFace(void) {
-    return gSystemClockFace;
-}
-
 // ---- 图标圆角：用【系统自己的遮罩形状】，不再自己画超椭圆 ----
 // 我们是在 SBHIconImageCache 的读路径直接返回图的，这条路径系统认为是"已遮罩"的，
 // 所以必须自己遮 —— 但形状要用系统那张（第一次从系统原实现里取到后缓存成模板）。
@@ -2052,64 +1943,6 @@ static void TBRefreshSettingsIconsBatch(NSString *why) {
     });
 }
 
-static void (*o_ivSetImage)(id, SEL, id);
-static void tb_ivSetImage(id self, SEL _cmd, id img) {
-    if (o_ivSetImage) o_ivSetImage(self, _cmd, img);
-    if (sInIVHook) return;
-    @try {
-        if (!TBEnabled() || TBSafeMode() || !TBUIKitIconEnabled()) return;
-        if (!gNameToBID) { TBBuildNameMap(); return; }      // 表还没建好 → 不做任何事
-        UIImageView *iv = (UIImageView *)self;
-        if (![iv isKindOfClass:[UIImageView class]]) return;
-        CGSize sz = iv.bounds.size;
-        if (sz.width < 8 || sz.width > 64 || fabs(sz.width - sz.height) > 4) return;
-        UITableViewCell *cell = nil;
-        UIView *pv = iv.superview;
-        for (int d = 0; pv && d < 6; d++, pv = pv.superview) {
-            if ([pv isKindOfClass:[UITableViewCell class]]) { cell = (UITableViewCell *)pv; break; }
-        }
-        if (!cell) return;
-        // 不再用"已处理"早退：系统会在配置/布局后把原图写回，我们要允许自己再替换一次。
-        // 命中缓存的成本是一次字典查询，足够轻。
-        NSString *title = TBCellTitleText(cell);
-        if (!title.length) return;
-        if (!gTitleImg) gTitleImg = [NSMutableDictionary dictionary];
-        id cached = gTitleImg[title];
-        UIImage *sized = nil;
-        if ([cached isKindOfClass:[UIImage class]]) {
-            sized = cached;
-        } else if (cached) {
-            return;                                             // NSNull = 无主题
-        } else {
-            NSString *bid = gNameToBID[title];
-            UIImage *theme = bid.length ? TBImageForBundle(bid) : nil;
-            if (![theme isKindOfClass:[UIImage class]]) { gTitleImg[title] = [NSNull null]; return; }
-            TBInfo info = { sz, [UIScreen mainScreen].scale, 0 };
-            sized = TBFitCached(theme, info, bid) ?: theme;
-            gTitleImg[title] = sized ?: (id)[NSNull null];
-            TBLogOnce([@"ivrow|" stringByAppendingString:bid ?: title],
-                      @"设置页图标(UIImageView)：%@（行「%@」）已替换", bid, title);
-        }
-        if (![sized isKindOfClass:[UIImage class]] || iv.image == sized) return;
-        sInIVHook = YES;
-        iv.image = sized;
-        iv.contentMode = UIViewContentModeScaleAspectFit;
-        sInIVHook = NO;
-        // 0.16.5：系统常在配置后把原图写回 → 稍后再补一次（只补一次，避免高频循环）
-        __weak UIImageView *wiv = iv;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            UIImageView *v = wiv;
-            if (v && v.image != sized) {
-                v.image = sized;
-                v.contentMode = UIViewContentModeScaleAspectFit;
-            }
-        });
-    } @catch (NSException *e) { sInIVHook = NO; }
-}
-
-
-
 // ---- 时钟供图（0.18.1 的四 hook 版）已整体移除：见 0.18.7 说明 ----
 
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
@@ -2442,17 +2275,6 @@ static void tb_resetImageOnIconView(id self, SEL _cmd, id icon) {
 //   · 只装在 SpringBoard 进程（设置页/其它 App 完全不受影响，不会重演 0.16.6 的卡顿）
 //   · 先做极便宜的前置判断（父链上两层的 icon 属性），不是图标视图就直接直通
 static BOOL gDoneIVSetImage = NO;
-static void (*o_ivSetImage)(id, SEL, id);
-
-static UIImage *TBScaledToSize(UIImage *img, CGSize size) {
-    if (!img || size.width < 1 || size.height < 1) return img;
-    if (fabs(img.size.width - size.width) < 0.5 && fabs(img.size.height - size.height) < 0.5) return img;
-    UIGraphicsBeginImageContextWithOptions(size, NO, 0);
-    [img drawInRect:CGRectMake(0, 0, size.width, size.height)];
-    UIImage *out = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return out ?: img;
-}
 
 // ★ 0.18.9 探针：这里【只打日志、绝不改图】
 static NSString *TBProbeBID(id view) {
@@ -2465,22 +2287,6 @@ static NSString *TBProbeBID(id view) {
         }
     }
     return nil;
-}
-
-static void tb_lastMileSetImage(id self, SEL _cmd, id image) {
-    if (image && gIsPrimary) {
-        @try {
-            NSString *cn = NSStringFromClass([self class]);
-            NSString *bid = TBProbeBID(self);
-            CGSize sz = [image isKindOfClass:[UIImage class]] ? ((UIImage *)image).size : CGSizeZero;
-            UIImage *mine = bid.length ? TBImageForBundle(bid) : nil;
-            BOOL ours = (mine && image == mine);
-            TBLogOnce([NSString stringWithFormat:@"setImg|%@|%@|%.0fx%.0f|%d", cn, bid ?: @"-", sz.width, sz.height, ours ? 1 : 0],
-                      @"探针 setImage cls=%@ bid=%@ size=%.0fx%.0f 是否主题图=%d",
-                      cn, bid.length ? bid : @"-", sz.width, sz.height, ours ? 1 : 0);
-        } @catch (NSException *e) {}
-    }
-    if (o_ivSetImage) o_ivSetImage(self, _cmd, image);
 }
 
 // ---- 0.18.10 探针：CALayer -setContents:（图标很可能是直接写图层内容上屏的）----
@@ -2552,36 +2358,6 @@ static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
 }
 
 // 快照路径探针：动画很可能是"抓视图画面"而不是"贴图"
-static void (*o_probeSnapA)(id, SEL, BOOL);
-static id (*o_probeSnapB)(id, SEL);
-
-static void tb_probeSnapA(id self, SEL _cmd, BOOL after) {
-    @try {
-        if ([self isKindOfClass:[UIView class]]) {
-            NSString *cn = NSStringFromClass([self class]);
-            NSString *bid = TBProbeBID(self);
-            if (bid.length || [cn rangeOfString:@"Icon"].location != NSNotFound) {
-                TBLogOnce([NSString stringWithFormat:@"snapA|%@|%@|%.0f", cn, bid ?: @"-", ((UIView *)self).bounds.size.width],
-                          @"探针 快照A cls=%@ bid=%@ bounds=%@", cn, bid.length ? bid : @"-", NSStringFromCGRect(((UIView *)self).bounds));
-            }
-        }
-    } @catch (NSException *e) {}
-    if (o_probeSnapA) o_probeSnapA(self, _cmd, after);
-}
-
-static id tb_probeSnapB(id self, SEL _cmd) {
-    @try {
-        if ([self isKindOfClass:[UIView class]]) {
-            NSString *cn = NSStringFromClass([self class]);
-            NSString *bid = TBProbeBID(self);
-            if (bid.length || [cn rangeOfString:@"Icon"].location != NSNotFound) {
-                TBLogOnce([NSString stringWithFormat:@"snapB|%@|%@|%.0f", cn, bid ?: @"-", ((UIView *)self).bounds.size.width],
-                          @"探针 快照B cls=%@ bid=%@ bounds=%@", cn, bid.length ? bid : @"-", NSStringFromCGRect(((UIView *)self).bounds));
-            }
-        }
-    } @catch (NSException *e) {}
-    return o_probeSnapB ? o_probeSnapB(self, _cmd) : nil;
-}
 
 // ---- 自愈式校验：布局时只做指针比对，图不对才贴一次（收敛后不再触发）----
 typedef void (*LayoutFn)(id, SEL);
@@ -2683,7 +2459,6 @@ static BOOL TBApplyThemeToIconView(id self) {
 static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons);
 
 /// 一次性探针：时钟视图的类链 / ivar / 相关方法 / 子视图树，用来确定表盘图存在哪
-static void TBClockDumpNow(id v);
 static NSInteger TBHealOneView(UIView *v, NSMutableArray *iconsOut) {
     if (!v) return 0;
     NSInteger fixed = 0;
@@ -2973,8 +2748,7 @@ static void tb_iconViewLayoutSubviews(id self, SEL _cmd) {
 //   这里补挂它们；方法不存在就跳过（TBHasMethod 守护）。
 typedef id (*FnImgTCO)(id, SEL, TBImageInfo, id, id, unsigned long long);
 typedef id (*FnImgTO)(id, SEL, TBImageInfo, id, unsigned long long);
-typedef id (*FnImgTCOMake)(id, SEL, TBImageInfo, id, id, unsigned long long);
-static FnImgTCO o_imgTCO = NULL, o_imgTCOMake = NULL;
+static FnImgTCO o_imgTCO = NULL;
 static FnImgTO  o_imgTO = NULL;
 
 static id TBThemedForIconObject(id icon) {
@@ -3303,14 +3077,6 @@ static id tb_ifImgSize(id self, SEL _cmd, CGSize size, double scale) {
         }
     } @catch (NSException *e) { }
     return o_ifImgSize ? o_ifImgSize(self, _cmd, size, scale) : nil;
-}
-
-static id tb_iconImageOfSize(id self, SEL _cmd, CGSize size, double scale, BOOL gracefully, id drawing) {
-    TBRemember(self);
-    // 这里拿不到 icon，只做观测：确认这条链是否真的被走
-    static int once = 0;
-    if (once < 3) { once++; TBLog(@"观测 _iconImageOfSize:%.0fx%.0f scale=%.1f", size.width, size.height, scale); }
-    return o_iconImageOfSize ? o_iconImageOfSize(self, _cmd, size, scale, gracefully, drawing) : nil;
 }
 
 typedef UIImage *(*UIActivityIconFn)(id, SEL, NSString *);
@@ -3812,20 +3578,6 @@ static NSString *tb_pathForResDir(id self, SEL _cmd, NSString *name, NSString *e
 
 typedef id (*ClockIconImageFn)(id, SEL, TBClockInfo, BOOL);
 static ClockIconImageFn o_clockIconImage;
-
-static id tb_clockIconImage(id self, SEL _cmd, TBClockInfo info, BOOL mask) {
-    // 只替换底图，指针由系统自己画（SnowBoard 同款做法）：
-    // 系统时钟视图会拿这张图当表盘，再把时/分/秒针叠上去，所以会跟着时间走。
-    if (TBEnabled() && !TBSafeMode()) {
-        UIImage *img = TBImageForBundle(@"com.apple.mobiletimer");
-        if (img) {
-            TBLogOnce(@"clockbase|hit", @"serve 时钟底图 %@", [img valueForKey:@"size"] ? @"(ok)" : @"(ok)");
-            TBInfo fi; fi.size = CGSizeMake(info.w, info.h); fi.scale = info.scale; fi.ratio = 0;
-            return TBFitImage(img, fi);
-        }
-    }
-    return o_clockIconImage ? o_clockIconImage(self, _cmd, info, mask) : nil;
-}
 
 #pragma mark - 设置页图标（PSSpecifier，17.2 头文件确认）
 
@@ -4636,7 +4388,6 @@ static void tb_badgeLayout(id self, SEL _cmd) {
 }
 
 static BOOL gDoneBadge = NO;
-static BOOL gDoneNCBadge = NO;
 
 static BOOL gDoneClock = NO;
 
@@ -4647,7 +4398,6 @@ static BOOL gDoneClock = NO;
 typedef UIColor *(*HandColorFn)(id, SEL);
 typedef BOOL (*HandBoolFn)(id, SEL);
 static HandColorFn o_hmHandColor, o_secHandColor;
-static HandBoolFn o_hidesSeconds;
 
 static ContentsImgFn o_contentsImageLive, o_squareContentsImageLive;
 static BOOL sInClockContents = NO;   // 防自调用（hook 装错层会无限递归）
@@ -5018,23 +4768,12 @@ static void TBInstall(void) {
         }
     }
 
-    // ★ 0.18.9 探针（只打日志、绝不改图）：SpringBoard 内的 setImage / 快照路径
+    // ★ 图层兜底：CALayer -setContents: 时把「非主题的图标原图」换成主题图（只装在 SpringBoard）
     if (gIsPrimary && !gDoneIVSetImage) {
         gDoneIVSetImage = YES;
-        Class ivCls = NSClassFromString(@"UIImageView");
-        if (ivCls && TBHasMethod(ivCls, @"setImage:")) {
-            o_ivSetImage = (SetImgFn)TBHook(ivCls, @"setImage:", (IMP)tb_lastMileSetImage, "探针 UIKit.setImage");
-        }
-        Class uiView = NSClassFromString(@"UIView");
-        if (uiView) {
-            if (TBHasMethod(uiView, @"snapshotViewAfterScreenUpdates:"))
-                o_probeSnapA = (void (*)(id, SEL, BOOL))TBHook(uiView, @"snapshotViewAfterScreenUpdates:", (IMP)tb_probeSnapA, "探针 快照A");
-            if (TBHasMethod(uiView, @"snapshotView"))
-                o_probeSnapB = (id (*)(id, SEL))TBHook(uiView, @"snapshotView", (IMP)tb_probeSnapB, "探针 快照B");
-        }
         Class layerCls = NSClassFromString(@"CALayer");
         if (layerCls && TBHasMethod(layerCls, @"setContents:")) {
-            o_probeLayerContents = (void (*)(id, SEL, id))TBHook(layerCls, @"setContents:", (IMP)tb_probeLayerContents, "探针 图层 contents");
+            o_probeLayerContents = (void (*)(id, SEL, id))TBHook(layerCls, @"setContents:", (IMP)tb_probeLayerContents, "图层兜底");
         }
         Class cacheCls = NSClassFromString(@"SBHIconImageCache");
         BOOL a1 = cacheCls && TBHasMethod(cacheCls, @"imageForIcon:imageAppearance:options:");
@@ -5255,58 +4994,6 @@ static void TBPurgeIcons(NSValue *cacheValue, NSArray *icons) {
 }
 
 /// 只清「主题覆盖到的」那几十个图标的缓存，小批 + 间隔，避免把 SpringBoard 拖死。
-static void TBPurgeThemedIcons(void) {
-    if (TBSafeMode()) { TBLog(@"安全模式：跳过清缓存"); return; }
-    id v = TBPref(@"PurgeCache");                       // 0.18.3：默认关，必须显式打开才清缓存
-    if (!v || ![v boolValue]) { TBLog(@"已跳过清缓存（默认关 / 设置里关掉了）"); return; }
-
-    [gLock lock];
-    NSArray *caches = gCaches.allObjects;
-    NSDictionary *index = gIndex;
-    [gLock unlock];
-
-    NSMutableSet *bids = [NSMutableSet set];
-    for (NSString *bid in index) [bids addObject:bid];
-    if (!bids.count || !caches.count) { TBLog(@"清缓存：没有可清的目标"); return; }
-
-    // 取当前图标列表
-    NSArray *icons = nil;
-    @try {
-        id ctrl = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"SBIconController"), NSSelectorFromString(@"sharedInstance"));
-        id model = ((id (*)(id, SEL))objc_msgSend)(ctrl, NSSelectorFromString(@"iconModel"));
-        icons = ((id (*)(id, SEL))objc_msgSend)(model, NSSelectorFromString(@"leafIcons"));
-    } @catch (NSException *e) { icons = nil; }
-    if (![icons isKindOfClass:[NSArray class]] || !icons.count) { TBLog(@"清缓存：拿不到图标列表"); return; }
-
-    // 只挑主题覆盖到的
-    NSMutableArray *targets = [NSMutableArray array];
-    for (id icon in icons) {
-        NSString *bid = TBBIDFromIcon(icon);
-        if (bid && [bids containsObject:bid]) [targets addObject:icon];
-    }
-    if (!targets.count) { TBLog(@"清缓存：没有匹配到的图标"); return; }
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSUInteger i = 0;
-        while (i < targets.count) {
-            NSUInteger n = MIN((NSUInteger)10, targets.count - i);
-            NSArray *part = [targets subarrayWithRange:NSMakeRange(i, n)];
-            for (NSValue *cv in caches) {
-                id cache = cv.nonretainedObjectValue;
-                @try {
-                    SEL sel = NSSelectorFromString(@"purgeCachedImagesForIcons:");
-                    if ([cache respondsToSelector:sel]) {
-                        ((void (*)(id, SEL, id))objc_msgSend)(cache, sel, part);
-                    }
-                } @catch (NSException *e) { }
-            }
-            i += n;
-            usleep(250000);   // 每小批之间 250ms，让出主线程
-        }
-        TBLog(@"已小批清理 %lu 个图标缓存（每批 10 个）", (unsigned long)targets.count);
-    });
-}
-
 /// （0.15.53：原来的 TBInvalidateIconViews 同步整表循环已并入 TBRunReload 的分批异步版，
 ///   这里不再保留独立函数 —— 通知逻辑只有这一处使用方。）
 
