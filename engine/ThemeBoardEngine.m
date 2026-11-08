@@ -2074,7 +2074,32 @@ static void TBEnumerateDisplayedIconViews(void (^blk)(UIView *v)) {
 static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
     NSMutableArray *views = [NSMutableArray array];
     TBEnumerateDisplayedIconViews(^(UIView *v) { if (v) [views addObject:v]; });
-    TBLog(@"收集显示中的图标视图：%lu 个", (unsigned long)views.count);
+    // ★ 1.10：Dock / 文件夹 / 资源库 / 角标 不在上面那份"图标视图"列表里（它们是另外的容器），
+    //   这里按类名定向补一遍（限深、去重，仍然走同一套分批更新）。
+    NSMutableSet *seen = [NSMutableSet set];
+    for (UIView *v in views) [seen addObject:[NSValue valueWithPointer:(__bridge const void *)v]];
+    NSInteger extra = 0;
+    @try {
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            NSMutableArray *stack = [NSMutableArray arrayWithObject:w];
+            NSInteger guard = 0;
+            while (stack.count && guard < 6000) {
+                guard++;
+                UIView *v = stack.lastObject; [stack removeLastObject];
+                NSString *cn = NSStringFromClass([v class]);
+                if ([cn containsString:@"Dock"] || [cn containsString:@"Folder"] ||
+                    [cn containsString:@"Library"] || [cn containsString:@"Badge"]) {
+                    NSValue *k = [NSValue valueWithPointer:(__bridge const void *)v];
+                    if (![seen containsObject:k] && [v respondsToSelector:NSSelectorFromString(@"icon")]) {
+                        [seen addObject:k]; [views addObject:v]; extra++;
+                    }
+                }
+                for (UIView *sub in v.subviews) [stack addObject:sub];
+            }
+        }
+    } @catch (NSException *e) { }
+    TBLog(@"收集显示中的图标视图：%lu 个（其中 Dock/文件夹/资源库/角标 %ld 个）",
+          (unsigned long)views.count, (long)extra);
     if (!views.count) { TBHealAllIconViews(); TBRefreshSpringBoard(why); return; }
 
     __block NSUInteger idx = 0;
@@ -2088,6 +2113,10 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                 if (icon && [icon respondsToSelector:NSSelectorFromString(@"purgeCachedImages")])
                     ((void (*)(id, SEL))objc_msgSend)(icon, NSSelectorFromString(@"purgeCachedImages"));
                 NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
+                // 文件夹：优先用 sb 的选择子重建（存在才调）
+                SEL sRebuild = NSSelectorFromString(@"rebuildImagesForFolderIcon:");
+                if (icon && [v respondsToSelector:sRebuild])
+                    ((void (*)(id, SEL, id))objc_msgSend)(v, sRebuild, icon);
                 id iv = [v valueForKey:@"_iconImageView"];
                 if (iv && [iv respondsToSelector:NSSelectorFromString(@"_updateIconImageViewAnimated:")])
                     ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, NSSelectorFromString(@"_updateIconImageViewAnimated:"), NO);
