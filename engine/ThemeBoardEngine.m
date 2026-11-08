@@ -324,6 +324,7 @@ static UIImage *TBImageForBundle(NSString *bid);      // 前置：时钟判定�
 static UIImage *TBServeReadSide(id cache, id icon);   // 1.1：读端接管（定义在后）
 static UIImage *TBThemeAsset(NSString *prefix);        // 1.2：主题素材按路径找（定义在后）
 static UIImage *TBClockRoundedFace(UIImage *img);                  // 1.11（定义在后）
+static void TBResetClockFaceCache(void);                          // 1.12（定义在后）
 static void TBHealAllIconViews(void);                          // 1.9（定义在后）
 static void TBRefreshSpringBoard(NSString *why);                 // 1.9（定义在后）
 static UIImage *TBClockRoundedFace(UIImage *img);
