@@ -2160,10 +2160,30 @@ static FnISGeneration o_isGeneration;
 typedef id (*FnISGenerateImage)(id, SEL);
 static FnISGenerateImage o_isGenerateImage;
 
+/// ★ 0.18.19 完整读端接管：缓存【读】的时候也给主题图。
+/// 与 0.18.14/17 的区别（那两版被回退了）：
+///   · 不是"直接返回原图"（那会绕过遮罩/全局效果、还会让大图拖卡）
+///   · 而是走和【写缓存端】同一套加工：TBFitCached(主题图, 缓存请求的尺寸) ——
+///     成品按「主题+bid+尺寸」缓存，保证尺寸正确、不重复计算、不返回 1024 大图
+static UIImage *TBServeReadSide(id cache, id icon) {
+    if (!TBEnabled() || TBSafeMode() || !TBApplyIconForDesktop()) return nil;
+    @try {
+        NSString *bid = TBBIDFromIcon(icon);
+        if (!bid.length) return nil;
+        UIImage *base = TBImageForBundle(bid);
+        if (!base) return nil;                 // 主题没覆盖 → 交给系统直通（写端已管全局效果）
+        UIImage *out = TBFitCached(base, TBInfoOfCache(cache), bid);
+        if (!out) out = base;
+        TBLogOnce([@"serveRead|" stringByAppendingString:bid], @"读端接管 %@", bid);
+        return out;
+    } @catch (NSException *e) { return nil; }
+}
+
 static id tb_imageForIcon(id self, SEL _cmd, id icon) {
-    // 直通：图像的"成品"由系统自己合成（素材由 SBIcon 那层给），我们不再在这里返回成品图。
-    // 顺手从系统那张已遮罩图里学一次"系统遮罩形状"，供我们裁剪素材时使用。
+    // ★ 0.18.19：先给主题图（读端接管，尺寸/成品都走同一套加工）；没素材再直通。
+    //   直通时顺手从系统那张已遮罩图里学一次"系统遮罩形状"，供我们裁剪素材时使用。
     TBRemember(self);
+    { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }
     id r = o_imageForIcon ? o_imageForIcon(self, _cmd, icon) : nil;
     if (!gSystemMaskTemplate && [r isKindOfClass:[UIImage class]]) TBLearnSystemMask(r);
     return r;
@@ -2171,26 +2191,31 @@ static id tb_imageForIcon(id self, SEL _cmd, id icon) {
 
 static id tb_imageForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
+    { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }
     return o_imageForIconOpt ? o_imageForIconOpt(self, _cmd, icon, opt) : nil;
 }
 
 static id tb_cachedForIcon(id self, SEL _cmd, id icon) {
     TBRemember(self);
+    { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }
     return o_cachedForIcon ? o_cachedForIcon(self, _cmd, icon) : nil;
 }
 
 static id tb_realForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
+    { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }
     return o_realForIconOpt ? o_realForIconOpt(self, _cmd, icon, opt) : nil;
 }
 
 static id tb_unmaskedForIcon(id self, SEL _cmd, id icon) {
     TBRemember(self);
+    { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }   // ★ 0.18.19：Dock 也接管
     return o_unmaskedForIcon ? o_unmaskedForIcon(self, _cmd, icon) : nil;
 }
 
 static id tb_unmaskedForIconOpt(id self, SEL _cmd, id icon, unsigned long long opt) {
     TBRemember(self);
+    { UIImage *m = TBServeReadSide(self, icon); if (m) return m; }   // ★ 0.18.19：Dock 也接管
     return o_unmaskedForIconOpt ? o_unmaskedForIconOpt(self, _cmd, icon, opt) : nil;
 }
 
