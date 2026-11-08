@@ -2005,31 +2005,7 @@ static void tb_folderBgLayout(id self, SEL _cmd) {
     } @catch (NSException *e) { }
 }
 
-// ★ 1.2（照 SnowBoard）：定点更新「正在显示的」图标视图，不做全树遍历。
-//   sb 用 enumerateDisplayedIconViewsUsingBlock: + _updateIconImageViewAnimated:，
-//   这里用我们登记的弱表 + 同样的选择子，效果等同、且不会卡主线程。
-static NSInteger TBUpdateDisplayedIconViews(void) {
-    NSArray *views = gSeenIconViews ? gSeenIconViews.allObjects : @[];
-    NSInteger n = 0;
-    for (UIView *v in views) {
-        @try {
-            id iv = [v valueForKey:@"_iconImageView"];
-            if (!iv) continue;
-            SEL sUpd = NSSelectorFromString(@"_updateIconImageViewAnimated:");
-            SEL sRel = NSSelectorFromString(@"reloadIconImage");
-            if ([iv respondsToSelector:sUpd]) ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, sUpd, NO);
-            else if ([iv respondsToSelector:sRel]) ((void (*)(id, SEL))objc_msgSend)(iv, sRel);
-            // 时钟：换主题后立刻重载（sb 是重建 image set，我们至少让它马上重画）
-            id icon = [v valueForKey:@"icon"];
-            NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
-            if ([bid isEqualToString:@"com.apple.mobiletimer"] && icon &&
-                [icon respondsToSelector:sRel]) ((void (*)(id, SEL))objc_msgSend)(icon, sRel);
-            n++;
-        } @catch (NSException *e) { }
-    }
-    TBLog(@"定点刷新：%ld 个图标视图（不重贴、不刷桌面）", (long)n);
-    return n;
-}
+
 
 /// ★ 1.2：按路径找主题素材（ANEMFolderIconBG 之类文件名带 @3x，TBResourceImage 的名字规则对不上）
 static UIImage *TBThemeAsset(NSString *prefix) {
@@ -2067,6 +2043,67 @@ static UIImage *TBGlobalForIcon(id icon, id image) {
         UIImage *g = TBGlobalEffectImage((UIImage *)image, bid);
         return (g && g != image) ? g : nil;
     } @catch (NSException *e) { return nil; }
+}
+
+/// ★ 1.9（照 sb 的节奏，但异步化）：
+///   sb：enumerateDisplayedIconViewsUsingBlock: 只"收集"，更新在枚举结束后做；
+///   1.7 的教训是一口气同步跑完 → 主线程过载被看门狗杀。
+///   这里：① 枚举只收集视图 ② 收集完再分批（每批 4 个、间隔 12ms）purge + 更新。
+static void TBEnumerateDisplayedIconViews(void (^blk)(UIView *v)) {
+    if (!blk) return;
+    @try {
+        id ctrl = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"SBIconController"),
+                                                  NSSelectorFromString(@"sharedInstance"));
+        SEL sEnum = NSSelectorFromString(@"enumerateDisplayedIconViewsUsingBlock:");
+        static const char *props[] = { "iconManager", "homeScreenIconManager", "homeScreenViewController" };
+        if (ctrl) {
+            for (int k = 0; k < 3; k++) {
+                SEL p = NSSelectorFromString(@(props[k]));
+                if (![ctrl respondsToSelector:p]) continue;
+                id t = ((id (*)(id, SEL))objc_msgSend)(ctrl, p);
+                if (t && [t respondsToSelector:sEnum]) { ((void (*)(id, SEL, id))objc_msgSend)(t, sEnum, blk); return; }
+            }
+            if ([ctrl respondsToSelector:sEnum]) { ((void (*)(id, SEL, id))objc_msgSend)(ctrl, sEnum, blk); return; }
+        }
+    } @catch (NSException *e) { }
+    for (UIView *v in (gSeenIconViews ? gSeenIconViews.allObjects : @[])) blk(v);
+}
+
+static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
+    NSMutableArray *views = [NSMutableArray array];
+    TBEnumerateDisplayedIconViews(^(UIView *v) { if (v) [views addObject:v]; });
+    TBLog(@"收集显示中的图标视图：%lu 个", (unsigned long)views.count);
+    if (!views.count) { TBHealAllIconViews(); TBRefreshSpringBoard(why); return; }
+
+    __block NSUInteger idx = 0;
+    __block void (^step)(void);
+    step = ^{
+        NSUInteger end = MIN(idx + 4, views.count);
+        for (NSUInteger i = idx; i < end; i++) {
+            UIView *v = views[i];
+            @try {
+                id icon = [v valueForKey:@"icon"];
+                if (icon && [icon respondsToSelector:NSSelectorFromString(@"purgeCachedImages")])
+                    ((void (*)(id, SEL))objc_msgSend)(icon, NSSelectorFromString(@"purgeCachedImages"));
+                NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
+                id iv = [v valueForKey:@"_iconImageView"];
+                if (iv && [iv respondsToSelector:NSSelectorFromString(@"_updateIconImageViewAnimated:")])
+                    ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, NSSelectorFromString(@"_updateIconImageViewAnimated:"), NO);
+                SEL sRel = NSSelectorFromString(@"reloadIconImage");
+                if (icon && [icon respondsToSelector:sRel] &&
+                    ([bid isEqualToString:@"com.apple.mobiletimer"] || [bid containsString:@"calendar"]))
+                    ((void (*)(id, SEL))objc_msgSend)(icon, sRel);
+            } @catch (NSException *e) { }
+        }
+        idx = end;
+        if (idx < views.count) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_MSEC)),
+                           dispatch_get_main_queue(), step);
+        } else {
+            TBLog(@"分批更新完成：%lu 个", (unsigned long)views.count);
+        }
+    };
+    dispatch_async(dispatch_get_main_queue(), step);
 }
 
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
@@ -2899,31 +2936,7 @@ static id tb_imgTO(id self, SEL _cmd, TBImageInfo info, id tc, unsigned long lon
     return o_imgTO ? o_imgTO(self, _cmd, info, tc, opt) : nil;
 }
 
-/// ★ 0.18.20（换路·第四步）：刷新不再"批量重贴 + 刷桌面"，而是
-///   ① 对登记过的图标视图重设 overrideImage；② 对图标调系统自带的失效接口。
-///   这样只动"主题覆盖的那几十个图"，不触发整屏重画（那正是卡与闪的来源）。
-static NSInteger TBReapplyIconsLight(void) {
-    NSArray *views = gSeenIconViews ? gSeenIconViews.allObjects : @[];
-    NSInteger n = 0;
-    for (UIView *v in views) {
-        @try {
-            id icon = [v valueForKey:@"icon"];
-            UIImage *img = TBThemedForIconObject(icon);
-            if (!img) continue;
-            if ([v respondsToSelector:NSSelectorFromString(@"setOverrideImage:")])
-                ((void (*)(id, SEL, id))objc_msgSend)(v, NSSelectorFromString(@"setOverrideImage:"), img);
-            static const char *inv[] = { "purgeCachedImages", "invalidateIconImageCache", "_invalidateIconImageCache", "reloadIconImage", "_reloadIconImage" };
-            for (size_t i = 0; i < sizeof(inv)/sizeof(inv[0]); i++) {
-                SEL sel = NSSelectorFromString(@(inv[i]));
-                if (icon && [icon respondsToSelector:sel])
-                    ((void (*)(id, SEL))objc_msgSend)(icon, sel);
-            }
-            n++;
-        } @catch (NSException *e) { }
-    }
-    TBLog(@"轻量刷新：重设 override %ld 个图标视图（不重贴、不刷桌面）", (long)n);
-    return n;
-}
+
 
 // ---- 换图标后重贴（拖拽放置/资源库→桌面 时系统直接贴原始图，读端 hook 管不到）----
 // 只在 SBIconView 更换 icon 时触发一次，不在 getter 热路径里，所以不会像
@@ -5406,21 +5419,10 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (mySeq != gReloadRunSeq) return;
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            BOOL overrideOK = NSClassFromString(@"SBIconView") &&
-                              [NSClassFromString(@"SBIconView") instancesRespondToSelector:NSSelectorFromString(@"setOverrideImage:")];
-            if (overrideOK && TBReapplyIconsLight() > 0) {
-                TBLog(@"应用完成：走 override 轻量刷新（不再批量重贴/刷桌面）");
-            } else if (TBUpdateDisplayedIconViews() > 0) {
-                TBLog(@"应用完成：定点更新显示的图标视图（不重贴、不刷桌面）");
-            } else {
-                TBLog(@"应用完成：回退一次性重贴 + 刷新（无动画）");
-                TBHealAllIconViews();
-                TBRefreshSpringBoard(why);
-            }
-            TBBadgeRelayoutVisible();
-            [CATransaction commit];
+            // ★ 1.9：照 sb 的节奏、但全部异步分批 —— 主线程不再被重活占住
+            TBUpdateDisplayedIconViewsAsync(why);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ TBBadgeRelayoutVisible(); });
         });
     });
 }
