@@ -323,6 +323,7 @@ static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys);
 static UIImage *TBImageForBundle(NSString *bid);      // 前置：时钟判定要用
 static UIImage *TBServeReadSide(id cache, id icon);   // 1.1：读端接管（定义在后）
 static UIImage *TBThemeAsset(NSString *prefix);        // 1.2：主题素材按路径找（定义在后）
+static UIImage *TBClockRoundedFace(UIImage *img);                  // 1.11（定义在后）
 static void TBHealAllIconViews(void);                          // 1.9（定义在后）
 static void TBRefreshSpringBoard(NSString *why);                 // 1.9（定义在后）
 static UIImage *TBClockRoundedFace(UIImage *img);
@@ -2088,7 +2089,8 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                 UIView *v = stack.lastObject; [stack removeLastObject];
                 NSString *cn = NSStringFromClass([v class]);
                 if ([cn containsString:@"Dock"] || [cn containsString:@"Folder"] ||
-                    [cn containsString:@"Library"] || [cn containsString:@"Badge"]) {
+                    [cn containsString:@"Library"] || [cn containsString:@"Badge"] ||
+                    [cn containsString:@"Clock"]) {
                     NSValue *k = [NSValue valueWithPointer:(__bridge const void *)v];
                     if (![seen containsObject:k] && [v respondsToSelector:NSSelectorFromString(@"icon")]) {
                         [seen addObject:k]; [views addObject:v]; extra++;
@@ -3606,6 +3608,8 @@ static UIImage *tb_imageNamed(id self, SEL _cmd, NSString *name) {
     }
     UIImage *sys0 = o_imageNamed ? o_imageNamed(self, _cmd, name) : nil;
     UIImage *img = TBMatchSystemGeometry(TBResourceImage(name), sys0);
+    // ★ 1.11：时钟表盘/指针类资源套系统圆角，否则系统把方形图当背景 → 露出底下深色表盘（黑边）
+    if (img && [name.lowercaseString containsString:@"clockicon"]) img = TBClockRoundedFace(img);
     TBLogResourceProbe(name, img ? @"hit" : nil);
     if (img) {
         gServe++;
@@ -3625,6 +3629,7 @@ static UIImage *tb_imageNamedInBundle(id self, SEL _cmd, NSString *name, NSBundl
     }
     UIImage *sys = o_imageNamedInBundle ? o_imageNamedInBundle(self, _cmd, name, bundle) : nil;
     UIImage *img = TBMatchSystemGeometry(TBResourceImage(name), sys);
+    if (img && [name.lowercaseString containsString:@"clockicon"]) img = TBClockRoundedFace(img);   // ★ 1.11
     TBLogResourceProbe(name, img ? @"hit(bundle)" : nil);
     if (img) {
         gServe++;
