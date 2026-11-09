@@ -2171,6 +2171,17 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
     } @catch (NSException *e) { }
     TBLog(@"收集显示中的图标视图：%lu 个（其中 Dock/文件夹/资源库/角标 %ld 个）",
           (unsigned long)views.count, (long)extra);
+    // ★ 1.18 探针：队列里到底有哪些类（去重，最多 25 个）—— Dock/文件夹的真实类名全靠这行
+    @try {
+        NSMutableArray *names = [NSMutableArray array];
+        NSMutableSet *done = [NSMutableSet set];
+        for (UIView *v in views) {
+            NSString *nn = NSStringFromClass([v class]);
+            if (nn && ![done containsObject:nn]) { [done addObject:nn]; [names addObject:nn]; }
+            if (names.count >= 25) break;
+        }
+        TBLog(@"视图类名：%@", [names componentsJoinedByString:@", "]);
+    } @catch (NSException *e) { }
     if (!views.count) { TBHealAllIconViews(); TBRefreshSpringBoard(why); return; }
 
     TBResetClockFaceCache();   // 1.12：换主题/恢复默认时表盘必须重算
@@ -4707,6 +4718,18 @@ typedef void (*FnCfgIconIV)(id, SEL, id);
 static FnCfgIconIV o_configureIconImageView = NULL;
 
 static void tb_configureIconImageView(id self, SEL _cmd, id imageView) {
+    // ★ 1.18 探针：无条件记账 —— 判断这个"配置点"在本机到底会不会被调
+    static int sCfgCalls = 0;
+    if (gIsPrimary && sCfgCalls < 40) {
+        sCfgCalls++;
+        NSString *ivc = imageView ? NSStringFromClass([imageView class]) : @"(nil)";
+        id ic = nil; @try { ic = [self valueForKey:@"icon"]; } @catch (NSException *e) { }
+        NSString *b = ic ? TBBIDFromIcon(ic) : nil;
+        UIImage *t = b.length ? TBImageForBundle(b) : nil;
+        TBLog(@"配置点调用 #%d iv=%@ icon=%@ bid=%@ 主题图=%@",
+              sCfgCalls, ivc, ic ? NSStringFromClass([ic class]) : @"(nil)",
+              b ?: @"(nil)", t ? @"有" : @"无");
+    }
     if (o_configureIconImageView) o_configureIconImageView(self, _cmd, imageView);   // 先让系统照常配
     if (!gIsPrimary) return;
     if (!imageView || ![imageView isKindOfClass:[UIImageView class]]) return;
