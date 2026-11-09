@@ -4856,6 +4856,7 @@ static void tb_configureIconImageView(id self, SEL _cmd, id imageView) {
 ///   SBIconBadgeView -configureForIcon:infoProvider:（v32@0:8@16@24）
 /// 在"每次配置"时换底板；我们之前等 layoutSubviews 再找 UIImageView，只命中 1 处。
 static BOOL gDoneBadge = NO;
+static BOOL gDoneCfgPoint = NO;   // SBIconView 配置点（1.17）只装一次
 
 static BOOL gDoneClock = NO;
 
