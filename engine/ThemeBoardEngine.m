@@ -2094,12 +2094,38 @@ static void tb_ncbLayout(id self, SEL _cmd) {
             }
         }
         static int sNCB = 0;
-        if (sNCB < 6) {
+        if (sNCB < 3) {
             sNCB++;
-            TBLog(@"NC 图标视图 cls=%@ bid=%@ desc=%@ avatar=%@ badge=%@",
+            NSMutableArray *ivs = [NSMutableArray array];
+            @try {
+                for (Class c = [self class]; c && c != [NSObject class]; c = class_getSuperclass(c)) {
+                    unsigned int n = 0; Ivar *list = class_copyIvarList(c, &n);
+                    for (unsigned int i = 0; i < n; i++) {
+                        const char *tn = ivar_getTypeEncoding(list[i]);
+                        const char *nm = ivar_getName(list[i]);
+                        if (!tn || tn[0] != '@' || !nm) continue;
+                        id v = nil;
+                        @try { v = [self valueForKey:[NSString stringWithUTF8String:nm]]; } @catch (NSException *ex) { v = nil; }
+                        if ([v isKindOfClass:[NSString class]])
+                            [ivs addObject:[NSString stringWithFormat:@"%s=%@", nm, v]];
+                        else if (v)
+                            [ivs addObject:[NSString stringWithFormat:@"%s:<%@>", nm, NSStringFromClass([v class])]];
+                        else
+                            [ivs addObject:[NSString stringWithFormat:@"%s=nil", nm]];
+                    }
+                    if (list) free(list);
+                }
+            } @catch (NSException *ei) { }
+            NSMutableArray *sv = [NSMutableArray array];
+            @try {
+                for (UIView *v in [(UIView *)self subviews]) {
+                    [sv addObject:NSStringFromClass([v class])];
+                    for (UIView *v2 in v.subviews) [sv addObject:NSStringFromClass([v2 class])];
+                }
+            } @catch (NSException *es) { }
+            TBLog(@"NC 图标视图 cls=%@ bid=%@ desc=%@ ivar=%@ subviews=%@",
                   NSStringFromClass([self class]), bid ?: @"-", desc ? @"有" : @"无",
-                  avatar ? NSStringFromClass([avatar class]) : @"-",
-                  badge ? NSStringFromClass([badge class]) : @"-");
+                  [ivs componentsJoinedByString:@" | "], [sv componentsJoinedByString:@","]);
         }
         UIImage *th = bid.length ? TBImageForBundle(bid) : nil;
         if (!th) return;
