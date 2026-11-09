@@ -2126,10 +2126,11 @@ static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outC
                     id iv = [sub valueForKey:@"_iconImageView"];
                     if ([iv isKindOfClass:[UIImageView class]] && ((UIImageView *)iv).image != th)
                         ((UIImageView *)iv).image = th;
-                    // ★★ 1.21：真正的显示层是 CALayer.contents（桌面就是靠这条才换掉的）。
-                    //   只设 .image 在 Dock/文件夹/资源库 这些容器内层不生效 —— 之前一直没换的原因。
-                    if (isIVLike) TBForceLayerContents((UIView *)sub, th);
-                    if ([iv isKindOfClass:[UIView class]]) TBForceLayerContents((UIView *)iv, th);
+                    // ★ 1.23 回退：这里不再强改 CALayer.contents。
+                    //   1.21 加了两条 TBForceLayerContents → 同一格既设 image 又设图层内容，
+                    //   结果就是「两个同样的图标叠着」+ 换主题/恢复默认残留（改过的图层没人还原）。
+                    //   现在只设 image，显示交给系统与已有的「图层兜底」hook（它只在内容不是主题图时换一次）。
+                    (void)isIVLike;
                 }
                 // ② 缓存 + 让这一格自己重取（走读端 → 主题图）
                 SEL sCache = NSSelectorFromString(@"iconImageCache");
@@ -4848,8 +4849,7 @@ static void tb_configureIconImageView(id self, SEL _cmd, id imageView) {
         UIImage *th = TBImageForBundle(bid);
         if (!th) return;
         UIImageView *iv = (UIImageView *)imageView;
-        if (iv.image != th) iv.image = th;
-        TBForceLayerContents(iv, th);          // ★ 1.19：只设 image 不够，图层也得换
+        if (iv.image != th) iv.image = th;     // ★ 1.23：只设 image（图层交给「图层兜底」）
         static int sCfgHit = 0; if (sCfgHit < 20) { sCfgHit++; TBLog(@"配置点接管 %@（第 %d 次）", bid, sCfgHit); }
     } @catch (NSException *e) { }
 }
@@ -5086,15 +5086,9 @@ static void TBInstall(void) {
                                         (IMP)tb_configureIconImageView, "SBIconView 配置点");
         else
             TBLog(@"配置点：SBIconView -_configureIconImageView: 不存在");
-        for (NSString *cn2 in @[@"SBIconBadgeView", @"_SBIconBadgeView", @"SBHIconBadgeView"]) {
-            Class bc2 = NSClassFromString(cn2);
-            if (bc2 && TBHasMethod(bc2, @"configureForIcon:infoProvider:")) {
-                FnBadgeCfg f = (FnBadgeCfg)TBHook(bc2, @"configureForIcon:infoProvider:",
-                                                  (IMP)tb_badgeConfigure, "角标配置点");
-                if (f) o_badgeConfigure = f;
-                break;
-            }
-        }
+        // ★ 1.23：角标回到我们原来那套（只在 SBIconBadgeView -layoutSubviews 里换底板）。
+        //   1.17 照 MarkTheme 加的 configureForIcon:infoProvider: 不再安装 —— 实测反而让角标乱。
+        (void)o_badgeConfigure;
     }
         // ★★ 0.15.58 起彻底移除 UISwipeActionPullView -layoutSubviews 的 hook。
         //    真凶找到了：tb_swipePullLayout 替换了系统的 layoutSubviews 却**没有调用原实现**，
@@ -5786,7 +5780,7 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
             // ★ 1.9：照 sb 的节奏、但全部异步分批 —— 主线程不再被重活占住
             TBUpdateDisplayedIconViewsAsync(why);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ TBBadgeRelayoutVisible(); TBBadgeApplyAllVisible(); });
+                           dispatch_get_main_queue(), ^{ TBBadgeRelayoutVisible(); });
         });
     });
 }
