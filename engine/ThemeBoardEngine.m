@@ -2105,7 +2105,9 @@ static void TBEnumerateDisplayedIconViews(void (^blk)(UIView *v)) {
 ///   做法：递归进容器，对内层每个图标视图走既有路径（读端/图层兜底已接管 SBIconImageView）。
 static NSInteger gInsideLeaves = 0, gInsideWithBid = 0, gInsideWithTheme = 0;
 
+static BOOL TBReadOnlyMode(void);   // 前置：容器/栅格/写端都要用
 static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outCount) {
+    if (TBReadOnlyMode()) return;          // ★ 1.31：只读模式不动容器内层
     if (!container || depth > 10) return;
     for (UIView *sub in container.subviews) {
         NSString *cn = NSStringFromClass([sub class]);
@@ -2170,6 +2172,103 @@ static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outC
 ///   ② 退路：ISMutableIconCache + ClearCacheOperation -run
 /// 全部带 respondsToSelector + @try，任一步失败只打日志、不影响别的逻辑。
 static NSTimeInterval gLastStorePurge = 0;
+
+/// ★★ 1.30（照视频实测）：文件夹预览 / 资源库“+N”格子的落点是
+///   `_SBIconGridWrapperView`（**UIImageView 子类**），里面放的是 `<SBIconGridImage>` 合成图。
+///   视频实测：文件夹 54.9×54.9（CGImage 61.16@3x）、资源库 53.1×53.1（59.59@3x），都是 2×2。
+///   这两个类名里都没有 "IconView"，所以以前的补扫从来没收到过它们（日志永远 0~1 个）。
+///   做法：取它所属容器上的子图标列表 → 按主题图自己合成一张 2×2 → 塞回去。
+
+/// 文件夹/分类这类"容器 id"不是 App，没有主题图，合成子图标时要滤掉
+static BOOL TBBIDIsFolderish(NSString *bid) {
+    if (!bid.length) return YES;
+    if ([bid hasPrefix:@"dewey_category"]) return YES;      // 资源库分类
+    if ([bid hasPrefix:@"folder"]) return YES;
+    if ([bid rangeOfString:@"//"].location != NSNotFound) return YES;
+    return NO;
+}
+
+static NSArray *TBGridChildBids(UIView *wrapper) {
+    id holder = nil;
+    UIView *p = wrapper;
+    for (int i = 0; i < 8 && p && !holder; i++, p = p.superview) {
+        for (NSString *key in @[@"icon", @"folderIcon", @"_folderIcon"]) {
+            @try { id v = [p valueForKey:key]; if (v) { holder = v; break; } } @catch (NSException *e) { }
+        }
+    }
+    if (!holder) return nil;
+    NSArray *kids = nil;
+    for (NSString *key in @[@"icons", @"folder.icons", @"folderIcon.icons", @"folder.icons", @"listModel.icons"]) {
+        @try { id v = [holder valueForKeyPath:key]; if ([v isKindOfClass:[NSArray class]] && [v count]) { kids = v; break; } }
+        @catch (NSException *e) { }
+    }
+    if (!kids.count) return nil;
+    NSMutableArray *bids = [NSMutableArray array];
+    for (id ic in kids) {
+        NSString *b = TBBIDFromIcon(ic);
+        if (b.length && !TBBIDIsFolderish(b)) [bids addObject:b];
+        if (bids.count >= 4) break;
+    }
+    return bids;
+}
+
+static UIImage *TBGridCompositeImage(NSArray *bids, CGSize size) {
+    if (size.width < 8 || size.height < 8 || !bids.count) return nil;
+    CGFloat gap = MAX(1.0, size.width * 0.06);
+    CGFloat cell = (size.width - gap) / 2.0;
+    CGFloat radius = cell * 0.2237;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.scale = 3.0; fmt.opaque = NO;
+    return [[[UIGraphicsImageRenderer alloc] initWithSize:size format:fmt]
+            imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextRef c = ctx.CGContext;
+        for (NSUInteger i = 0; i < 4; i++) {
+            CGFloat x = (i % 2) * (cell + gap);
+            CGFloat y = (i / 2) * (cell + gap);
+            CGRect r = CGRectMake(x, y, cell, cell);
+            UIImage *im = i < bids.count ? TBImageForBundle(bids[i]) : nil;
+            if (!im) continue;
+            CGContextSaveGState(c);
+            UIBezierPath *bp = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:radius];
+            [bp addClip];
+            [im drawInRect:r];
+            CGContextRestoreGState(c);
+        }
+    }];
+}
+
+/// 处理一个 `_SBIconGridWrapperView`：返回是否重画
+static BOOL TBRebuildGridWrapper(UIView *wrapper) {
+    if (TBReadOnlyMode()) return NO;       // ★ 1.31：只读模式不自己画合成图
+    if (!wrapper) return NO;
+    NSString *cn = NSStringFromClass([wrapper class]);
+    if ([cn rangeOfString:@"GridWrapper"].location == NSNotFound) return NO;
+    if (![wrapper isKindOfClass:[UIImageView class]]) return NO;
+    CGSize sz = wrapper.bounds.size;
+    if (sz.width < 8) return NO;
+    NSArray *bids = TBGridChildBids(wrapper);
+    if (!bids.count) { TBLog(@"栅格合成：%@ 没取到子图标，跳过", cn); return NO; }
+    UIImage *img = TBGridCompositeImage(bids, sz);
+    if (!img) return NO;
+    ((UIImageView *)wrapper).image = img;
+    ((UIImageView *)wrapper).contentMode = UIViewContentModeScaleToFill;
+    TBLog(@"栅格合成：%@ %.0fx%.0f → %lu 个子图标已重画", cn, sz.width, sz.height, (unsigned long)bids.count);
+    return YES;
+}
+
+/// ★★ 1.31「只读模式」开关（偏好 ReadOnlyMode，缺省=开，用于这次实验）
+/// 开的含义：**只接管"取图"，绝不动视图/缓存内容**。
+///   关掉：图层兜底、容器强制贴图、_SBIconGridWrapperView 直接画、写端缓存注入
+///   保留：资源重定向、读端接管、iconservicesagent 缓存失效（1.29）、时钟、角标、设置页
+/// 目的：验证"系统重新取图"这条路上，换主题是否生效、有无残留、恢复默认是否还原。
+static BOOL TBReadOnlyMode(void) {
+    static int sCache = -1;
+    if (sCache < 0) {
+        id v = TBPref(@"ReadOnlyMode");
+        sCache = v ? ([v boolValue] ? 1 : 0) : 1;   // 缺省 = 开（本次实验）
+    }
+    return sCache == 1;
+}
 
 static void TBInvalidateSystemIconStore(NSString *why) {
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
@@ -2246,7 +2345,7 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                 NSString *cn = NSStringFromClass([v class]);
                 if ([cn containsString:@"Dock"] || [cn containsString:@"Folder"] ||
                     [cn containsString:@"Library"] || [cn containsString:@"Badge"] ||
-                    [cn containsString:@"Clock"]) {
+                    [cn containsString:@"Clock"] || [cn containsString:@"GridWrapper"]) {
                     NSValue *k = [NSValue valueWithPointer:(__bridge const void *)v];
                     // ★ 1.13：不再要求 respondsToSelector:@"icon" ——
                     //   角标(SBIconBadgeView)、时钟(SBHClockApplicationIconImageView)、
@@ -2288,6 +2387,7 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                 //   SBFloatingDockWindow / SBFolderIconImageView / SBRootFolderView 都没有 icon 键，
                 //   valueForKey: 会抛 NSUndefinedKeyException → 整个 @try 跳到 catch，
                 //   下面所有分支（含容器内层）全部被跳过。这是 Dock/文件夹 一直没进处理的真因。
+                if ([cn containsString:@"GridWrapper"]) TBRebuildGridWrapper(v);
                 if ([cn containsString:@"Dock"] || [cn containsString:@"Folder"] ||
                     [cn containsString:@"Library"] || [cn containsString:@"Pod"]) {
                     NSInteger leafCount = 0;
@@ -2533,7 +2633,7 @@ static id tb_cacheImageForIcon(id self, SEL _cmd, id image, id icon) {
     TBRemember(self);
     @try {
         NSString *bid = TBBIDFromIcon(icon);
-        if (bid.length && TBApplyIconForDesktop() && !TBSafeMode()) {
+        if (bid.length && TBApplyIconForDesktop() && !TBSafeMode() && !TBReadOnlyMode()) {
             UIImage *mine = TBFitCached(TBImageForBundle(bid), TBInfoOfCache(self), bid) ?: TBImageForBundle(bid);
             if (mine) {
                 TBLogOnce([@"cachewrite|" stringByAppendingString:bid], @"cachewrite %@", bid);
@@ -2563,7 +2663,7 @@ static id tb_cacheImageForIconApp(id self, SEL _cmd, id image, id icon, id appea
     TBRemember(self);
     @try {
         NSString *bid = TBBIDFromIcon(icon);
-        if (bid.length && TBApplyIconForDesktop() && !TBSafeMode()) {
+        if (bid.length && TBApplyIconForDesktop() && !TBSafeMode() && !TBReadOnlyMode()) {
             UIImage *mine = TBFitCached(TBImageForBundle(bid), TBInfoOfCache(self), bid) ?: TBImageForBundle(bid);
             if (mine) {
                 TBLogOnce([@"cachewriteA|" stringByAppendingString:bid], @"cachewrite(appearance) %@", bid);
@@ -2790,7 +2890,7 @@ static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
             NSString *ocn = owner ? NSStringFromClass([owner class]) : @"-";
             // ★ 0.18.11：探针已证实「SBIconImageView 还会被塞一张 192x192 原图(是否主题图=0)」，
             //   进/退 App 的动画用的就是它 → 这里把非主题的原图直接换成主题图（时钟不碰）。
-            if (owner && !sInLayerReplace && !TBSafeMode() &&
+            if (owner && !TBReadOnlyMode() && !sInLayerReplace && !TBSafeMode() &&
                 [ocn rangeOfString:@"Clock"].location == NSNotFound &&
                 [ocn rangeOfString:@"Badge"].location == NSNotFound) {
                 NSString *fb = TBProbeBID(owner);
