@@ -2117,11 +2117,17 @@ static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outC
                 NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
                 UIImage *th = bid.length ? TBImageForBundle(bid) : nil;
                 if (th) {
+                    BOOL isIVLike = [sub isKindOfClass:[UIImageView class]] ||
+                                    [cn containsString:@"ImageView"];
                     if ([sub isKindOfClass:[UIImageView class]] && ((UIImageView *)sub).image != th)
                         ((UIImageView *)sub).image = th;
                     id iv = [sub valueForKey:@"_iconImageView"];
                     if ([iv isKindOfClass:[UIImageView class]] && ((UIImageView *)iv).image != th)
                         ((UIImageView *)iv).image = th;
+                    // ★★ 1.21：真正的显示层是 CALayer.contents（桌面就是靠这条才换掉的）。
+                    //   只设 .image 在 Dock/文件夹/资源库 这些容器内层不生效 —— 之前一直没换的原因。
+                    if (isIVLike) TBForceLayerContents((UIView *)sub, th);
+                    if ([iv isKindOfClass:[UIView class]]) TBForceLayerContents((UIView *)iv, th);
                 }
                 // ② 缓存 + 让这一格自己重取（走读端 → 主题图）
                 SEL sCache = NSSelectorFromString(@"iconImageCache");
@@ -2203,8 +2209,7 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                     [cn containsString:@"Library"] || [cn containsString:@"Pod"]) {
                     NSInteger leafCount = 0;
                     TBApplyInsideContainer(v, 0, &leafCount);
-                    TBLogOnce([@"inside|" stringByAppendingString:cn],
-                              @"容器内层 %@：%ld 个图标视图", cn, (long)leafCount);
+                    TBLog(@"容器内层 %@：%ld 个图标视图", cn, (long)leafCount);
                 }
                 id icon = nil;
                 @try { icon = [v valueForKey:@"icon"]; } @catch (NSException *e0) { icon = nil; }
