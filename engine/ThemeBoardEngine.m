@@ -1951,8 +1951,50 @@ static void TBRefreshSettingsIconsBatch(NSString *why) {
 //   NC 的图标不经过 SBHIconImageCache，所以"接管图标缓存"那条路永远碰不到它。
 static id (*o_ncIcons)(id, SEL);
 
+// ★ 1.34：如果 NC 的图标是每个 recipe 自己带的（NCNotificationIconRecipe.image），
+//   那就直接在 recipe 的取图上换。视频里 NC 图标是一张 38x38 的普通 UIImage，
+//   说明它最终来自某个 -image/-_image 取值点。
+static id (*o_ncRecipeImage)(id, SEL);
+static id tb_ncRecipeImage(id self, SEL _cmd) {
+    id r = o_ncRecipeImage ? o_ncRecipeImage(self, _cmd) : nil;
+    @try {
+        NSString *bid = nil;
+        for (NSString *k in @[ @"applicationIdentifier", @"_applicationIdentifier",
+                               @"bundleIdentifier", @"sectionIdentifier" ]) {
+            id v = nil;
+            @try { v = [self valueForKey:k]; } @catch (NSException *e) { }
+            if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) { bid = v; break; }
+        }
+        static int sRP = 0;
+        if (sRP < 8) { sRP++; TBLog(@"NC recipe.image 被调用 cls=%@ bid=%@ 原图=%@",
+                                     NSStringFromClass([self class]), bid ?: @"-",
+                                     r ? NSStringFromCGSize(((UIImage *)r).size) : @"(nil)"); }
+        if (!bid.length) return r;
+        UIImage *mine = TBImageForBundle(bid);
+        if (!mine) return r;
+        TBLogOnce([@"ncr|" stringByAppendingString:bid], @"NC recipe 替换 %@", bid);
+        return mine;
+    } @catch (NSException *e) { return r; }
+}
+
 static id tb_ncIcons(id self, SEL _cmd) {
-    id r = o_ncIcons ? o_ncIcons(self, _cmd) : nil;
+    id r = o_ncIcons ? o_ncIcons(self, _cmd) : nil;        // 原实现只调一次
+    static int sNCCalls = 0;
+    if (sNCCalls < 12) {
+        sNCCalls++;
+        id a = nil, b = nil, c = nil;
+        @try { a = [self valueForKey:@"_applicationIdentifier"]; } @catch (NSException *e1) { }
+        @try { b = [self valueForKey:@"sectionIdentifier"]; } @catch (NSException *e2) { }
+        @try { c = [self valueForKey:@"bundleIdentifier"]; } @catch (NSException *e3) { }
+        id cc = nil; @try { cc = [self valueForKey:@"communicationContext"]; } @catch (NSException *e4) { }
+        NSString *itemCls = @"-";
+        if ([r isKindOfClass:[NSArray class]] && ((NSArray *)r).count)
+            itemCls = NSStringFromClass([((NSArray *)r).firstObject class]);
+        TBLog(@"NC icons 被调用 #%d cls=%@ appId=%@ section=%@ bundle=%@ 头像=%@ 元素=%@ 项数=%lu",
+              sNCCalls, NSStringFromClass([self class]), a ?: @"-", b ?: @"-", c ?: @"-",
+              cc ? @"有" : @"无", itemCls,
+              (unsigned long)([r isKindOfClass:[NSArray class]] ? ((NSArray *)r).count : 0));
+    }
     if (![r isKindOfClass:[NSArray class]] || ((NSArray *)r).count == 0) return r;
     @try {
         NSString *bid = nil;
@@ -1962,12 +2004,24 @@ static id tb_ncIcons(id self, SEL _cmd) {
             @try { v = [self valueForKey:k]; } @catch (NSException *e) { }
             if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) { bid = v; break; }
         }
+        // ★ 1.34：带"头像"的通知（communication notification，微信/iMessage 那种）
+        //   图标位显示的是联系人头像，不是 App 图标 —— 绝不能换成主题 App 图。
+        BOOL hasAvatar = NO;
+        for (NSString *k in @[ @"communicationContext", @"_communicationContext" ]) {
+            @try { if ([self valueForKey:k]) { hasAvatar = YES; break; } } @catch (NSException *ea) { }
+        }
         if (!bid.length) return r;
         UIImage *mine = TBImageForBundle(bid);
         if (!mine) return r;
-        NSMutableArray *out = [NSMutableArray arrayWithCapacity:((NSArray *)r).count];
-        for (NSUInteger i = 0; i < ((NSArray *)r).count; i++) [out addObject:mine];
-        TBLogOnce([@"nc|" stringByAppendingString:bid], @"NC 数据层替换 %@", bid);
+        NSArray *src = (NSArray *)r;
+        NSMutableArray *out = [NSMutableArray arrayWithCapacity:src.count];
+        // ★ 带头像的通知：第 1 项是联系人头像（不能动），后面那项才是右下角的 App 小图标。
+        //   所以「跳过」是不对的 —— 正确的做法是保留头像、只换后面的小图标。
+        NSUInteger keep = (hasAvatar && src.count >= 2) ? 1 : 0;
+        for (NSUInteger i = 0; i < src.count; i++) [out addObject:(i < keep ? src[i] : mine)];
+        TBLogOnce([@"nc|" stringByAppendingFormat:@"%@|%lu|%@", bid, (unsigned long)src.count, hasAvatar ? @"av" : @"-"],
+                  @"NC 数据层替换 %@（数组 %lu 项%@）", bid, (unsigned long)src.count,
+                  hasAvatar ? @"，带头像→保留第1项、只换小图标" : @"");
         return out;
     } @catch (NSException *e) { return r; }
 }
@@ -4741,6 +4795,27 @@ static void TBInstall(void) {
         if (!gDoneNC) {
             gDoneNC = YES;
             Class ncc = NSClassFromString(@"NCNotificationContent");
+            NSMutableArray *have = [NSMutableArray array];
+            if (ncc) {
+                for (NSString *sel in @[@"icons", @"iconRecipes", @"sectionIcon", @"image"]) {
+                    if ([ncc respondsToSelector:NSSelectorFromString(sel)] ||
+                        class_getInstanceMethod(ncc, NSSelectorFromString(sel)))
+                        [have addObject:sel];
+                }
+                TBLog(@"通知中心：NCNotificationContent 可用 = %@", [have componentsJoinedByString:@","] ?: @"(无)");
+                Class rc = NSClassFromString(@"NCNotificationIconRecipe");
+                if (rc) {
+                    NSMutableArray *rh = [NSMutableArray array];
+                    for (NSString *sel in @[@"image", @"_image", @"iconImage", @"applicationIdentifier", @"_applicationIdentifier"]) {
+                        if (class_getInstanceMethod(rc, NSSelectorFromString(sel))) [rh addObject:sel];
+                    }
+                    TBLog(@"通知中心：NCNotificationIconRecipe 可用 = %@", [rh componentsJoinedByString:@","] ?: @"(无)");
+                } else TBLog(@"通知中心：NCNotificationIconRecipe 类不存在");
+                if (rc && class_getInstanceMethod(rc, NSSelectorFromString(@"image")))
+                    o_ncRecipeImage = (id (*)(id, SEL))TBHook(rc, @"image", (IMP)tb_ncRecipeImage, "NC recipe.image");
+                else if (rc && class_getInstanceMethod(rc, NSSelectorFromString(@"_image")))
+                    o_ncRecipeImage = (id (*)(id, SEL))TBHook(rc, @"_image", (IMP)tb_ncRecipeImage, "NC recipe._image");
+            }
             if (ncc && TBHasMethod(ncc, @"icons"))
                 o_ncIcons = (id (*)(id, SEL))TBHook(ncc, @"icons", (IMP)tb_ncIcons, "NC 图标(数据层)");
             else
