@@ -2106,7 +2106,8 @@ static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outC
     for (UIView *sub in container.subviews) {
         NSString *cn = NSStringFromClass([sub class]);
         BOOL leaf = [cn containsString:@"SBIconImageView"] || [cn containsString:@"PodIcon"]
-                 || [cn containsString:@"Badge"] || [cn containsString:@"IconView"];
+                 || [cn containsString:@"Badge"] || [cn containsString:@"IconView"]
+                 || [sub respondsToSelector:NSSelectorFromString(@"_iconImageView")];
         if (leaf) {
             (*outCount)++;
             // ① 内层 imageView 直接设图（SBFolderIconImageView / pod 自己的 imageView）
@@ -2215,9 +2216,8 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                     [cn containsString:@"Library"] || [cn containsString:@"Pod"]) {
                     NSInteger leafCount = 0;
                     TBApplyInsideContainer(v, 0, &leafCount);
-                    if (leafCount > 0)
-                        TBLogOnce([@"inside|" stringByAppendingString:cn],
-                                  @"容器内层已处理 %@：%ld 个图标视图", cn, (long)leafCount);
+                    TBLogOnce([@"inside|" stringByAppendingString:cn],
+                              @"容器内层 %@：%ld 个图标视图", cn, (long)leafCount);
                 }
                 if ([cn containsString:@"Library"]) {
                     // ★ 1.15（照 sb 接管视图类）：资源库 pod 有自己的 imageView，
@@ -4714,6 +4714,24 @@ static void tb_badgeLayout(id self, SEL _cmd) {
 ///   我们之前按类名补扫只能收到"容器"（SBDockIconListView / SBFolderIconImageView /
 ///   SBHLibraryCategoryPodIconView），内层 SBIconView 的类名不含 Dock/Folder/Library，
 ///   所以 Dock/文件夹/资源库一直是原图。
+/// 把某个图标视图的 CALayer 内容也换成主题图。
+/// 依据：0.18.9/0.18.10 探针实证「桌面上真正显示的是 CALayer.contents」，
+/// 这也是 0.18.11 修好动画的那一招；只设 iv.image 在某些 SBIconImageView 子类上不生效。
+static void TBForceLayerContents(UIView *v, UIImage *th) {
+    if (!v || !th) return;
+    @try {
+        id want = (__bridge id)th.CGImage;
+        CALayer *l = v.layer;
+        if (l && l.contents != want) l.contents = want;
+        NSArray *subs = [l.sublayers copy];
+        for (CALayer *sl in subs) {
+            id c = sl.contents;
+            if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID() && c != want)
+                sl.contents = want;
+        }
+    } @catch (NSException *e) { }
+}
+
 typedef void (*FnCfgIconIV)(id, SEL, id);
 static FnCfgIconIV o_configureIconImageView = NULL;
 
@@ -4741,8 +4759,8 @@ static void tb_configureIconImageView(id self, SEL _cmd, id imageView) {
         UIImage *th = TBImageForBundle(bid);
         if (!th) return;
         UIImageView *iv = (UIImageView *)imageView;
-        if (iv.image == th) return;
-        iv.image = th;
+        if (iv.image != th) iv.image = th;
+        TBForceLayerContents(iv, th);          // ★ 1.19：只设 image 不够，图层也得换
         TBLogOnce([@"cfg|" stringByAppendingString:bid], @"配置点接管 %@", bid);
     } @catch (NSException *e) { }
 }
