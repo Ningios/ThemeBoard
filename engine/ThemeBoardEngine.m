@@ -1990,6 +1990,30 @@ static id tb_ncIcons(id self, SEL _cmd) {
         NSString *itemCls = @"-";
         if ([r isKindOfClass:[NSArray class]] && ((NSArray *)r).count)
             itemCls = NSStringFromClass([((NSArray *)r).firstObject class]);
+        // ★ 1.35：把 content 自己的 ivar 全列一遍（只列字符串），找出真正的 bundleID 键
+        if (sNCCalls == 1) {
+            @try {
+                NSMutableArray *found = [NSMutableArray array];
+                for (Class c = [self class]; c && c != [NSObject class]; c = class_getSuperclass(c)) {
+                    unsigned int n = 0;
+                    Ivar *ivs = class_copyIvarList(c, &n);
+                    for (unsigned int i = 0; i < n; i++) {
+                        const char *tn = ivar_getTypeEncoding(ivs[i]);
+                        if (!tn || tn[0] != '@') continue;
+                        const char *nm = ivar_getName(ivs[i]);
+                        if (!nm) continue;
+                        id v = nil;
+                        @try { v = [self valueForKey:[NSString stringWithUTF8String:nm]]; } @catch (NSException *eiv) { v = nil; }
+                        if (![v isKindOfClass:[NSString class]]) continue;
+                        NSString *sv = (NSString *)v;
+                        if (sv.length < 2 || sv.length > 80) continue;
+                        [found addObject:[NSString stringWithFormat:@"%s=%@", nm, sv]];
+                    }
+                    if (ivs) free(ivs);
+                }
+                TBLog(@"NC content 字符串 ivar：%@", [found componentsJoinedByString:@" | "]);
+            } @catch (NSException *ei) { TBLog(@"NC ivar 探测异常 %@", ei.reason); }
+        }
         TBLog(@"NC icons 被调用 #%d cls=%@ appId=%@ section=%@ bundle=%@ 头像=%@ 元素=%@ 项数=%lu",
               sNCCalls, NSStringFromClass([self class]), a ?: @"-", b ?: @"-", c ?: @"-",
               cc ? @"有" : @"无", itemCls,
@@ -2017,6 +2041,7 @@ static id tb_ncIcons(id self, SEL _cmd) {
         NSMutableArray *out = [NSMutableArray arrayWithCapacity:src.count];
         // ★ 带头像的通知：第 1 项是联系人头像（不能动），后面那项才是右下角的 App 小图标。
         //   所以「跳过」是不对的 —— 正确的做法是保留头像、只换后面的小图标。
+        if (hasAvatar && src.count == 1) return r;   // 只有 1 张 = 头像本身，别动它
         NSUInteger keep = (hasAvatar && src.count >= 2) ? 1 : 0;
         for (NSUInteger i = 0; i < src.count; i++) [out addObject:(i < keep ? src[i] : mine)];
         TBLogOnce([@"nc|" stringByAppendingFormat:@"%@|%lu|%@", bid, (unsigned long)src.count, hasAvatar ? @"av" : @"-"],
