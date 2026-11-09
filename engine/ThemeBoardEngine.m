@@ -2103,6 +2103,8 @@ static void TBEnumerateDisplayedIconViews(void (^blk)(UIView *v)) {
 ///   SBHLibraryCategoryPodIconView），而真正画图标的内层 SBIconView **类名不含 Dock/Folder/Library**，
 ///   所以从来没进过更新队列；容器上 setNeedsLayout 也不会让内层换图。
 ///   做法：递归进容器，对内层每个图标视图走既有路径（读端/图层兜底已接管 SBIconImageView）。
+static NSInteger gInsideLeaves = 0, gInsideWithBid = 0, gInsideWithTheme = 0;
+
 static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outCount) {
     if (!container || depth > 10) return;
     for (UIView *sub in container.subviews) {
@@ -2118,6 +2120,8 @@ static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outC
                 @try { icon = [sub valueForKey:@"icon"]; } @catch (NSException *e) { }
                 NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
                 UIImage *th = bid.length ? TBImageForBundle(bid) : nil;
+                if (bid.length) gInsideWithBid++;
+                if (th) gInsideWithTheme++;
                 if (th) {
                     BOOL isIVLike = [sub isKindOfClass:[UIImageView class]] ||
                                     [cn containsString:@"ImageView"];
@@ -2213,7 +2217,39 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                     [cn containsString:@"Library"] || [cn containsString:@"Pod"]) {
                     NSInteger leafCount = 0;
                     TBApplyInsideContainer(v, 0, &leafCount);
-                    TBLog(@"容器内层 %@：%ld 个图标视图", cn, (long)leafCount);
+                    // ★★ 1.26：文件夹预览 / 资源库 pod 显示的是一张【合成图】（4~8 个 App 拼成），
+                    //   里面根本没有可逐个替换的格子（日志：SBFolderIconImageView 内层 0~1 个）。
+                    //   所以贴格子无效，必须让容器按【已经换过图的子图标】重新合成一次。
+                    @try {
+                        if ([cn containsString:@"Folder"]) {
+                            id fic = nil;
+                            @try { fic = [v valueForKey:@"icon"]; } @catch (NSException *ef) { fic = nil; }
+                            SEL sRb = NSSelectorFromString(@"rebuildImagesForFolderIcon:");
+                            SEL sRb2 = NSSelectorFromString(@"rebuildImages");
+                            BOOL did = NO;
+                            if (fic && [v respondsToSelector:sRb]) { ((void (*)(id, SEL, id))objc_msgSend)(v, sRb, fic); did = YES; }
+                            if (!did && [v respondsToSelector:sRb2]) { ((void (*)(id, SEL))objc_msgSend)(v, sRb2); did = YES; }
+                            if (!did) {
+                                id fiv = nil;
+                                @try { fiv = [v valueForKey:@"_iconImageView"]; } @catch (NSException *ef2) { fiv = nil; }
+                                if (fiv && fic && [fiv respondsToSelector:sRb])
+                                    ((void (*)(id, SEL, id))objc_msgSend)(fiv, sRb, fic);
+                            }
+                            TBLogOnce([@"rebuild|" stringByAppendingString:cn],
+                                      @"文件夹合成：%@ 已请求重建（内层 %ld）", cn, (long)leafCount);
+                        }
+                        // 资源库 pod：先让内层图重取，再让 pod 自己重排合成
+                        if ([cn containsString:@"Library"] || [cn containsString:@"Pod"]) {
+                            SEL sUpd = NSSelectorFromString(@"_updateIconImageViewAnimated:");
+                            if ([v respondsToSelector:sUpd]) ((void (*)(id, SEL, BOOL))objc_msgSend)(v, sUpd, NO);
+                            [v setNeedsLayout];
+                            [v layoutIfNeeded];
+                        }
+                    } @catch (NSException *ec) { }
+                    if (leafCount > 0 || [cn containsString:@"Dock"] || [cn containsString:@"Folder"])
+                        TBLog(@"容器内层 %@：%ld 个（有 bid %ld / 有主题图 %ld）",
+                              cn, (long)leafCount, (long)gInsideWithBid, (long)gInsideWithTheme);
+                    gInsideLeaves = 0; gInsideWithBid = 0; gInsideWithTheme = 0;
                 }
                 id icon = nil;
                 @try { icon = [v valueForKey:@"icon"]; } @catch (NSException *e0) { icon = nil; }
@@ -2662,6 +2698,8 @@ static BOOL TBProbeLayerOwnerIsIcon(id owner) {
     return hit;
 }
 
+static const void *kTBOrigContentsKey = &kTBOrigContentsKey;
+
 static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
     @try {
         id owner = ([self respondsToSelector:NSSelectorFromString(@"delegate")] ? [self valueForKey:@"delegate"] : nil);
@@ -2682,6 +2720,13 @@ static void tb_probeLayerContents(id self, SEL _cmd, id contents) {
                         isOurs = (contents == (__bridge id)fm.CGImage);
                     if (!isOurs) {
                         sInLayerReplace = YES;
+                        // ★★ 1.26：这里换掉的图层必须登记原内容 ——
+                        //   桌面/Dock 的大部分主题图层是这条路径换的，之前没登记，
+                        //   所以「恢复默认」只还原了 8 处，其余仍是主题图。
+                        if (!objc_getAssociatedObject(self, kTBOrigContentsKey))
+                            objc_setAssociatedObject(self, kTBOrigContentsKey,
+                                                     contents ?: (id)[NSNull null],
+                                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                         if (o_probeLayerContents) o_probeLayerContents(self, _cmd, (__bridge id)fm.CGImage);
                         sInLayerReplace = NO;
                         TBLogOnce([@"layerfix|" stringByAppendingString:fb], @"图层兜底 %@", fb);
@@ -4625,40 +4670,6 @@ static int TBBadgeRelayoutTree(UIView *v, int depth) {
     return n;
 }
 
-/// ★★ 1.22：角标"全量补贴"。
-/// 问题：设置变更时先把所有角标还原（日志「角标：还原 N 处」），随后只靠 layoutSubviews 重新贴，
-///   而 layout 只覆盖真正重排的那几个 → 日志里长期只有「已换底板（1 处）」，
-///   其余几十个角标就一直停在系统红底上。
-/// 做法：还原之后，直接遍历窗口树，对每个角标视图当场贴一次（幂等，不叠加）。
-static int TBBadgeApplyTree(UIView *v, int depth, UIImage *badge) {
-    if (!v || depth > 10) return 0;
-    int n = 0;
-    @try {
-        NSString *cn = NSStringFromClass([v class]);
-        if ([cn rangeOfString:@"Badge" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            if (!TBBadgeAlreadyApplied(v)) n += (int)TBBadgeApply(v, badge, NO);
-        }
-        for (UIView *k in [v.subviews copy]) n += TBBadgeApplyTree(k, depth + 1, badge);
-    } @catch (NSException *e) { }
-    return n;
-}
-
-static void TBBadgeApplyAllVisible(void) {
-    @try {
-        id ub = TBPref(@"UseThemeBadge");
-        id cb = TBPref(@"CustomBadgePath");
-        BOOL on = (ub && [ub boolValue]) ||
-                  ([cb isKindOfClass:[NSString class]] && [(NSString *)cb length] > 0);
-        if (!on || TBSafeMode() || !TBEnabled()) return;
-        UIImage *badge = TBThemeBadgeImage();
-        if (!badge) return;
-        int n = 0;
-        for (UIWindow *w in [UIApplication sharedApplication].windows)
-            n += TBBadgeApplyTree(w, 0, badge);
-        if (n) TBLog(@"角标替换：全量补贴 %d 处", n);
-    } @catch (NSException *e) { }
-}
-
 static void TBBadgeRelayoutVisible(void) {
     @try {
         NSArray *wins = [[UIApplication sharedApplication] windows];
@@ -4765,8 +4776,6 @@ static void tb_badgeLayout(id self, SEL _cmd) {
 /// 把某个图标视图的 CALayer 内容也换成主题图。
 /// 依据：0.18.9/0.18.10 探针实证「桌面上真正显示的是 CALayer.contents」，
 /// 这也是 0.18.11 修好动画的那一招；只设 iv.image 在某些 SBIconImageView 子类上不生效。
-static const void *kTBOrigContentsKey = &kTBOrigContentsKey;
-
 /// ★★ 1.22：登记被我们改掉的图层原内容 —— 换主题/恢复默认时才能还原回去。
 static void TBForceLayerContents(UIView *v, UIImage *th) {
     if (!v || !th) return;
@@ -4846,20 +4855,6 @@ static void tb_configureIconImageView(id self, SEL _cmd, id imageView) {
 /// 角标同理：MarkTheme 的 MTBadgeNativeSourceAdapter 就是挂
 ///   SBIconBadgeView -configureForIcon:infoProvider:（v32@0:8@16@24）
 /// 在"每次配置"时换底板；我们之前等 layoutSubviews 再找 UIImageView，只命中 1 处。
-typedef void (*FnBadgeCfg)(id, SEL, id, id);
-static FnBadgeCfg o_badgeConfigure = NULL;
-static BOOL gDoneCfgPoint = NO;
-
-static void tb_badgeConfigure(id self, SEL _cmd, id icon, id provider) {
-    if (o_badgeConfigure) o_badgeConfigure(self, _cmd, icon, provider);
-    if (!gIsPrimary) return;
-    @try {
-        if (![self isKindOfClass:[UIView class]]) return;
-        UIImage *b = TBThemeBadgeImage();
-        if (b) TBBadgeApply((UIView *)self, b, YES);
-    } @catch (NSException *e) { }
-}
-
 static BOOL gDoneBadge = NO;
 
 static BOOL gDoneClock = NO;
@@ -5077,7 +5072,6 @@ static void TBInstall(void) {
             TBLog(@"配置点：SBIconView -_configureIconImageView: 不存在");
         // ★ 1.23：角标回到我们原来那套（只在 SBIconBadgeView -layoutSubviews 里换底板）。
         //   1.17 照 MarkTheme 加的 configureForIcon:infoProvider: 不再安装 —— 实测反而让角标乱。
-        (void)o_badgeConfigure;
     }
         // ★★ 0.15.58 起彻底移除 UISwipeActionPullView -layoutSubviews 的 hook。
         //    真凶找到了：tb_swipePullLayout 替换了系统的 layoutSubviews 却**没有调用原实现**，
@@ -5773,7 +5767,7 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
             // ★ 1.9：照 sb 的节奏、但全部异步分批 —— 主线程不再被重活占住
             TBUpdateDisplayedIconViewsAsync(why);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ TBBadgeRelayoutVisible(); TBBadgeApplyAllVisible(); });
+                           dispatch_get_main_queue(), ^{ TBBadgeRelayoutVisible(); });
         });
     });
 }
