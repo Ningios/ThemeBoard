@@ -2195,7 +2195,19 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
             UIView *v = views[i];
             @try {
                 NSString *cn = NSStringFromClass([v class]);
-                id icon = [v valueForKey:@"icon"];
+                // ★★ 1.20：容器分支必须放在 icon 取值【之前】。
+                //   SBFloatingDockWindow / SBFolderIconImageView / SBRootFolderView 都没有 icon 键，
+                //   valueForKey: 会抛 NSUndefinedKeyException → 整个 @try 跳到 catch，
+                //   下面所有分支（含容器内层）全部被跳过。这是 Dock/文件夹 一直没进处理的真因。
+                if ([cn containsString:@"Dock"] || [cn containsString:@"Folder"] ||
+                    [cn containsString:@"Library"] || [cn containsString:@"Pod"]) {
+                    NSInteger leafCount = 0;
+                    TBApplyInsideContainer(v, 0, &leafCount);
+                    TBLogOnce([@"inside|" stringByAppendingString:cn],
+                              @"容器内层 %@：%ld 个图标视图", cn, (long)leafCount);
+                }
+                id icon = nil;
+                @try { icon = [v valueForKey:@"icon"]; } @catch (NSException *e0) { icon = nil; }
                 if (icon && [icon respondsToSelector:NSSelectorFromString(@"purgeCachedImages")])
                     ((void (*)(id, SEL))objc_msgSend)(icon, NSSelectorFromString(@"purgeCachedImages"));
                 NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
@@ -2212,13 +2224,6 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                     }
                 }
                 // 资源库 / 角标：它们不走 _iconImageView，让它们自己重排一次
-                if ([cn containsString:@"Dock"] || [cn containsString:@"Folder"] ||
-                    [cn containsString:@"Library"] || [cn containsString:@"Pod"]) {
-                    NSInteger leafCount = 0;
-                    TBApplyInsideContainer(v, 0, &leafCount);
-                    TBLogOnce([@"inside|" stringByAppendingString:cn],
-                              @"容器内层 %@：%ld 个图标视图", cn, (long)leafCount);
-                }
                 if ([cn containsString:@"Library"]) {
                     // ★ 1.15（照 sb 接管视图类）：资源库 pod 有自己的 imageView，
                     //   直接把它内部第一个 UIImageView 换成主题图（不靠刷新）
@@ -4761,7 +4766,7 @@ static void tb_configureIconImageView(id self, SEL _cmd, id imageView) {
         UIImageView *iv = (UIImageView *)imageView;
         if (iv.image != th) iv.image = th;
         TBForceLayerContents(iv, th);          // ★ 1.19：只设 image 不够，图层也得换
-        TBLogOnce([@"cfg|" stringByAppendingString:bid], @"配置点接管 %@", bid);
+        static int sCfgHit = 0; if (sCfgHit < 20) { sCfgHit++; TBLog(@"配置点接管 %@（第 %d 次）", bid, sCfgHit); }
     } @catch (NSException *e) { }
 }
 
