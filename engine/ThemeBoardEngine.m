@@ -2121,16 +2121,14 @@ static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outC
                 if (th) {
                     BOOL isIVLike = [sub isKindOfClass:[UIImageView class]] ||
                                     [cn containsString:@"ImageView"];
-                    if ([sub isKindOfClass:[UIImageView class]] && ((UIImageView *)sub).image != th)
-                        ((UIImageView *)sub).image = th;
-                    id iv = [sub valueForKey:@"_iconImageView"];
-                    if ([iv isKindOfClass:[UIImageView class]] && ((UIImageView *)iv).image != th)
-                        ((UIImageView *)iv).image = th;
-                    // ★ 1.23 回退：这里不再强改 CALayer.contents。
-                    //   1.21 加了两条 TBForceLayerContents → 同一格既设 image 又设图层内容，
-                    //   结果就是「两个同样的图标叠着」+ 换主题/恢复默认残留（改过的图层没人还原）。
-                    //   现在只设 image，显示交给系统与已有的「图层兜底」hook（它只在内容不是主题图时换一次）。
-                    (void)isIVLike;
+                    id iv = nil;                                  // 只取，不设 image（由图层面负责）
+                    @try { iv = [sub valueForKey:@"_iconImageView"]; } @catch (NSException *ei) { iv = nil; }
+                    // ★ 1.24：这一格只换图层内容（不设 .image），且只换本层。
+                    //   1.23 试过"只设 image 不换图层" → Dock/文件夹/资源库 完全不变，
+                    //   说明它们的显示确实由图层内容决定；现在换图层 + 登记原内容，
+                    //   换主题/恢复默认都能还原（TBRestoreForcedLayers）。
+                    if (isIVLike) TBForceLayerContents((UIView *)sub, th);
+                    else if ([iv isKindOfClass:[UIView class]]) TBForceLayerContents((UIView *)iv, th);
                 }
                 // ② 缓存 + 让这一格自己重取（走读端 → 主题图）
                 SEL sCache = NSSelectorFromString(@"iconImageCache");
@@ -4782,17 +4780,8 @@ static void TBForceLayerContents(UIView *v, UIImage *th) {
                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             l.contents = want;
         }
-        NSArray *subs = [l.sublayers copy];
-        for (CALayer *sl in subs) {
-            id c = sl.contents;
-            if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID() && c != want) {
-                if (!objc_getAssociatedObject(sl, kTBOrigContentsKey))
-                    objc_setAssociatedObject(sl, kTBOrigContentsKey,
-                                             c ?: (id)[NSNull null],
-                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                sl.contents = want;
-            }
-        }
+        // ★ 1.24：只改本层，绝不碰子层 —— 之前连子层一起改，
+        //   同一格里「本层 + 子层」各画一张主题图，就是"两个同样的图标"。
     } @catch (NSException *e) { }
 }
 
@@ -5641,6 +5630,10 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
             return;
         }
     }
+    // ★★ 1.24：先把自己改过的图层全部还原成系统原图。
+    //   放在重活入口（而不是分批更新里）——「取消应用/恢复默认」那条路不一定走到分批更新，
+    //   这就是"恢复默认不跟着还原"的原因。
+    TBRestoreForcedLayers();
     [gLock lock];
     gIndex = nil;
     gBundleRes = nil;          // 强制重建资源表（含时钟/日历素材）
@@ -5780,7 +5773,7 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
             // ★ 1.9：照 sb 的节奏、但全部异步分批 —— 主线程不再被重活占住
             TBUpdateDisplayedIconViewsAsync(why);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ TBBadgeRelayoutVisible(); });
+                           dispatch_get_main_queue(), ^{ TBBadgeRelayoutVisible(); TBBadgeApplyAllVisible(); });
         });
     });
 }
