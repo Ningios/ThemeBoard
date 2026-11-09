@@ -2118,6 +2118,31 @@ static NSString *TBNCBidFromView(UIView *v) {
     return nil;
 }
 
+/// ★ 1.41：视频实测「最近 VC = CSNotificationViewController」。
+/// 从图标视图往上找 VC（nextResponder 链），再在 VC 上找 request → sectionIdentifier。
+static NSString *TBNCBidFromViewController(UIView *v, NSString **vcNameOut) {
+    UIResponder *r = (UIResponder *)v;
+    for (int i = 0; i < 12 && r; i++) {
+        r = [r nextResponder];
+        if (!r) break;
+        if (![r isKindOfClass:[UIViewController class]]) continue;
+        if (vcNameOut) *vcNameOut = NSStringFromClass([r class]);
+        for (NSString *k in @[ @"notificationRequest", @"_notificationRequest", @"request", @"_request",
+                               @"notification", @"_notification" ]) {
+            id req = nil;
+            @try { req = [r valueForKey:k]; } @catch (NSException *e) { req = nil; }
+            if (!req) continue;
+            for (NSString *k2 in @[ @"sectionIdentifier", @"_sectionIdentifier", @"bundleIdentifier", @"_bundleIdentifier" ]) {
+                id b = nil;
+                @try { b = [req valueForKey:k2]; } @catch (NSException *e2) { b = nil; }
+                if ([b isKindOfClass:[NSString class]] && [(NSString *)b containsString:@"."]) return b;
+            }
+        }
+        break;   // 只看最近的一个 VC
+    }
+    return nil;
+}
+
 static void tb_ncbLayout(id self, SEL _cmd) {
     if (o_ncbLayout) o_ncbLayout(self, _cmd);
     if (TBSafeMode() || !TBEnabled()) return;
@@ -2135,6 +2160,10 @@ static void tb_ncbLayout(id self, SEL _cmd) {
             }
         }
         if (!bid.length) bid = TBNCBidFromView((UIView *)self);
+        NSString *vcName = nil;
+        if (!bid.length) bid = TBNCBidFromViewController((UIView *)self, &vcName);
+        if (vcName.length) TBLogOnce([@"ncvc|" stringByAppendingString:vcName],
+                                     @"NC 最近 VC = %@（从中取 bid=%@）", vcName, bid ?: @"-");
         UIView *avatar = nil, *badge = nil;
         for (UIView *v in [(UIView *)self subviews]) {
             NSString *cn = NSStringFromClass([v class]);
@@ -2177,6 +2206,24 @@ static void tb_ncbLayout(id self, SEL _cmd) {
             TBLog(@"NC 图标视图 cls=%@ bid=%@ desc=%@ ivar=%@ subviews=%@",
                   NSStringFromClass([self class]), bid ?: @"-", desc ? @"有" : @"无",
                   [ivs componentsJoinedByString:@" | "], [sv componentsJoinedByString:@","]);
+        }
+        // ★ 1.40：先看角标，再决定要不要继续（原来 if(!th) return 在探针之前，
+        //   bid 取不到就整段跳过，日志里连 _badgeViews 都看不到）。
+        NSArray *bvs0 = nil;
+        @try { id v0 = [self valueForKey:@"_badgeViews"]; if ([v0 isKindOfClass:[NSArray class]]) bvs0 = v0; }
+        @catch (NSException *e0) { bvs0 = nil; }
+        if (bvs0.count) {
+            static int s0 = 0;
+            if (s0 < 3) {
+                s0++;
+                NSMutableArray *chain = [NSMutableArray array];
+                UIView *pp = (UIView *)self;
+                for (int i = 0; i < 8 && pp; i++, pp = pp.superview)
+                    [chain addObject:NSStringFromClass([pp class])];
+                TBLog(@"NC 角标视图：_badgeViews=%lu 首个=%@ bid=%@ 祖先=%@",
+                      (unsigned long)bvs0.count, NSStringFromClass([bvs0.firstObject class]),
+                      bid ?: @"-", [chain componentsJoinedByString:@" < "]);
+            }
         }
         UIImage *th = bid.length ? TBImageForBundle(bid) : nil;
         if (!th) return;
