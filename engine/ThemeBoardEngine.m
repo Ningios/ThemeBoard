@@ -2051,6 +2051,70 @@ static id tb_ncIcons(id self, SEL _cmd) {
     } @catch (NSException *e) { return r; }
 }
 
+// ---- ★ 1.36：NC 的 App 身份不在 content 上（1.35 实证：content 的字符串 ivar 只有
+//   _contentType/_defaultHeader/_title/_message），所以取不到 bundleID。
+//   视频实测的视图结构：
+//     NCBadgedIconView
+//       ├ NCAvatarView → UIImageView（大图：头像或 App 图标）
+//       └ NCImageBrandingBadge → UIImageView（右下角小 App 图标，10×16）
+//   这里在 NCBadgedIconView -layoutSubviews 里，从 _badgedIconDescription 取 bundleID，
+//   再用主题图替换「小图标」或「大图」（头像不动）。
+static void (*o_ncbLayout)(id, SEL);
+
+static UIImageView *TBNCFindImageView(UIView *v, int depth) {
+    if (!v || depth > 4) return nil;
+    if ([v isKindOfClass:[UIImageView class]]) return (UIImageView *)v;
+    for (UIView *k in v.subviews) { UIImageView *r = TBNCFindImageView(k, depth + 1); if (r) return r; }
+    return nil;
+}
+
+static void tb_ncbLayout(id self, SEL _cmd) {
+    if (o_ncbLayout) o_ncbLayout(self, _cmd);
+    if (TBSafeMode() || !TBEnabled()) return;
+    if (![self isKindOfClass:[UIView class]]) return;
+    @try {
+        NSString *bid = nil;
+        id desc = nil;
+        @try { desc = [self valueForKey:@"_badgedIconDescription"]; } @catch (NSException *ed) { desc = nil; }
+        if (desc) {
+            for (NSString *k in @[@"_bundleIdentifier", @"bundleIdentifier", @"_applicationIdentifier"]) {
+                @try {
+                    id v = [desc valueForKey:k];
+                    if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) { bid = v; break; }
+                } @catch (NSException *ek) { }
+            }
+        }
+        UIView *avatar = nil, *badge = nil;
+        for (UIView *v in [(UIView *)self subviews]) {
+            NSString *cn = NSStringFromClass([v class]);
+            if ([cn rangeOfString:@"Avatar"].location != NSNotFound) avatar = v;
+            if ([cn rangeOfString:@"BrandingBadge"].location != NSNotFound) badge = v;
+            for (UIView *v2 in v.subviews) {
+                if ([NSStringFromClass([v2 class]) rangeOfString:@"BrandingBadge"].location != NSNotFound) badge = v2;
+            }
+        }
+        static int sNCB = 0;
+        if (sNCB < 6) {
+            sNCB++;
+            TBLog(@"NC 图标视图 cls=%@ bid=%@ desc=%@ avatar=%@ badge=%@",
+                  NSStringFromClass([self class]), bid ?: @"-", desc ? @"有" : @"无",
+                  avatar ? NSStringFromClass([avatar class]) : @"-",
+                  badge ? NSStringFromClass([badge class]) : @"-");
+        }
+        UIImage *th = bid.length ? TBImageForBundle(bid) : nil;
+        if (!th) return;
+        if (badge) {
+            UIImageView *iv = TBNCFindImageView(badge, 0);
+            if (iv && iv.image != th) { iv.image = th; iv.contentMode = UIViewContentModeScaleAspectFit;
+                TBLogOnce([@"ncb|" stringByAppendingString:bid], @"NC 小图标已换 %@", bid); }
+        } else if (avatar) {
+            UIImageView *iv = TBNCFindImageView(avatar, 0);
+            if (iv && iv.image != th) { iv.image = th;
+                TBLogOnce([@"nca|" stringByAppendingString:bid], @"NC 大图已换 %@", bid); }
+        }
+    } @catch (NSException *e) { }
+}
+
 static IMP TBHook(Class cls, NSString *selName, IMP repl, const char *tag) {
     if (!cls) { TBLog(@"· %s: 类不存在", tag); return NULL; }
     Method m = class_getInstanceMethod(cls, NSSelectorFromString(selName));
@@ -4845,6 +4909,16 @@ static void TBInstall(void) {
                 o_ncIcons = (id (*)(id, SEL))TBHook(ncc, @"icons", (IMP)tb_ncIcons, "NC 图标(数据层)");
             else
                 TBLog(@"通知中心：NCNotificationContent 不存在或没有 icons 方法，跳过");
+            // ★ 1.36：视图层（类名与结构取自用户 4 段 FLEX 视频实测）
+            // 只挂容器（NCBadgedIconView）。两个类共用一个 orig 槽会互相踩（角标那次的教训），
+            // 小图标在容器的子视图里找，不需要单独挂。
+            Class ncbCls = NSClassFromString(@"NCBadgedIconView");
+            if (ncbCls && TBHasMethod(ncbCls, @"layoutSubviews")) {
+                o_ncbLayout = (void (*)(id, SEL))TBHook(ncbCls, @"layoutSubviews", (IMP)tb_ncbLayout, "NC 图标视图");
+                TBLog(@"通知中心：已挂视图层 NCBadgedIconView -layoutSubviews");
+            } else {
+                TBLog(@"通知中心：NCBadgedIconView 不存在或没有 layoutSubviews");
+            }
         }
     }
 
