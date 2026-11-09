@@ -2093,7 +2093,10 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                     [cn containsString:@"Library"] || [cn containsString:@"Badge"] ||
                     [cn containsString:@"Clock"]) {
                     NSValue *k = [NSValue valueWithPointer:(__bridge const void *)v];
-                    if (![seen containsObject:k] && [v respondsToSelector:NSSelectorFromString(@"icon")]) {
+                    // ★ 1.13：不再要求 respondsToSelector:@"icon" ——
+                    //   角标(SBIconBadgeView)、时钟(SBHClockApplicationIconImageView)、
+                    //   资源库 pod 都没有 icon 方法，之前全被这条过滤掉（1.10-1.12 无效的真因）。
+                    if (![seen containsObject:k]) {
                         [seen addObject:k]; [views addObject:v]; extra++;
                     }
                 }
