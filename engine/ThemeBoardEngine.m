@@ -4696,6 +4696,51 @@ static void tb_badgeLayout(id self, SEL _cmd) {
     sDepth--;
 }
 
+/// ★★ 1.17（照 MarkTheme 的做法）：接管【配置点】，不再枚举视图。
+///   依据：MarkTheme 的 runtime/adapters/MTFolderNativeSourceAdapter.m
+///     MTIconViewConfigureSelectorName = "_configureIconImageView:"（v24@0:8@16）
+///   Dock / 文件夹格子 / 资源库 pod 里画的都是 SBIconView，每一个装载图片都要经过它；
+///   我们之前按类名补扫只能收到"容器"（SBDockIconListView / SBFolderIconImageView /
+///   SBHLibraryCategoryPodIconView），内层 SBIconView 的类名不含 Dock/Folder/Library，
+///   所以 Dock/文件夹/资源库一直是原图。
+typedef void (*FnCfgIconIV)(id, SEL, id);
+static FnCfgIconIV o_configureIconImageView = NULL;
+
+static void tb_configureIconImageView(id self, SEL _cmd, id imageView) {
+    if (o_configureIconImageView) o_configureIconImageView(self, _cmd, imageView);   // 先让系统照常配
+    if (!gIsPrimary) return;
+    if (!imageView || ![imageView isKindOfClass:[UIImageView class]]) return;
+    @try {
+        id icon = nil;
+        @try { icon = [self valueForKey:@"icon"]; } @catch (NSException *e) { }
+        NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
+        if (!bid.length) return;
+        UIImage *th = TBImageForBundle(bid);
+        if (!th) return;
+        UIImageView *iv = (UIImageView *)imageView;
+        if (iv.image == th) return;
+        iv.image = th;
+        TBLogOnce([@"cfg|" stringByAppendingString:bid], @"配置点接管 %@", bid);
+    } @catch (NSException *e) { }
+}
+
+/// 角标同理：MarkTheme 的 MTBadgeNativeSourceAdapter 就是挂
+///   SBIconBadgeView -configureForIcon:infoProvider:（v32@0:8@16@24）
+/// 在"每次配置"时换底板；我们之前等 layoutSubviews 再找 UIImageView，只命中 1 处。
+typedef void (*FnBadgeCfg)(id, SEL, id, id);
+static FnBadgeCfg o_badgeConfigure = NULL;
+static BOOL gDoneCfgPoint = NO;
+
+static void tb_badgeConfigure(id self, SEL _cmd, id icon, id provider) {
+    if (o_badgeConfigure) o_badgeConfigure(self, _cmd, icon, provider);
+    if (!gIsPrimary) return;
+    @try {
+        if (![self isKindOfClass:[UIView class]]) return;
+        UIImage *b = TBThemeBadgeImage();
+        if (b) TBBadgeApply((UIView *)self, b, YES);
+    } @catch (NSException *e) { }
+}
+
 static BOOL gDoneBadge = NO;
 
 static BOOL gDoneClock = NO;
@@ -4899,6 +4944,25 @@ static void TBInstall(void) {
                     if (!gBadgeOrig) gBadgeOrig = [NSMutableDictionary dictionary];
                     gBadgeOrig[clsName] = [NSValue valueWithPointer:borig];
                 }
+            }
+        }
+    }
+    // ★★ 1.17：两个"配置点"hook —— Dock / 文件夹 / 资源库 / 角标 一起解决
+    if (!gDoneCfgPoint) {
+        gDoneCfgPoint = YES;
+        Class ivc2 = NSClassFromString(@"SBIconView");
+        if (ivc2 && TBHasMethod(ivc2, @"_configureIconImageView:"))
+            o_configureIconImageView = (FnCfgIconIV)TBHook(ivc2, @"_configureIconImageView:",
+                                        (IMP)tb_configureIconImageView, "SBIconView 配置点");
+        else
+            TBLog(@"配置点：SBIconView -_configureIconImageView: 不存在");
+        for (NSString *cn2 in @[@"SBIconBadgeView", @"_SBIconBadgeView", @"SBHIconBadgeView"]) {
+            Class bc2 = NSClassFromString(cn2);
+            if (bc2 && TBHasMethod(bc2, @"configureForIcon:infoProvider:")) {
+                FnBadgeCfg f = (FnBadgeCfg)TBHook(bc2, @"configureForIcon:infoProvider:",
+                                                  (IMP)tb_badgeConfigure, "角标配置点");
+                if (f) o_badgeConfigure = f;
+                break;
             }
         }
     }
