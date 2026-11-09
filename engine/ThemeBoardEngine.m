@@ -2140,8 +2140,11 @@ static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outC
                     @try {
                         SEL sUpd2 = NSSelectorFromString(@"_updateIconImageViewAnimated:");
                         if ([sub respondsToSelector:sUpd2]) ((void (*)(id, SEL, BOOL))objc_msgSend)(sub, sUpd2, NO);
-                        else if ([iv isKindOfClass:[UIView class]] && [iv respondsToSelector:sUpd2])
-                            ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, sUpd2, NO);
+                        id iv2 = nil;
+                        @try { iv2 = [sub valueForKey:@"_iconImageView"]; } @catch (NSException *eiv) { iv2 = nil; }
+                        if (![sub respondsToSelector:sUpd2] && [iv2 isKindOfClass:[UIView class]] &&
+                            [iv2 respondsToSelector:sUpd2])
+                            ((void (*)(id, SEL, BOOL))objc_msgSend)(iv2, sUpd2, NO);
                     } @catch (NSException *eu) { }
                 }
                 // ② 缓存 + 让这一格自己重取（走读端 → 主题图）
