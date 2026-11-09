@@ -1977,6 +1977,31 @@ static id tb_ncRecipeImage(id self, SEL _cmd) {
     } @catch (NSException *e) { return r; }
 }
 
+// ---- ★ 1.38：content 上没有 App 身份，request 上有 —— 把两者关联起来。
+//   1.37 实证：NCBadgedIconView 的 ivar 只有 _iconView/<UIImageView> 与 _badgeViews(nil)，
+//   没有任何 bundleID；所以身份只能从 NCNotificationRequest 拿。
+//   做法：hook NCNotificationRequest -content，拿到 sectionIdentifier/bundleIdentifier 后
+//   关联到返回的 content 对象上；tb_ncIcons 再从这个关联里取 bid。
+static const void *kNCNBidKey = &kNCNBidKey;
+static id (*o_ncRequestContent)(id, SEL);
+
+static id tb_ncRequestContent(id self, SEL _cmd) {
+    id c = o_ncRequestContent ? o_ncRequestContent(self, _cmd) : nil;
+    @try {
+        NSString *bid = nil;
+        for (NSString *k in @[ @"sectionIdentifier", @"_sectionIdentifier", @"bundleIdentifier",
+                               @"_bundleIdentifier", @"sectionID", @"_sectionID" ]) {
+            id v = nil;
+            @try { v = [self valueForKey:k]; } @catch (NSException *e1) { v = nil; }
+            if ([v isKindOfClass:[NSString class]] && [(NSString *)v containsString:@"."]) { bid = v; break; }
+        }
+        static int sReq = 0;
+        if (sReq < 4) { sReq++; TBLog(@"NC request 取 bid=%@ cls=%@", bid ?: @"-", NSStringFromClass([self class])); }
+        if (c && bid.length) objc_setAssociatedObject(c, kNCNBidKey, bid, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } @catch (NSException *e) { }
+    return c;
+}
+
 static id tb_ncIcons(id self, SEL _cmd) {
     id r = o_ncIcons ? o_ncIcons(self, _cmd) : nil;        // 原实现只调一次
     static int sNCCalls = 0;
@@ -2021,8 +2046,8 @@ static id tb_ncIcons(id self, SEL _cmd) {
     }
     if (![r isKindOfClass:[NSArray class]] || ((NSArray *)r).count == 0) return r;
     @try {
-        NSString *bid = nil;
-        for (NSString *k in @[ @"_applicationIdentifier", @"applicationIdentifier",
+        NSString *bid = objc_getAssociatedObject(self, kNCNBidKey);   // ★ 1.38 来自 request 的关联
+        for (NSString *k in bid.length ? @[] : @[ @"_applicationIdentifier", @"applicationIdentifier",
                                @"sectionIdentifier", @"bundleIdentifier" ]) {
             id v = nil;
             @try { v = [self valueForKey:k]; } @catch (NSException *e) { }
@@ -4938,6 +4963,13 @@ static void TBInstall(void) {
             // ★ 1.36：视图层（类名与结构取自用户 4 段 FLEX 视频实测）
             // 只挂容器（NCBadgedIconView）。两个类共用一个 orig 槽会互相踩（角标那次的教训），
             // 小图标在容器的子视图里找，不需要单独挂。
+            Class reqCls = NSClassFromString(@"NCNotificationRequest");
+            if (reqCls && TBHasMethod(reqCls, @"content")) {
+                o_ncRequestContent = (id (*)(id, SEL))TBHook(reqCls, @"content", (IMP)tb_ncRequestContent, "NC request.content");
+                TBLog(@"通知中心：已挂 NCNotificationRequest -content（用于取 bundleID）");
+            } else {
+                TBLog(@"通知中心：NCNotificationRequest 无 content 方法");
+            }
             Class ncbCls = NSClassFromString(@"NCBadgedIconView");
             if (ncbCls && TBHasMethod(ncbCls, @"layoutSubviews")) {
                 o_ncbLayout = (void (*)(id, SEL))TBHook(ncbCls, @"layoutSubviews", (IMP)tb_ncbLayout, "NC 图标视图");
