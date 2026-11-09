@@ -2158,7 +2158,29 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                     }
                 }
                 // 资源库 / 角标：它们不走 _iconImageView，让它们自己重排一次
-                if ([cn containsString:@"Library"] || [cn containsString:@"Badge"]) {
+                if ([cn containsString:@"Library"]) {
+                    // ★ 1.15（照 sb 接管视图类）：资源库 pod 有自己的 imageView，
+                    //   直接把它内部第一个 UIImageView 换成主题图（不靠刷新）
+                    @try {
+                        NSMutableArray *stack = [NSMutableArray arrayWithObject:v];
+                        NSInteger guard2 = 0;
+                        while (stack.count && guard2 < 200) {
+                            guard2++;
+                            UIView *cur = stack.lastObject; [stack removeLastObject];
+                            if ([cur isKindOfClass:[UIImageView class]] && ((UIImageView *)cur).image) {
+                                NSString *bid2 = nil;
+                                @try { bid2 = TBBIDFromIcon([v valueForKey:@"icon"]); } @catch (NSException *e) { }
+                                UIImage *th = bid2.length ? TBImageForBundle(bid2) : nil;
+                                if (th && ((UIImageView *)cur).image != th) ((UIImageView *)cur).image = th;
+                                break;
+                            }
+                            for (UIView *k in cur.subviews) [stack addObject:k];
+                        }
+                    } @catch (NSException *e) { }
+                    [v setNeedsLayout];
+                    [v layoutIfNeeded];
+                }
+                if ([cn containsString:@"Badge"]) {
                     [v setNeedsLayout];
                     [v layoutIfNeeded];
                 }
@@ -4996,6 +5018,7 @@ static void TBInstall(void) {
         if (!gDoneFolder1) {
             gDoneFolder1 = YES;
             Class fc = NSClassFromString(@"SBFolderIconImageCache");
+            TBLog(@"读端安装：SBFolderIconImageCache %@", fc ? @"存在" : @"不存在");
             if (fc) {
                 if (TBHasMethod(fc, @"cachedImageForIcon:"))
                     o_folderCached = (id (*)(id, SEL, id))TBHook(fc, @"cachedImageForIcon:", (IMP)tb_folderCached, "文件夹缓存");
