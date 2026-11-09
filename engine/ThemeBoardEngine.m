@@ -322,6 +322,7 @@ static BOOL TBImageIsMostlyOpaque(CGImageRef cg);
 static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys);
 static UIImage *TBImageForBundle(NSString *bid);      // 前置：时钟判定要用
 static void TBForceLayerContents(UIView *v, UIImage *th);   // 前置：容器内层（2129 行）先用、4730 行才定义
+static void TBRestoreForcedLayers(void);                      // 前置：图层还原登记（1.22）
 static UIImage *TBServeReadSide(id cache, id icon);   // 1.1：读端接管（定义在后）
 static UIImage *TBThemeAsset(NSString *prefix);        // 1.2：主题素材按路径找（定义在后）
 static UIImage *TBClockRoundedFace(UIImage *img);                  // 1.11（定义在后）
@@ -2147,6 +2148,9 @@ static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outC
 }
 
 static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
+    // ★★ 1.22：先把上一主题/上一次改过的图层还原（清残留），再按当前主题重新贴。
+    //   恢复默认时这就等于"变回系统原图"。
+    TBRestoreForcedLayers();
     NSMutableArray *views = [NSMutableArray array];
     TBEnumerateDisplayedIconViews(^(UIView *v) { if (v) [views addObject:v]; });
     // ★ 1.10：Dock / 文件夹 / 资源库 / 角标 不在上面那份"图标视图"列表里（它们是另外的容器），
@@ -4622,6 +4626,40 @@ static int TBBadgeRelayoutTree(UIView *v, int depth) {
     return n;
 }
 
+/// ★★ 1.22：角标"全量补贴"。
+/// 问题：设置变更时先把所有角标还原（日志「角标：还原 N 处」），随后只靠 layoutSubviews 重新贴，
+///   而 layout 只覆盖真正重排的那几个 → 日志里长期只有「已换底板（1 处）」，
+///   其余几十个角标就一直停在系统红底上。
+/// 做法：还原之后，直接遍历窗口树，对每个角标视图当场贴一次（幂等，不叠加）。
+static int TBBadgeApplyTree(UIView *v, int depth, UIImage *badge) {
+    if (!v || depth > 10) return 0;
+    int n = 0;
+    @try {
+        NSString *cn = NSStringFromClass([v class]);
+        if ([cn rangeOfString:@"Badge" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            if (!TBBadgeAlreadyApplied(v)) n += (int)TBBadgeApply(v, badge, NO);
+        }
+        for (UIView *k in [v.subviews copy]) n += TBBadgeApplyTree(k, depth + 1, badge);
+    } @catch (NSException *e) { }
+    return n;
+}
+
+static void TBBadgeApplyAllVisible(void) {
+    @try {
+        id ub = TBPref(@"UseThemeBadge");
+        id cb = TBPref(@"CustomBadgePath");
+        BOOL on = (ub && [ub boolValue]) ||
+                  ([cb isKindOfClass:[NSString class]] && [(NSString *)cb length] > 0);
+        if (!on || TBSafeMode() || !TBEnabled()) return;
+        UIImage *badge = TBThemeBadgeImage();
+        if (!badge) return;
+        int n = 0;
+        for (UIWindow *w in [UIApplication sharedApplication].windows)
+            n += TBBadgeApplyTree(w, 0, badge);
+        if (n) TBLog(@"角标替换：全量补贴 %d 处", n);
+    } @catch (NSException *e) { }
+}
+
 static void TBBadgeRelayoutVisible(void) {
     @try {
         NSArray *wins = [[UIApplication sharedApplication] windows];
@@ -4728,19 +4766,59 @@ static void tb_badgeLayout(id self, SEL _cmd) {
 /// 把某个图标视图的 CALayer 内容也换成主题图。
 /// 依据：0.18.9/0.18.10 探针实证「桌面上真正显示的是 CALayer.contents」，
 /// 这也是 0.18.11 修好动画的那一招；只设 iv.image 在某些 SBIconImageView 子类上不生效。
+static const void *kTBOrigContentsKey = &kTBOrigContentsKey;
+
+/// ★★ 1.22：登记被我们改掉的图层原内容 —— 换主题/恢复默认时才能还原回去。
 static void TBForceLayerContents(UIView *v, UIImage *th) {
     if (!v || !th) return;
     @try {
         id want = (__bridge id)th.CGImage;
         CALayer *l = v.layer;
-        if (l && l.contents != want) l.contents = want;
+        if (l && l.contents != want) {
+            if (!objc_getAssociatedObject(l, kTBOrigContentsKey))
+                objc_setAssociatedObject(l, kTBOrigContentsKey,
+                                         l.contents ?: (id)[NSNull null],
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            l.contents = want;
+        }
         NSArray *subs = [l.sublayers copy];
         for (CALayer *sl in subs) {
             id c = sl.contents;
-            if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID() && c != want)
+            if (c && CFGetTypeID((__bridge CFTypeRef)c) == CGImageGetTypeID() && c != want) {
+                if (!objc_getAssociatedObject(sl, kTBOrigContentsKey))
+                    objc_setAssociatedObject(sl, kTBOrigContentsKey,
+                                             c ?: (id)[NSNull null],
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 sl.contents = want;
+            }
         }
     } @catch (NSException *e) { }
+}
+
+/// 把窗口树里"被我们改过 contents"的图层恢复成登记的原内容。
+/// 换主题时先调它（清掉上一主题的残留），恢复默认时也只有它能把图标变回系统原样。
+static int TBRestoreLayerTree(UIView *v, int depth) {
+    if (!v || depth > 12) return 0;
+    int n = 0;
+    @try {
+        CALayer *l = v.layer;
+        id orig = objc_getAssociatedObject(l, kTBOrigContentsKey);
+        if (orig) {
+            id real = (orig == [NSNull null]) ? nil : orig;
+            if (l.contents != real) { l.contents = real; n++; }
+            objc_setAssociatedObject(l, kTBOrigContentsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    } @catch (NSException *e) { }
+    for (UIView *k in [v.subviews copy]) n += TBRestoreLayerTree(k, depth + 1);
+    return n;
+}
+
+static void TBRestoreForcedLayers(void) {
+    int n = 0;
+    @try {
+        for (UIWindow *w in [UIApplication sharedApplication].windows) n += TBRestoreLayerTree(w, 0);
+    } @catch (NSException *e) { }
+    if (n) TBLog(@"图层还原：%d 处恢复为系统原图", n);
 }
 
 typedef void (*FnCfgIconIV)(id, SEL, id);
@@ -5708,7 +5786,7 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
             // ★ 1.9：照 sb 的节奏、但全部异步分批 —— 主线程不再被重活占住
             TBUpdateDisplayedIconViewsAsync(why);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ TBBadgeRelayoutVisible(); });
+                           dispatch_get_main_queue(), ^{ TBBadgeRelayoutVisible(); TBBadgeApplyAllVisible(); });
         });
     });
 }
