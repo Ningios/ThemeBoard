@@ -2133,6 +2133,16 @@ static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outC
                     //   换主题/恢复默认都能还原（TBRestoreForcedLayers）。
                     if (isIVLike) TBForceLayerContents((UIView *)sub, th);
                     else if ([iv isKindOfClass:[UIView class]]) TBForceLayerContents((UIView *)iv, th);
+                } else {
+                    // ★ 1.28：主题已关闭（恢复默认）→ 不贴主题图，改为让这一格自己重画。
+                    //   我们强写过的 layer.contents 只有靠视图重新设置 image 才会被顶掉，
+                    //   这就是「恢复默认 Dock 还留着主题图」的根因。
+                    @try {
+                        SEL sUpd2 = NSSelectorFromString(@"_updateIconImageViewAnimated:");
+                        if ([sub respondsToSelector:sUpd2]) ((void (*)(id, SEL, BOOL))objc_msgSend)(sub, sUpd2, NO);
+                        else if ([iv isKindOfClass:[UIView class]] && [iv respondsToSelector:sUpd2])
+                            ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, sUpd2, NO);
+                    } @catch (NSException *eu) { }
                 }
                 // ② 缓存 + 让这一格自己重取（走读端 → 主题图）
                 SEL sCache = NSSelectorFromString(@"iconImageCache");
@@ -5685,7 +5695,9 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
             if (mySeq != gReloadRunSeq) return;
             // 角标还原（0.15.49 根因修复）：换主题 / 关角标开关 / 取消应用 / 任何设置变更
             // 都要先把上次换上的底板写回【系统原图】—— 否则旧角标一直赖在图标上。
-            if (gBadgeApplied) TBBadgeRestoreAll(@"设置变更（换主题/开关/取消应用）");
+            if (gBadgeApplied) { TBBadgeRestoreAll(@"设置变更（换主题/开关/取消应用）");
+                // ★ 1.28：还原完立刻让它重新布局一次，否则角标停在系统红底
+                TBBadgeRelayoutVisible(); }
             // 角标素材图缓存按主题名失效：App 往同一主题里重导/覆盖 SBBadgeBG 素材后，
             // 旧主题名命中不了变化 —— 这里跟着 TBReload 一起清（主线程，与读端同队列）
             gBadgeThemeImgCache = nil;
