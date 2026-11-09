@@ -2096,6 +2096,48 @@ static void TBEnumerateDisplayedIconViews(void (^blk)(UIView *v)) {
     for (UIView *v in (gSeenIconViews ? gSeenIconViews.allObjects : @[])) blk(v);
 }
 
+/// ★ 1.16：容器里的"真图标视图" —— 这是 Dock / 文件夹预览 / 资源库 一直不变的直接原因。
+///   日志实证：按类名补扫收到的是容器本身（SBDockIconListView / SBFolderIconImageView /
+///   SBHLibraryCategoryPodIconView），而真正画图标的内层 SBIconView **类名不含 Dock/Folder/Library**，
+///   所以从来没进过更新队列；容器上 setNeedsLayout 也不会让内层换图。
+///   做法：递归进容器，对内层每个图标视图走既有路径（读端/图层兜底已接管 SBIconImageView）。
+static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outCount) {
+    if (!container || depth > 10) return;
+    for (UIView *sub in container.subviews) {
+        NSString *cn = NSStringFromClass([sub class]);
+        BOOL leaf = [cn containsString:@"SBIconImageView"] || [cn containsString:@"PodIcon"]
+                 || [cn containsString:@"Badge"] || [cn containsString:@"IconView"];
+        if (leaf) {
+            (*outCount)++;
+            // ① 内层 imageView 直接设图（SBFolderIconImageView / pod 自己的 imageView）
+            @try {
+                id icon = nil;
+                @try { icon = [sub valueForKey:@"icon"]; } @catch (NSException *e) { }
+                NSString *bid = icon ? TBBIDFromIcon(icon) : nil;
+                UIImage *th = bid.length ? TBImageForBundle(bid) : nil;
+                if (th) {
+                    if ([sub isKindOfClass:[UIImageView class]] && ((UIImageView *)sub).image != th)
+                        ((UIImageView *)sub).image = th;
+                    id iv = [sub valueForKey:@"_iconImageView"];
+                    if ([iv isKindOfClass:[UIImageView class]] && ((UIImageView *)iv).image != th)
+                        ((UIImageView *)iv).image = th;
+                }
+                // ② 缓存 + 让这一格自己重取（走读端 → 主题图）
+                SEL sCache = NSSelectorFromString(@"iconImageCache");
+                if ([sub respondsToSelector:sCache]) {
+                    id c = ((id (*)(id, SEL))objc_msgSend)(sub, sCache);
+                    if (c) TBForceClearCacheOnce(c);
+                }
+                if (icon && [icon respondsToSelector:NSSelectorFromString(@"purgeCachedImages")])
+                    ((void (*)(id, SEL))objc_msgSend)(icon, NSSelectorFromString(@"purgeCachedImages"));
+                SEL sUpd = NSSelectorFromString(@"_updateIconImageViewAnimated:");
+                if ([sub respondsToSelector:sUpd]) ((void (*)(id, SEL, BOOL))objc_msgSend)(sub, sUpd, NO);
+            } @catch (NSException *e) { }
+        }
+        TBApplyInsideContainer(sub, depth + 1, outCount);
+    }
+}
+
 static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
     NSMutableArray *views = [NSMutableArray array];
     TBEnumerateDisplayedIconViews(^(UIView *v) { if (v) [views addObject:v]; });
@@ -2158,6 +2200,14 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                     }
                 }
                 // 资源库 / 角标：它们不走 _iconImageView，让它们自己重排一次
+                if ([cn containsString:@"Dock"] || [cn containsString:@"Folder"] ||
+                    [cn containsString:@"Library"] || [cn containsString:@"Pod"]) {
+                    NSInteger leafCount = 0;
+                    TBApplyInsideContainer(v, 0, &leafCount);
+                    if (leafCount > 0)
+                        TBLogOnce([@"inside|" stringByAppendingString:cn],
+                                  @"容器内层已处理 %@：%ld 个图标视图", cn, (long)leafCount);
+                }
                 if ([cn containsString:@"Library"]) {
                     // ★ 1.15（照 sb 接管视图类）：资源库 pod 有自己的 imageView，
                     //   直接把它内部第一个 UIImageView 换成主题图（不靠刷新）
