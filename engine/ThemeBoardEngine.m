@@ -325,6 +325,8 @@ static UIImage *TBServeReadSide(id cache, id icon);   // 1.1：读端接管（�
 static UIImage *TBThemeAsset(NSString *prefix);        // 1.2：主题素材按路径找（定义在后）
 static UIImage *TBClockRoundedFace(UIImage *img);                  // 1.11（定义在后）
 static void TBResetClockFaceCache(void);                          // 1.12（定义在后）
+static void TBResetClearedCaches(void);                          // 1.14（定义在后）
+static void TBForceClearCacheOnce(id cache);                     // 1.14（定义在后）
 static void TBHealAllIconViews(void);                          // 1.9（定义在后）
 static void TBRefreshSpringBoard(NSString *why);                 // 1.9（定义在后）
 static UIImage *TBClockRoundedFace(UIImage *img);
@@ -2053,6 +2055,27 @@ static UIImage *TBGlobalForIcon(id icon, id image) {
 ///   sb：enumerateDisplayedIconViewsUsingBlock: 只"收集"，更新在枚举结束后做；
 ///   1.7 的教训是一口气同步跑完 → 主线程过载被看门狗杀。
 ///   这里：① 枚举只收集视图 ② 收集完再分批（每批 4 个、间隔 12ms）purge + 更新。
+/// ★ 1.14：清图标缓存 —— 不再依赖"图标列表"（本机那组候选选择子全为空，导致永远清不了）。
+///   改为从**活着的图标视图**上拿缓存对象（iconImageCache / folderIconImageCache），当场清。
+///   只用活对象，避免 1.6 那次 nonretainedObjectValue 野指针崩溃。
+static NSMutableSet *gClearedCaches = nil;
+
+static void TBResetClearedCaches(void) { gClearedCaches = [NSMutableSet set]; }
+
+static void TBForceClearCacheOnce(id cache) {
+    if (!cache) return;
+    @try {
+        if (!gClearedCaches) gClearedCaches = [NSMutableSet set];
+        NSValue *k = [NSValue valueWithPointer:(__bridge const void *)cache];
+        if ([gClearedCaches containsObject:k]) return;
+        [gClearedCaches addObject:k];
+        SEL s1 = NSSelectorFromString(@"_clearCachedImages");
+        SEL s2 = NSSelectorFromString(@"clearCachedImages");
+        if ([cache respondsToSelector:s1]) { ((void (*)(id, SEL))objc_msgSend)(cache, s1); TBLog(@"清缓存：已清一个图标缓存"); }
+        else if ([cache respondsToSelector:s2]) { ((void (*)(id, SEL))objc_msgSend)(cache, s2); TBLog(@"清缓存：已清一个图标缓存"); }
+    } @catch (NSException *e) { }
+}
+
 static void TBEnumerateDisplayedIconViews(void (^blk)(UIView *v)) {
     if (!blk) return;
     @try {
@@ -2109,6 +2132,7 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
     if (!views.count) { TBHealAllIconViews(); TBRefreshSpringBoard(why); return; }
 
     TBResetClockFaceCache();   // 1.12：换主题/恢复默认时表盘必须重算
+    TBResetClearedCaches();    // 1.14：本轮重新清一遍缓存
     __block NSUInteger idx = 0;
     __block void (^step)(void);
     step = ^{
@@ -2143,6 +2167,16 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                     SEL sSetNeeds = NSSelectorFromString(@"setNeedsLayout");
                     if ([v respondsToSelector:sSetNeeds]) ((void (*)(id, SEL))objc_msgSend)(v, sSetNeeds);
                 }
+                // ★ 1.14：从活着的视图上拿缓存对象并清（Dock/文件夹/资源库/时钟都吃这套缓存）
+                @try {
+                    id ivc = [v valueForKey:@"_iconImageView"];
+                    SEL sCache = NSSelectorFromString(@"iconImageCache");
+                    SEL sFCache = NSSelectorFromString(@"folderIconImageCache");
+                    if (ivc && [ivc respondsToSelector:sCache])
+                        TBForceClearCacheOnce(((id (*)(id, SEL))objc_msgSend)(ivc, sCache));
+                    if ([v respondsToSelector:sFCache])
+                        TBForceClearCacheOnce(((id (*)(id, SEL))objc_msgSend)(v, sFCache));
+                } @catch (NSException *e) { }
                 id iv = [v valueForKey:@"_iconImageView"];
                 if (iv && [iv respondsToSelector:NSSelectorFromString(@"_updateIconImageViewAnimated:")])
                     ((void (*)(id, SEL, BOOL))objc_msgSend)(iv, NSSelectorFromString(@"_updateIconImageViewAnimated:"), NO);
