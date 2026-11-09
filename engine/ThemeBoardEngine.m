@@ -321,6 +321,7 @@ static UIImage *TBResourceImage(NSString *name);
 static BOOL TBImageIsMostlyOpaque(CGImageRef cg);
 static UIImage *TBMatchSystemGeometry(UIImage *img, UIImage *sys);
 static UIImage *TBImageForBundle(NSString *bid);      // 前置：时钟判定要用
+static void TBForceLayerContents(UIView *v, UIImage *th);   // 前置：容器内层（2129 行）先用、4730 行才定义
 static UIImage *TBServeReadSide(id cache, id icon);   // 1.1：读端接管（定义在后）
 static UIImage *TBThemeAsset(NSString *prefix);        // 1.2：主题素材按路径找（定义在后）
 static UIImage *TBClockRoundedFace(UIImage *img);                  // 1.11（定义在后）
