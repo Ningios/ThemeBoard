@@ -2163,6 +2163,68 @@ static void TBApplyInsideContainer(UIView *container, int depth, NSInteger *outC
     }
 }
 
+/// ★ 1.29（照 MarkTheme 的 MTIconServiceStoreInvalidator）：系统图标缓存的正规失效入口。
+/// 我们以前用的是 refreshAllHomescreenIconsClearingCaches —— 在这台 17.2 上裸调必崩（1.5 连崩 14 次）。
+/// 这里走 iconservices 自己的服务：
+///   ① IconCacheService -initWithServiceName: + -scheduleCacheOperation:（whole cache = 2）
+///   ② 退路：ISMutableIconCache + ClearCacheOperation -run
+/// 全部带 respondsToSelector + @try，任一步失败只打日志、不影响别的逻辑。
+static NSTimeInterval gLastStorePurge = 0;
+
+static void TBInvalidateSystemIconStore(NSString *why) {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - gLastStorePurge < 3.0) {          // 3s 冷却：换主题时会有多次通知
+        TBLog(@"系统图标缓存：冷却中，跳过（%@）", why ?: @"");
+        return;
+    }
+    gLastStorePurge = now;
+    BOOL ok = NO;
+    @try {
+        Class svcCls = NSClassFromString(@"IconCacheService");
+        if (svcCls) {
+            SEL initSel = NSSelectorFromString(@"initWithServiceName:");
+            SEL schSel  = NSSelectorFromString(@"scheduleCacheOperation:");
+            id svc = nil;
+            if ([svcCls instancesRespondToSelector:initSel]) {
+                svc = ((id (*)(id, SEL, id))objc_msgSend)([svcCls alloc], initSel, @"com.apple.iconservices");
+            }
+            if (svc && [svc respondsToSelector:schSel]) {
+                ((void (*)(id, SEL, unsigned long long))objc_msgSend)(svc, schSel, 2ULL);
+                ok = YES;
+                TBLog(@"系统图标缓存：已请求 whole-cache 失效（IconCacheService，%@）", why ?: @"");
+            } else {
+                TBLog(@"系统图标缓存：IconCacheService 不可用（clsvc=%@ svc=%@）",
+                      svcCls ? @"有" : @"无", svc ? @"有" : @"无");
+            }
+        }
+    } @catch (NSException *e) { TBLog(@"系统图标缓存：IconCacheService 异常 %@", e.reason); }
+    if (ok) return;
+
+    // 退路：ISMutableIconCache + ClearCacheOperation -run
+    @try {
+        Class cacheCls = NSClassFromString(@"ISMutableIconCache");
+        Class opCls = NSClassFromString(@"ClearCacheOperation");
+        if (cacheCls && opCls) {
+            id cache = nil;
+            SEL shared = NSSelectorFromString(@"sharedInstance");
+            if ([cacheCls respondsToSelector:shared]) cache = ((id (*)(id, SEL))objc_msgSend)(cacheCls, shared);
+            if (cache) {
+                id op = [[opCls alloc] init];
+                @try { [op setValue:@(2ULL) forKey:@"operation"]; } @catch (NSException *e1) { }
+                @try { [op setValue:cache forKey:@"cache"]; } @catch (NSException *e2) { }
+                SEL run = NSSelectorFromString(@"run");
+                if ([op respondsToSelector:run]) {
+                    ((void (*)(id, SEL))objc_msgSend)(op, run);
+                    TBLog(@"系统图标缓存：已执行 ClearCacheOperation（ISMutableIconCache，%@）", why ?: @"");
+                    return;
+                }
+            }
+        }
+        TBLog(@"系统图标缓存：两条入口都不可用（cacheCls=%@ opCls=%@）",
+              cacheCls ? @"有" : @"无", opCls ? @"有" : @"无");
+    } @catch (NSException *e) { TBLog(@"系统图标缓存：ClearCacheOperation 异常 %@", e.reason); }
+}
+
 static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
     // ★★ 1.22：先把上一主题/上一次改过的图层还原（清残留），再按当前主题重新贴。
     //   恢复默认时这就等于"变回系统原图"。
@@ -5672,6 +5734,7 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
     NSArray *caches = gCaches.allObjects;
     [gLock unlock];
     TBLog(@"设置变更：重建索引，清理 %lu 个缓存", (unsigned long)caches.count);
+    TBInvalidateSystemIconStore(why);   // ★ 1.29：系统图标缓存失效（残留/恢复默认的正规入口）
 
     // 注意：缓存写入端被我们接管后，换主题必须通知图标视图重取，
     // 这一步不能受「清缓存」开关控制（之前那版会被它一票否决 → 只能重启才刷新）
