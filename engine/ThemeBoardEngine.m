@@ -2143,6 +2143,81 @@ static NSString *TBNCBidFromViewController(UIView *v, NSString **vcNameOut) {
     return nil;
 }
 
+// ---- ★ 1.42：从「内容视图」下手。视频实测 NCNotificationSeamlessContentView 有
+//   `NCBadgedIconView *_badgedIconView` 与 `-_configureBadgedIconViewIfNecessary`，
+//   并且它自己是 NCNotificationContentDisplaying（负责显示 primaryText/图片）——
+//   通知数据一定挂在它身上（或其 ivar 链上）。这里在它的 layoutSubviews 里：
+//   ① 探一次它的字符串 ivar 与对象 ivar，找出 request / sectionIdentifier
+//   ② 拿到 bid → 去 _badgedIconView._badgeViews 里换小图标（头像不动）
+static void (*o_ncsLayout)(id, SEL);
+static BOOL gNCSProbed = NO;
+
+static NSString *TBNCBidFromRequestLike(id req) {
+    if (!req) return nil;
+    for (NSString *k in @[ @"sectionIdentifier", @"_sectionIdentifier",
+                           @"bundleIdentifier", @"_bundleIdentifier" ]) {
+        id b = nil;
+        @try { b = [req valueForKey:k]; } @catch (NSException *e) { b = nil; }
+        if ([b isKindOfClass:[NSString class]] && [(NSString *)b containsString:@"."]) return b;
+    }
+    return nil;
+}
+
+static void tb_ncsLayout(id self, SEL _cmd) {
+    if (o_ncsLayout) o_ncsLayout(self, _cmd);
+    if (TBSafeMode() || !TBEnabled()) return;
+    if (![self isKindOfClass:[UIView class]]) return;
+    @try {
+        // ① 探针（前 3 次）：列出对象类 ivar，找 request
+        if (!gNCSProbed) {
+            gNCSProbed = YES;
+            NSMutableArray *found = [NSMutableArray array];
+            for (Class c = [self class]; c && c != [NSObject class]; c = class_getSuperclass(c)) {
+                unsigned int n = 0; Ivar *list = class_copyIvarList(c, &n);
+                for (unsigned int i = 0; i < n; i++) {
+                    const char *tn = ivar_getTypeEncoding(list[i]);
+                    const char *nm = ivar_getName(list[i]);
+                    if (!tn || tn[0] != '@' || !nm) continue;
+                    id v = nil;
+                    @try { v = [self valueForKey:[NSString stringWithUTF8String:nm]]; } @catch (NSException *ex) { v = nil; }
+                    if (!v) continue;
+                    NSString *cn2 = NSStringFromClass([v class]);
+                    NSString *b2 = TBNCBidFromRequestLike(v);
+                    [found addObject:[NSString stringWithFormat:@"%s:<%@>%@", nm, cn2, b2 ? [@" bid=" stringByAppendingString:b2] : @""]];
+                }
+                if (list) free(list);
+            }
+            TBLog(@"NC 内容视图 ivar：%@", [found componentsJoinedByString:@" | "]);
+        }
+        // ② bid
+        NSString *bid = nil;
+        for (NSString *k in @[ @"notificationRequest", @"_notificationRequest", @"request", @"_request" ]) {
+            id rv = nil;
+            @try { rv = [self valueForKey:k]; } @catch (NSException *e) { rv = nil; }
+            bid = TBNCBidFromRequestLike(rv);
+            if (bid.length) break;
+        }
+        if (!bid.length) return;
+        UIImage *th = TBImageForBundle(bid);
+        if (!th) return;
+        id badged = nil;
+        @try { badged = [self valueForKey:@"_badgedIconView"]; } @catch (NSException *e) { badged = nil; }
+        UIView *container = [badged isKindOfClass:[UIView class]] ? (UIView *)badged : (UIView *)self;
+        NSArray *bvs = nil;
+        @try { id v = [container valueForKey:@"_badgeViews"]; if ([v isKindOfClass:[NSArray class]]) bvs = v; }
+        @catch (NSException *e2) { bvs = nil; }
+        if (!bvs.count) { UIView *bb = TBNCFindBadgeView(container, 0); if (bb) bvs = @[bb]; }
+        for (UIView *bv in bvs) {
+            UIImageView *iv = TBNCFindImageView(bv, 0);
+            if (iv && iv.image != th) {
+                iv.image = th;
+                iv.contentMode = UIViewContentModeScaleAspectFit;
+                TBLogOnce([@"ncb2|" stringByAppendingString:bid], @"NC 小图标已换 %@（内容视图）", bid);
+            }
+        }
+    } @catch (NSException *e) { }
+}
+
 static void tb_ncbLayout(id self, SEL _cmd) {
     if (o_ncbLayout) o_ncbLayout(self, _cmd);
     if (TBSafeMode() || !TBEnabled()) return;
@@ -5067,6 +5142,13 @@ static void TBInstall(void) {
                 TBLog(@"通知中心：已挂 NCNotificationRequest -content（用于取 bundleID）");
             } else {
                 TBLog(@"通知中心：NCNotificationRequest 无 content 方法");
+            }
+            Class ncsCls = NSClassFromString(@"NCNotificationSeamlessContentView");
+            if (ncsCls && TBHasMethod(ncsCls, @"layoutSubviews")) {
+                o_ncsLayout = (void (*)(id, SEL))TBHook(ncsCls, @"layoutSubviews", (IMP)tb_ncsLayout, "NC 内容视图");
+                TBLog(@"通知中心：已挂 NCNotificationSeamlessContentView -layoutSubviews");
+            } else {
+                TBLog(@"通知中心：NCNotificationSeamlessContentView 不存在或没有 layoutSubviews");
             }
             Class ncbCls = NSClassFromString(@"NCBadgedIconView");
             if (ncbCls && TBHasMethod(ncbCls, @"layoutSubviews")) {
