@@ -2224,10 +2224,17 @@ static void TBUpdateDisplayedIconViewsAsync(NSString *why) {
                         if ([cn containsString:@"Folder"]) {
                             id fic = nil;
                             @try { fic = [v valueForKey:@"icon"]; } @catch (NSException *ef) { fic = nil; }
+                            // ★ 1.27：先清文件夹图标自己的缓存，再请求重建（顺序反了就重建到旧图）
+                            @try {
+                                SEL sPurge = NSSelectorFromString(@"purgeCachedImages");
+                                if (fic && [fic respondsToSelector:sPurge])
+                                    ((void (*)(id, SEL))objc_msgSend)(fic, sPurge);
+                            } @catch (NSException *ep) { }
                             SEL sRb = NSSelectorFromString(@"rebuildImagesForFolderIcon:");
                             SEL sRb2 = NSSelectorFromString(@"rebuildImages");
                             BOOL did = NO;
                             if (fic && [v respondsToSelector:sRb]) { ((void (*)(id, SEL, id))objc_msgSend)(v, sRb, fic); did = YES; }
+                            if (!did && fic && [fic respondsToSelector:sRb]) { ((void (*)(id, SEL, id))objc_msgSend)(fic, sRb, fic); did = YES; }
                             if (!did && [v respondsToSelector:sRb2]) { ((void (*)(id, SEL))objc_msgSend)(v, sRb2); did = YES; }
                             if (!did) {
                                 id fiv = nil;
@@ -5625,6 +5632,12 @@ static void TBRunReload(NSUInteger mySeq, NSString *why) {
             return;
         }
     }
+    // ★ 1.27：角标重排独立排程，不受 mySeq 守卫影响。
+    //   日志实证：一次应用里「角标替换：已换底板（1 处）」之后就是「还原 17 处」，
+    //   之后再没有贴过 —— 因为 0.6s 那趟重排挂在 mySeq 守卫里，
+    //   被合并掉的刷新直接把那段 return 掉了。这里单独排，函数仍是 1.0 原版。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ TBBadgeRelayoutVisible(); });
     // ★★ 1.24：先把自己改过的图层全部还原成系统原图。
     //   放在重活入口（而不是分批更新里）——「取消应用/恢复默认」那条路不一定走到分批更新，
     //   这就是"恢复默认不跟着还原"的原因。
