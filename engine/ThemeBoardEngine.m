@@ -2093,6 +2093,31 @@ static UIImageView *TBNCFindImageView(UIView *v, int depth) {
     return nil;
 }
 
+static UIView *TBNCFindBadgeView(UIView *v, int depth) {
+    if (!v || depth > 3) return nil;
+    if ([NSStringFromClass([v class]) rangeOfString:@"BrandingBadge"].location != NSNotFound) return v;
+    for (UIView *k in [v subviews]) { UIView *r = TBNCFindBadgeView(k, depth + 1); if (r) return r; }
+    return nil;
+}
+
+/// 从视图往上找通知请求（身份在 request 上，1.35/1.37 实证都不在 content/图标视图上）
+static NSString *TBNCBidFromView(UIView *v) {
+    UIView *p = v;
+    for (int i = 0; i < 10 && p; i++, p = p.superview) {
+        for (NSString *k in @[ @"notificationRequest", @"_notificationRequest", @"request", @"_request" ]) {
+            id r = nil;
+            @try { r = [p valueForKey:k]; } @catch (NSException *e) { r = nil; }
+            if (!r) continue;
+            for (NSString *k2 in @[ @"sectionIdentifier", @"_sectionIdentifier", @"bundleIdentifier", @"_bundleIdentifier" ]) {
+                id b = nil;
+                @try { b = [r valueForKey:k2]; } @catch (NSException *e2) { b = nil; }
+                if ([b isKindOfClass:[NSString class]] && [(NSString *)b containsString:@"."]) return b;
+            }
+        }
+    }
+    return nil;
+}
+
 static void tb_ncbLayout(id self, SEL _cmd) {
     if (o_ncbLayout) o_ncbLayout(self, _cmd);
     if (TBSafeMode() || !TBEnabled()) return;
@@ -2109,6 +2134,7 @@ static void tb_ncbLayout(id self, SEL _cmd) {
                 } @catch (NSException *ek) { }
             }
         }
+        if (!bid.length) bid = TBNCBidFromView((UIView *)self);
         UIView *avatar = nil, *badge = nil;
         for (UIView *v in [(UIView *)self subviews]) {
             NSString *cn = NSStringFromClass([v class]);
@@ -2154,15 +2180,40 @@ static void tb_ncbLayout(id self, SEL _cmd) {
         }
         UIImage *th = bid.length ? TBImageForBundle(bid) : nil;
         if (!th) return;
-        if (badge) {
-            UIImageView *iv = TBNCFindImageView(badge, 0);
-            if (iv && iv.image != th) { iv.image = th; iv.contentMode = UIViewContentModeScaleAspectFit;
-                TBLogOnce([@"ncb|" stringByAppendingString:bid], @"NC 小图标已换 %@", bid); }
-        } else if (avatar) {
-            UIImageView *iv = TBNCFindImageView(avatar, 0);
-            if (iv && iv.image != th) { iv.image = th;
-                TBLogOnce([@"nca|" stringByAppendingString:bid], @"NC 大图已换 %@", bid); }
+        // ★ 1.39：普通通知的大图已由数据层（icons + request 关联）换好。
+        //   这里只处理「带头像」的那种：右下角小 App 图标（NCImageBrandingBadge）。
+        // ★ 1.39：日志实证 NCBadgedIconView 有 ivar _badgeViews（普通通知为 nil，
+        //   带头像的那种才会有内容）。优先按 _badgeViews 拿，取不到再按类名递归找。
+        NSArray *bvs = nil;
+        @try { id v = [self valueForKey:@"_badgeViews"]; if ([v isKindOfClass:[NSArray class]]) bvs = v; }
+        @catch (NSException *ebv) { bvs = nil; }
+        static int sBV = 0;
+        if (bvs.count && sBV < 4) { sBV++; TBLog(@"NC _badgeViews=%lu 首个=%@",
+                                                 (unsigned long)bvs.count,
+                                                 NSStringFromClass([bvs.firstObject class])); }
+        BOOL did = NO;
+        if (bvs.count) {
+            for (UIView *bv in bvs) {
+                UIImageView *iv = TBNCFindImageView(bv, 0);
+                if (iv && iv.image != th) {
+                    iv.image = th;
+                    iv.contentMode = UIViewContentModeScaleAspectFit;
+                    did = YES;
+                }
+            }
         }
+        if (!did) {
+            UIView *bb = TBNCFindBadgeView((UIView *)self, 0);
+            if (bb) {
+                UIImageView *iv = TBNCFindImageView(bb, 0);
+                if (iv && iv.image != th) {
+                    iv.image = th;
+                    iv.contentMode = UIViewContentModeScaleAspectFit;
+                    did = YES;
+                }
+            }
+        }
+        if (did) TBLogOnce([@"ncb|" stringByAppendingString:bid], @"NC 小图标已换 %@", bid);
     } @catch (NSException *e) { }
 }
 
